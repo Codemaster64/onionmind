@@ -336,8 +336,9 @@ can't catch prompt text.
 | Print/editor packages resolve; cupsd runs; nft main+print rules load in order | ✅ `validate-print.sh` |
 | `onionmind-status` reports every branch honestly on a degraded box | ✅ `validate-status.sh` |
 | All of the above, on every push | CI: `.github/workflows/usb-tests.yml` |
-| **Full `lb build` produces an ISO** | ✅ 4b tier, 5.5GB, Aug 2026 — DKMS NVIDIA module compiled in-chroot, hooks ran, blob GC fired, single-copy store confirmed inside the artifact |
-| Boot-menu entries in the final ISO | ✅ syslinux + grub print/debug entries verified in the shipped image (build #2, after fixing the hook's CWD assumption) |
+| **Full `lb build` produces an ISO** | ✅ 4b (5.5GB) and 12gb (16GB) tiers — DKMS NVIDIA module compiled in-chroot, hooks ran, single-copy stores confirmed inside both artifacts |
+| 12gb vision bake | ✅ both manifests (`qwen38-uncensored`, `-vision`) in the image; blobs deduplicated to one 11.7GB base + one 885MB projector shared by both models |
+| Boot-menu entries in the final ISO | ✅ syslinux + grub print/debug entries verified in both shipped images (after fixing the hook's CWD assumption in build #1) |
 | **Boots on real hardware; driver loads; firewall order holds** | ❌ first boot is yours |
 
 The two validation scripts are in `usb/tests/` and re-runnable via the docker
