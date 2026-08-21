@@ -169,8 +169,9 @@ decision; the rest is detail.
 
 ### The live USB — having it both ways
 
-`usb/` in this repo builds a Debian live image that keeps the anonymity half of that bargain
-and pays for the model half with the host's *hardware* instead of its disk: NVIDIA driver,
+`usb/` in this repo builds **Onionmind Matchstick**, a Debian live image that keeps the
+anonymity half of that bargain and pays for the model half with the host's *hardware*
+instead of its disk: NVIDIA driver,
 Ollama and the weights baked into the stick, tor daemon, an nftables ruleset where **tor is
 the only process allowed off the box**, fresh MAC per boot, RAM-only overlay, internal disk
 never mounted. Boot any machine, use its GPU/CPU/RAM, power off — nothing happened. It is
@@ -360,7 +361,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |
 | `onionmind.ico` | The mark as Windows icon (16–256px), rendered from `logo.svg`. Regenerate: `rsvg-convert` each size + `convert` them into an ico (see `build.py`), then run `python build.py` to re-inject into the installers. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
-| `usb/` | Live-USB build kit — Tails-style amnesia + the host machine's GPU. See `usb/README.md`. |
+| `usb/` | **Matchstick** — the live-USB build kit: Tails-style amnesia + the host machine's GPU. See `usb/README.md`. |
 
 ## What has been verified
 

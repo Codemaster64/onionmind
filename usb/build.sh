@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Onionmind live USB image: Tails-style amnesia, host-machine GPU.
+# Builds "Onionmind Matchstick" - the live USB: Tails-style amnesia, host-machine GPU.
 #
 #   sudo ./usb/build.sh 12gb                  # Debian trixie+ with live-build
 #
@@ -19,6 +19,7 @@
 #   4b      2.5GB  Qwen3.5-4B            no vision -> 16GB+ stick
 #
 # env overrides: OLLAMA_URL (pin an ollama release), NUM_GPU (default 99),
+#   ROCM=0 (drop AMD/ROCm support, saves ~1GB),
 #   ONIONMIND_BRIDGES - obfs4 bridge line(s), semicolon- or newline-separated,
 #   baked into torrc so the stick hides that it uses Tor at all:
 #   ONIONMIND_BRIDGES="obfs4 1.2.3.4:9130 cert=abc iat-mode=0" ./usb/build.sh 12gb
@@ -36,6 +37,10 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="$ROOT/usb/cache"; OUT="$ROOT/usb/out"; WORK="$ROOT/usb/build"
 OLLAMA_URL="${OLLAMA_URL:-https://ollama.com/download/ollama-linux-amd64.tar.zst}"
+# AMD compute. The base tarball is CUDA-only (16 cuda libs, 0 rocm), so without
+# this an AMD card falls back to CPU. Costs ~1GB of image; ROCM=0 to drop it.
+ROCM="${ROCM:-1}"
+ROCM_URL="${ROCM_URL:-https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst}"
 NUM_GPU="${NUM_GPU:-99}"
 mkdir -p "$CACHE" "$OUT"
 
@@ -71,6 +76,7 @@ fetch() {  # url dest
   curl -L -C - --fail --noproxy '*' -o "$2" "$1"
 }
 fetch "$OLLAMA_URL"                                              "$CACHE/ollama-linux-amd64.tar.zst"
+[ "$ROCM" = 1 ] && fetch "$ROCM_URL"                             "$CACHE/ollama-linux-amd64-rocm.tar.zst"
 fetch "https://huggingface.co/$REPO/resolve/main/$FILE"          "$CACHE/$FILE"
 [ "$VISION" = 1 ] && fetch "https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$VISION_FILE" "$CACHE/$VISION_FILE"
 
@@ -87,8 +93,8 @@ lb config \
   --memtest none \
   --chroot-squashfs-compression-type zstd \
   --firmware-chroot true \
-  --iso-application "Onionmind Live" \
-  --iso-volume "ONIONMIND" \
+  --iso-application "Onionmind Matchstick" \
+  --iso-volume "MATCHSTICK" \
   --bootappend-live "boot=live components hostname=onionmind username=onion"
 
 # --- 4. payloads + generated files into the chroot ---------------------------
@@ -96,6 +102,7 @@ INC=config/includes.chroot
 say "staging payloads"
 mkdir -p "$INC/usr/lib/onionmind/payload" "$INC/usr/lib/onionmind/weights"
 cp "$CACHE/ollama-linux-amd64.tar.zst" "$INC/usr/lib/onionmind/payload/"
+[ "$ROCM" = 1 ] && cp "$CACHE/ollama-linux-amd64-rocm.tar.zst" "$INC/usr/lib/onionmind/payload/"
 cp "$CACHE/$FILE"                       "$INC/usr/lib/onionmind/weights/"
 [ "$VISION" = 1 ] && cp "$CACHE/$VISION_FILE" "$INC/usr/lib/onionmind/weights/"
 
@@ -155,7 +162,7 @@ chmod 440 "$INC/etc/sudoers.d/onion"
 # --- 5. build -----------------------------------------------------------------
 say "building the image (the squashfs over ~10GB of weights is the slow part - expect an hour+)"
 lb build
-ISO="$OUT/onionmind-${TIER}-live-amd64.iso"
+ISO="$OUT/onionmind-matchstick-${TIER}-amd64.iso"
 mv live-image-amd64.hybrid.iso "$ISO"
 (cd "$OUT" && sha256sum "$(basename "$ISO")" > "$(basename "$ISO").sha256")
 

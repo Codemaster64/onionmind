@@ -4,6 +4,13 @@ set -e
 
 echo "== onionmind: install ollama from the pinned tarball =="
 tar -C /usr --zstd -xf /usr/lib/onionmind/payload/ollama-linux-amd64.tar.zst
+# ROCm unpacks over the SAME prefix, adding lib/ollama/rocm/. ollama picks the
+# backend at runtime from the hardware it finds, so no boot-time selection is
+# needed - an NVIDIA box ignores these files entirely.
+if [ -f /usr/lib/onionmind/payload/ollama-linux-amd64-rocm.tar.zst ]; then
+  echo "== onionmind: adding ROCm (AMD compute) =="
+  tar -C /usr --zstd -xf /usr/lib/onionmind/payload/ollama-linux-amd64-rocm.tar.zst
+fi
 rm -rf /usr/lib/onionmind/payload
 chmod 755 /usr/bin/ollama
 

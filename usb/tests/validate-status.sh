@@ -26,4 +26,16 @@ printf '%s\n' "$out" | grep -q "running on CPU"    && echo "gpu:   honest withou
 printf '%s\n' "$out" | grep -qE "no swap|swap is ON" && echo "disk:  swap state reported"
 printf '%s\n' "$out" | grep -qE "randomized|WARNING" \
   && echo "mac:   checked" || echo "mac:   silent (no active NICs in container - covered by validate-fixes)"
+
+# --- GPU branches -------------------------------------------------------------
+# A container cannot fake /sys, so the script takes ONIONMIND_ROOT as a prefix for
+# its GPU probes (empty on the real system). Without this, an AMD box with working
+# ROCm would still have printed "none visible - running on CPU".
+mkdir -p /tmp/amd/sys/module/amdgpu
+ONIONMIND_ROOT=/tmp/amd sh /usr/local/sbin/onionmind-status 2>&1 |
+  grep -q "no ROCm in this image" && echo "gpu:   AMD without ROCm is honest"
+mkdir -p /tmp/amd/usr/lib/ollama/rocm
+ONIONMIND_ROOT=/tmp/amd sh /usr/local/sbin/onionmind-status 2>&1 |
+  grep -q "ROCm present" && echo "gpu:   AMD with ROCm detected"
+
 echo DONE_STATUS_OK

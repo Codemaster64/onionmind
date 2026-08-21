@@ -18,11 +18,15 @@ ca-certificates
 # Secure Boot must be OFF on the target machine (the module is unsigned).
 # trixie ships driver 550 (measured Aug 2026): Maxwell (GTX 900) through RTX 40.
 # RTX 50-series needs a newer driver - add trixie-backports to the image and
-# swap this for the backported nvidia-driver. Older/AMD/Intel GPUs: CPU inference.
+# swap this for the backported nvidia-driver. Intel/older GPUs: CPU inference.
+# AMD is handled via ROCm below, not here.
 nvidia-driver
 linux-headers-amd64
 firmware-misc-nonfree
 firmware-linux
+# AMD: amdgpu is in-kernel, but the compute stack needs the firmware blobs.
+# Pairs with the ROCm tarball in the payload (ROCM=0 at build time drops both).
+firmware-amd-graphics
 intel-microcode
 amd64-microcode
 

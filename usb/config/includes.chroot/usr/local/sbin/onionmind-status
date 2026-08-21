@@ -45,8 +45,18 @@ else
   echo "[model]  server not answering on 11434 yet"
 fi
 
+R="${ONIONMIND_ROOT:-}"   # test seam: prefix for GPU probes, empty on the real system
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   echo "[gpu]    $(nvidia-smi -L | head -1)"
+elif [ -d "$R/sys/module/amdgpu" ]; then
+  # amdgpu is in-kernel so the module loading proves the card is bound; whether
+  # ollama can COMPUTE on it depends on the ROCm payload being in the image.
+  _amd="$(cat "$R"/sys/class/drm/card*/device/product_name 2>/dev/null | head -1)"
+  if [ -d "$R/usr/lib/ollama/rocm" ]; then
+    echo "[gpu]    AMD ${_amd:-GPU} (ROCm present)"
+  else
+    echo "[gpu]    AMD ${_amd:-GPU} - no ROCm in this image, running on CPU"
+  fi
 else
   echo "[gpu]    none visible - running on CPU"
 fi

@@ -1,4 +1,4 @@
-# Onionmind live USB — Tails' amnesia, your model, the host machine's GPU
+# Onionmind Matchstick — Tails' amnesia, your model, the host machine's GPU
 
 A bootable USB that runs the whole Onionmind stack from the stick: boot any
 machine off it, use **that machine's GPU/CPU/RAM** for inference, touch
@@ -7,6 +7,10 @@ built with Debian `live-build`, not by modifying Tails — Tails itself cannot
 run this (no NVIDIA driver, no CUDA, and its amnesia would mean re-downloading
 16GB of weights over Tor every boot). This is the same *mechanics* — live
 boot, RAM-only overlay, network forced through Tor — with the model added.
+
+The name is the shape of the thing, like Onionmind's is: strike a matchstick
+on any machine, it burns bright on that machine's GPU, and when it's done
+there's nothing but ash — the session leaves no residue.
 
 ## What the stick enforces
 
@@ -144,7 +148,7 @@ stick can't see the target's VRAM; you decide once:
 | `9b` | 5.2 GB | Qwen3.5-9B | no | 16GB |
 | `4b` | 2.5 GB | Qwen3.5-4B | no | 16GB |
 
-Output lands in `usb/out/onionmind-<tier>-live-amd64.iso` with a `.sha256`.
+Output lands in `usb/out/onionmind-matchstick-<tier>-amd64.iso` with a `.sha256`.
 
 Pin a specific ollama with `OLLAMA_URL=<release-tarball-url>`; change GPU
 offload with `NUM_GPU=56` (same trade-offs as the main README).

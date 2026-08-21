@@ -2,11 +2,15 @@
 # The console: status banner, wait for the model server, then the search agent.
 . /usr/local/lib/onionmind/env
 echo
-echo "            Onionmind live - $TIER build"
+echo "            Onionmind Matchstick - $TIER tier"
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   nvidia-smi -L | head -1
+elif [ -d /sys/module/amdgpu ] && [ -d /usr/lib/ollama/rocm ]; then
+  echo "  AMD GPU via ROCm"
+elif [ -d /sys/module/amdgpu ]; then
+  echo "  AMD GPU present but this image has no ROCm - inference on CPU"
 else
-  echo "  no NVIDIA GPU visible - inference will run on CPU (slow on big tiers)"
+  echo "  no GPU visible - inference will run on CPU (slow on big tiers)"
 fi
 echo "  model:     $MODEL_NAME"
 echo "  firewall:  $(grep -qw onionmind.openfw /proc/cmdline && echo OPEN-debug || echo 'tor only')"
