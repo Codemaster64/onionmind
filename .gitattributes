@@ -1,3 +1,10 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.ps1 text eol=crlf
+
+# the live-USB kit runs on Linux only - extensionless hooks, units and
+# helpers must never check out with CRLF, regardless of platform autocrlf
+usb/** text eol=lf
+*.service text eol=lf
+*.hook.chroot text eol=lf
+*.hook.binary text eol=lf
