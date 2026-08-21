@@ -1,0 +1,13 @@
+[Unit]
+Description=Onionmind: verify MAC randomization actually happened
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+# give NetworkManager time to bring interfaces up before judging them
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/local/lib/onionmind/check-mac.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Add bridges at the console and restart tor:
+#   sudo onionmind-bridges "obfs4 1.2.3.4:9130 cert=abc iat-mode=0"
+# Lives in RAM only - gone at power-off like everything else here.
+set -e
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+[ $# -ge 1 ] || { echo "usage: onionmind-bridges <obfs4-bridge-line> [more...]" >&2; exit 2; }
+f=/etc/tor/torrc.d/onionmind.conf
+{
+  echo ""
+  echo "# added at the console"
+  echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"
+  echo "UseBridges 1"
+  for b in "$@"; do echo "Bridge $b"; done
+} >> "$f"
+systemctl restart tor@default.service
+echo "tor restarting with bridges. Bootstrap: journalctl -u tor@default -f"

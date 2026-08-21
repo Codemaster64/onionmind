@@ -1,0 +1,56 @@
+name: usb kit
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: syntax (shell + python)
+        run: |
+          bash -n usb/build.sh
+          find usb/config usb/tests -type f \( -name '*.sh' \
+            -o -name '*.hook.chroot' -o -name '*.hook.binary' \
+            -o -name 'onionmind*' -o -name 'link-store.sh' \) \
+            -exec sh -n {} \;
+          python -m py_compile onionmind.py
+
+      - name: live-build flags + package names (trixie)
+        run: docker run --rm -v "$PWD/usb/tests:/t" debian:trixie sh /t/validate-live-build.sh
+
+      - name: ollama bake + blob GC + read-only store
+        run: |
+          mkdir -p usb/cache
+          curl -L --fail -o usb/cache/ollama-linux-amd64.tar.zst \
+            https://ollama.com/download/ollama-linux-amd64.tar.zst
+          curl -L --fail -o usb/cache/Qwen3-0.6B.Q4_K_M.gguf \
+            "https://huggingface.co/mradermacher/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B.Q4_K_M.gguf"
+          docker run --rm --privileged \
+            -v "$PWD/usb/cache:/cache" -v "$PWD/usb/tests:/t" \
+            debian:trixie sh /t/validate-ollama-bake.sh
+
+      - name: privacy fixes (mac check, ram scrub, bridges)
+        run: docker run --rm --privileged \
+          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+          debian:trixie sh /t/validate-fixes.sh
+
+      - name: print + editors
+        run: docker run --rm --privileged \
+          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+          debian:trixie sh /t/validate-print.sh
+
+      - name: status script (every branch, degraded box)
+        run: docker run --rm \
+          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+          debian:trixie sh /t/validate-status.sh
+
+      # Network-dependent: tor bootstrap from a CI runner is usually fine but
+      # not guaranteed - a flake here must not fail the kit.
+      - name: clock over tor (network-dependent)
+        continue-on-error: true
+        run: docker run --rm \
+          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+          debian:trixie bash /t/validate-clock.sh

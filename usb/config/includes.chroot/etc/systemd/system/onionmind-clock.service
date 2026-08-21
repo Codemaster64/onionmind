@@ -1,0 +1,12 @@
+[Unit]
+Description=Onionmind: set the clock over Tor (Tails' htpdate pattern)
+After=tor@default.service NetworkManager.service
+Wants=tor@default.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/onionmind/set-clock-over-tor.sh
+TimeoutStartSec=360
+
+[Install]
+WantedBy=multi-user.target

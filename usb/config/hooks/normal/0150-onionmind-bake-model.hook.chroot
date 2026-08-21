@@ -1,0 +1,52 @@
+#!/bin/sh
+# Bake the model into the image at BUILD time, so the booted machine never
+# registers, hashes or copies weights - on a live system a runtime copy would
+# land in tmpfs and eat the machine's RAM.
+set -e
+. /usr/local/lib/onionmind/env
+
+export OLLAMA_MODELS=/usr/lib/onionmind/models OLLAMA_HOST=127.0.0.1:11434 HOME=/root
+/usr/bin/ollama serve >/tmp/bake-ollama.log 2>&1 &
+SRV=$!
+for i in $(seq 1 60); do
+  curl -sf --noproxy '*' -m 2 http://127.0.0.1:11434/api/version >/dev/null && break
+  sleep 1
+done
+curl -sf --noproxy '*' -m 2 http://127.0.0.1:11434/api/version >/dev/null || {
+  echo "ollama did not start inside the chroot:"; tail -20 /tmp/bake-ollama.log; exit 1;
+}
+
+ollama create "$MODEL_NAME" -f /usr/local/lib/onionmind/Modelfile
+if [ "$VISION" = 1 ]; then
+  ollama create "$MODEL_NAME-vision" -f /usr/local/lib/onionmind/Modelfile.vision
+fi
+kill "$SRV"; sleep 2
+
+# `ollama create` keeps BOTH the raw GGUF blob and its converted layer - the
+# same bytes twice (measured: two 484MB blobs for one 484MB GGUF). On a stick
+# that doubles the weights, so drop every blob the manifests don't reference.
+python3 - <<'PY'
+import json, glob, os
+root = "/usr/lib/onionmind/models"
+keep = set()
+for m in glob.glob(root + "/manifests/**/*", recursive=True):
+    if not os.path.isfile(m):
+        continue
+    d = json.load(open(m))
+    keep.add(d["config"]["digest"].split(":")[1])
+    keep.update(l["digest"].split(":")[1] for l in d.get("layers", []))
+for b in glob.glob(root + "/blobs/sha256-*"):
+    if os.path.basename(b).split("-", 1)[1] not in keep:
+        print(f"GC unreferenced blob: {os.path.basename(b)}")
+        os.unlink(b)
+print(f"referenced: {len(keep)} blobs kept")
+PY
+
+rm -rf /usr/lib/onionmind/weights   # the store now holds the weights; don't ship both
+
+# Every stick sharing one id key would be one shared identity; drop it. Ollama
+# regenerates it at boot into its writable /run store.
+find /usr/lib/onionmind/models /root -name 'id_ed25519*' -delete 2>/dev/null || true
+
+echo "== baked store =="
+du -sh /usr/lib/onionmind/models

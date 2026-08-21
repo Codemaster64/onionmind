@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"
+     fill="none" stroke="currentColor" role="img" aria-label="Onionmind">
+  <!-- Onion cross-section: each ring is both an onion layer and a Tor hop.
+       The gaps rotate inward, tracing a route through the layers to the core. -->
+  <g stroke-width="7" stroke-linecap="round">
+    <circle cx="64" cy="64" r="52" stroke-dasharray="290.4 36.3" transform="rotate(-104 64 64)" opacity=".35"/>
+    <circle cx="64" cy="64" r="40" stroke-dasharray="223.4 27.9" transform="rotate(-32 64 64)"  opacity=".55"/>
+    <circle cx="64" cy="64" r="28" stroke-dasharray="156.4 19.5" transform="rotate(40 64 64)"   opacity=".78"/>
+    <circle cx="64" cy="64" r="16" stroke-dasharray="89.3 11.2"  transform="rotate(112 64 64)"/>
+  </g>
+  <!-- the mind at the centre: local, and the only thing that never leaves -->
+  <circle cx="64" cy="64" r="6" fill="currentColor" stroke="none"/>
+</svg>

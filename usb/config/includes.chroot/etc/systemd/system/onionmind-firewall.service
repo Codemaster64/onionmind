@@ -1,0 +1,13 @@
+[Unit]
+Description=Onionmind: fail-closed firewall (only tor may leave)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/onionmind-firewall
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+#!/bin/sh
+# One glance: is everything that's supposed to protect this session actually
+# protecting it? Every line here checks the LIVE state, not the config -
+# the difference between "should be" and "is".
+. /usr/local/lib/onionmind/env 2>/dev/null || true
+
+if [ "$(id -u)" = 0 ]; then
+  rules=$(nft list ruleset 2>/dev/null)
+  if printf '%s' "$rules" | grep -q 'skuid debian-tor'; then
+    extra=""
+    printf '%s' "$rules" | grep -q 'dport 631' && extra=" (+ print exception)"
+    echo "[fw]     fail-closed: only tor/DHCP/loopback can leave$extra"
+  else
+    echo "[fw]     !! NOT fail-closed - ruleset missing or flushed"
+  fi
+  if grep -qw onionmind.openfw /proc/cmdline; then
+    echo "[fw]     !! onionmind.openfw is ACTIVE - this is a debug session"
+  fi
+else
+  echo "[fw]     (run with sudo to check the firewall)"
+fi
+
+r=$(curl -sf --max-time 12 --socks5-hostname 127.0.0.1:9050 \
+      https://check.torproject.org/api/ip 2>/dev/null)
+if printf '%s' "$r" | grep -q '"IsTor":true'; then
+  ip=$(printf '%s' "$r" | sed -n 's/.*"IP":"\([^"]*\)".*/\1/p')
+  echo "[tor]    circuit verified, exit $ip"
+else
+  echo "[tor]    no verified circuit - bootstrapping, or bridges needed"
+fi
+grep -q '^UseBridges 1' /etc/tor/torrc.d/onionmind.conf 2>/dev/null \
+  && echo "[tor]    bridges in use"
+
+/usr/local/lib/onionmind/check-mac.sh 2>/dev/null
+
+ps=$(curl -sf --noproxy '*' --max-time 5 http://127.0.0.1:11434/api/ps 2>/dev/null)
+if [ -n "$ps" ]; then
+  loaded=$(printf '%s' "$ps" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
+  if [ -n "$loaded" ]; then
+    echo "[model]  loaded: $loaded"
+  else
+    echo "[model]  server up - nothing loaded yet (the first question loads it)"
+  fi
+else
+  echo "[model]  server not answering on 11434 yet"
+fi
+
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  echo "[gpu]    $(nvidia-smi -L | head -1)"
+else
+  echo "[gpu]    none visible - running on CPU"
+fi
+
+if [ -n "$(swapon --show 2>/dev/null)" ]; then
+  echo "[disk]   !! swap is ON - RAM pages can hit a disk"
+else
+  echo "[disk]   no swap; system runs from RAM overlay"
+fi
+echo "[time]   $(date -u '+%Y-%m-%d %H:%M UTC')"

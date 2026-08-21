@@ -1,0 +1,7 @@
+# A fresh random MAC on every boot - same logic as Tails: the LAN you boot on
+# must not be able to link two sessions to one physical device.
+[Match]
+OriginalName=en* wl*
+
+[Link]
+MACAddressPolicy=random

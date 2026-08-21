@@ -1,0 +1,25 @@
+#!/bin/sh
+# The console: status banner, wait for the model server, then the search agent.
+. /usr/local/lib/onionmind/env
+echo
+echo "            Onionmind live - $TIER build"
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  nvidia-smi -L | head -1
+else
+  echo "  no NVIDIA GPU visible - inference will run on CPU (slow on big tiers)"
+fi
+echo "  model:     $MODEL_NAME"
+echo "  firewall:  $(grep -qw onionmind.openfw /proc/cmdline && echo OPEN-debug || echo 'tor only')"
+echo "  amnesia:   everything lives in RAM and dies at power-off"
+echo "  disks:     the internal disk is never mounted"
+echo
+echo "  alt-F2 shell | sudo nmtui (Wi-Fi) | bridges: onionmind-bridges"
+echo "  editors: micro / nano | print: sudo onionmind-print <file> (see docs)"
+echo "  check: sudo onionmind-status | panic: sudo onionmind-panic"
+echo
+echo "  waiting for the model server..."
+for i in $(seq 1 120); do
+  curl -sf --noproxy '*' -m 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1 && break
+  sleep 2
+done
+exec /usr/bin/python3 /usr/local/lib/onionmind/onionmind.py

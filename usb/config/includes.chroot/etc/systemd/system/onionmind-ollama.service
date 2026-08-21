@@ -1,0 +1,15 @@
+[Unit]
+Description=Onionmind: ollama server (loopback only, models from the stick)
+Requires=onionmind-prepare-models.service
+After=onionmind-prepare-models.service
+
+[Service]
+Environment=OLLAMA_MODELS=/run/onionmind-models
+Environment=OLLAMA_HOST=127.0.0.1:11434
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+ExecStart=/usr/bin/ollama serve
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

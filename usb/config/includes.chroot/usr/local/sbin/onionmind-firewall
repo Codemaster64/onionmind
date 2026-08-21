@@ -1,0 +1,19 @@
+#!/bin/sh
+# Loads the fail-closed ruleset before the network comes up.
+# Escape hatch for debugging: add `onionmind.openfw` to the kernel cmdline at
+# the boot menu (Tab on BIOS, `e` on UEFI) and the ruleset is flushed instead.
+swapoff -a 2>/dev/null || true   # never let RAM pages hit a host swap partition
+if grep -qw onionmind.openfw /proc/cmdline; then
+  echo "[onionmind] firewall OPEN (onionmind.openfw on cmdline) - debugging only"
+  nft flush ruleset
+  exit 0
+fi
+nft -f /usr/local/lib/onionmind/nftables.conf
+echo "[onionmind] firewall up: only tor, DHCP and loopback can leave"
+# Printing is opt-in: network printer discovery punches a narrow hole, so it
+# only happens when the user asked for it at the boot menu. USB printers
+# never need this.
+if grep -qw onionmind.print /proc/cmdline; then
+  nft -f /usr/local/lib/onionmind/nftables-print.conf
+  echo "[onionmind] print exception loaded: mDNS/IPP/SNMP to the LAN only"
+fi

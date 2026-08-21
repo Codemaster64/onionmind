@@ -1,0 +1,5 @@
+.git
+__pycache__
+usb/cache
+usb/build
+usb/out

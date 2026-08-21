@@ -1,0 +1,14 @@
+[Unit]
+Description=Onionmind: best-effort RAM scrub at clean shutdown
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target poweroff.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/lib/onionmind/ramscrub.sh
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

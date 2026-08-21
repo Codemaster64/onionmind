@@ -1,0 +1,51 @@
+#!/bin/sh
+# Appends ready-made boot-menu entries (BIOS/syslinux and UEFI/GRUB) so
+# nobody hand-edits kernel cmdlines: print mode and firewall-open debug.
+# Runs at binary stage. live-build runs binary hooks with CWD INSIDE the
+# image tree (binary/) on current versions; older docs assume the build root.
+# Resolve both, then patch whichever exists - an entry silently missing is
+# exactly the kind of failure this kit exists to avoid.
+set -e
+
+APPEND="boot=live components hostname=onionmind username=onion"
+
+CFG_SYS=""; CFG_GRUB=""
+for d in . ./binary; do
+  if [ -z "$CFG_SYS" ] && [ -f "$d/isolinux/live.cfg" ]; then CFG_SYS="$d/isolinux/live.cfg"; fi
+  if [ -z "$CFG_GRUB" ] && [ -f "$d/boot/grub/grub.cfg" ]; then CFG_GRUB="$d/boot/grub/grub.cfg"; fi
+done
+
+if [ -n "$CFG_SYS" ]; then
+  cat >> "$CFG_SYS" <<EOF
+
+label live-print
+	menu label ^Onionmind (print mode)
+	kernel /live/vmlinuz
+	append initrd=/live/initrd.img $APPEND onionmind.print
+
+label live-debug
+	menu label ^Onionmind (debug: firewall open)
+	kernel /live/vmlinuz
+	append initrd=/live/initrd.img $APPEND onionmind.openfw
+EOF
+  echo "[boot-entries] syslinux entries added to $CFG_SYS"
+else
+  echo "[boot-entries] WARNING: no isolinux/live.cfg found - BIOS menu unchanged"
+fi
+
+if [ -n "$CFG_GRUB" ]; then
+  cat >> "$CFG_GRUB" <<EOF
+
+menuentry "Onionmind (print mode)" {
+	linux /live/vmlinuz $APPEND onionmind.print
+	initrd /live/initrd.img
+}
+menuentry "Onionmind (debug: firewall open)" {
+	linux /live/vmlinuz $APPEND onionmind.openfw
+	initrd /live/initrd.img
+}
+EOF
+  echo "[boot-entries] grub entries added to $CFG_GRUB"
+else
+  echo "[boot-entries] WARNING: no boot/grub/grub.cfg found - UEFI menu unchanged"
+fi

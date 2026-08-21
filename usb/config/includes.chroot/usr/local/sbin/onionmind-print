@@ -1,0 +1,35 @@
+#!/bin/sh
+# Discover printers and print a file.
+#   sudo onionmind-print                 # list discovered queues
+#   sudo onionmind-print notes.txt       # print to the first queue
+#   sudo onionmind-print notes.txt queue # print to a specific queue
+# Network printers need the `onionmind.print` boot flag (kernel cmdline at
+# the boot menu) - that loads the firewall exception. A USB printer needs
+# nothing but the cable.
+set -e
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+
+if ! grep -qw onionmind.print /proc/cmdline && ! ls /dev/usb/lp* >/dev/null 2>&1; then
+  echo "no print flag and no USB printer connected."
+  echo "reboot with 'onionmind.print' on the kernel cmdline for network printers,"
+  echo "or plug one in by USB (no flag needed)."
+  exit 1
+fi
+
+systemctl is-active --quiet cups        || systemctl start cups
+systemctl is-active --quiet cups-browsed || systemctl start cups-browsed
+echo "waiting for discovered queues..."
+sleep 5
+lpstat -e 2>/dev/null || true
+
+if [ $# -eq 0 ]; then
+  echo "usage: onionmind-print <file> [queue]"
+  exit 0
+fi
+file=$1
+[ -f "$file" ] || { echo "no such file: $file" >&2; exit 1; }
+q=${2:-$(lpstat -e 2>/dev/null | awk 'NR==1{print $1}')}
+[ -n "$q" ] || { echo "no printer queue discovered - is it on, and is the"; \
+                  echo "print flag set (network) or cable plugged (USB)?"; exit 1; }
+lp -d "$q" "$file"
+echo "queued on '$q'. status: lpstat -o"

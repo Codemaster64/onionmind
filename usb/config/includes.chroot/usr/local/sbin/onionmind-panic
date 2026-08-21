@@ -1,0 +1,9 @@
+#!/bin/sh
+# Scrub free RAM and power off immediately. The "someone is coming" button.
+# The scrub takes 10-20s on a 32GB machine; the message says so on purpose.
+set -e
+[ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
+echo "[panic] scrubbing free RAM (seconds), then cutting power - screen stays on"
+/usr/local/lib/onionmind/ramscrub.sh || true
+sync
+poweroff -f

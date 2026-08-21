@@ -1,0 +1,11 @@
+[Unit]
+Description=Onionmind: expose the baked model store in RAM
+After=local-fs.target
+Before=onionmind-ollama.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/onionmind/link-store.sh
+
+[Install]
+WantedBy=multi-user.target

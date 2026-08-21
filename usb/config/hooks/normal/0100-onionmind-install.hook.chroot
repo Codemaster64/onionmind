@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs INSIDE the live-build chroot, after packages are installed.
+set -e
+
+echo "== onionmind: install ollama from the pinned tarball =="
+tar -C /usr --zstd -xf /usr/lib/onionmind/payload/ollama-linux-amd64.tar.zst
+rm -rf /usr/lib/onionmind/payload
+chmod 755 /usr/bin/ollama
+
+# Units and scripts are already in place via includes.chroot.
+systemctl enable onionmind-firewall.service onionmind-prepare-models.service \
+                onionmind-ollama.service onionmind-clock.service \
+                onionmind-mac-check.service onionmind-ramscrub.service \
+                tor@default.service NetworkManager.service \
+                cups.service cups-browsed.service ipp-usb.service gpm.service
+
+# live-config creates the console user at boot; this is static and certain.
+chmod 440 /etc/sudoers.d/onion
