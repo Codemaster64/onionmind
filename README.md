@@ -34,9 +34,9 @@ Each is registered under its real name — `qwen38-uncensored`, `qwen35-9b-uncen
 That's the whole install on either.
 
 ```powershell
-ollama run qwen38-uncensored                                     # chat
-ollama run qwen38-uncensored-vision                              # chat about images
-python "$env:LOCALAPPDATA\qwen\onionmind.py" "your question"    # chat + web search over Tor
+onionmind                        # chat + web search over Tor - or double-click the desktop icon
+onionmind "your question"        # one-shot (NOTE: lands in shell history)
+ollama run qwen38-uncensored     # raw chat without search - unchanged, still there
 ```
 
 The installer is re-runnable and resumes partial downloads, so a dropped connection just
@@ -51,7 +51,7 @@ means running it again.
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | the search agent, written next to the weights |
-| Desktop shortcut | "Onionmind" — starts Tor Browser/daemon if needed, drops into the chat |
+| `onionmind` command + desktop icon | The way in: chat + Tor search in one command. PATH on Windows, `/usr/local/bin` on Linux; the icon runs the same thing |
 | Python deps | `requests`, `PySocks` |
 
 ## Which build you get
@@ -108,8 +108,8 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 ## Web search over Tor
 
 ```powershell
-python onionmind.py "who won the 2024 nobel prize in physics"   # one-shot
-python onionmind.py                                             # interactive chat
+onionmind "who won the 2024 nobel prize in physics"   # one-shot
+onionmind                                             # interactive chat
 # in interactive mode: /save notes.txt exports the conversation so far
 # (the live USB's print workflow starts here)
 ```

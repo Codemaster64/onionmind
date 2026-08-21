@@ -1001,9 +1001,9 @@ AQAAgAEAAIABAACAAQAAgBEAAMAjAAD4BwAA/A8AAP//AAA=
 '@
 [IO.File]::WriteAllBytes("$Dir\onionmind.ico", [Convert]::FromBase64String($OnionIco))
 
-# What the shortcut runs: start Tor Browser if it isn't up (search fails closed
-# without it; the chat itself doesn't need it), give SOCKS up to 45s, then the
-# interactive chat - queries typed at you> never touch shell history.
+# What the shortcut and the `onionmind` command run: start Tor Browser if it
+# isn't up (search fails closed without it; the chat doesn't need it), give
+# SOCKS up to 45s, then the chat - queries typed at you> never touch history.
 @'
 $Host.UI.RawUI.WindowTitle = 'Onionmind'
 $tor = Get-Process firefox -ErrorAction SilentlyContinue |
@@ -1021,13 +1021,27 @@ for ($i = 0; $i -lt 45; $i++) {
   Start-Sleep 1
 }
 Set-Location ~          # /save <file> lands in the home dir
-& python "$PSScriptRoot\onionmind.py"
+& python "$PSScriptRoot\onionmind.py" @args
 '@ | Set-Content "$Dir\onionmind-launch.ps1" -Encoding UTF8
+
+# `onionmind` is the way in: same engine, callable from any terminal. ollama
+# stays underneath as the server - it stops being something you type.
+@"
+@echo off
+title Onionmind
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" %*
+"@ | Set-Content "$Dir\onionmind.cmd" -Encoding ASCII
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath -notlike "*$Dir*") {
+  [Environment]::SetEnvironmentVariable('Path', "$userPath;$Dir", 'User')  # registry, no setx truncation
+  Say "onionmind command installed - open a NEW terminal and just type: onionmind"
+}
 
 $ws  = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut([IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Onionmind.lnk'))
-$lnk.TargetPath     = 'powershell.exe'   # 5.1 ships everywhere; pwsh does not
-$lnk.Arguments      = "-NoExit -ExecutionPolicy Bypass -File `"$Dir\onionmind-launch.ps1`""
+$lnk.TargetPath     = 'cmd.exe'
+$lnk.Arguments      = "/k `"$Dir\onionmind.cmd`""   # /k: the window stays open after Ctrl-C
 $lnk.WorkingDirectory = $Dir
 $lnk.IconLocation   = "$Dir\onionmind.ico,0"
 $lnk.Description    = 'Local uncensored model + Tor web search'
@@ -1035,7 +1049,7 @@ $lnk.Save()
 
 Write-Host ""
 Say "Ready"
-Write-Host "  Chat:        $O run $name"
+Write-Host "  Chat:        onionmind   (or double-click the desktop icon)"
 if ($Vision) { Write-Host "  Images:      $O run $name-vision   (then give it an image path)" }
 Write-Host "  Web search:  python `"$Dir\onionmind.py`" `"your question`""
 Write-Host "               (Tor Browser must stay open - it owns the SOCKS proxy on 9150)"

@@ -423,19 +423,18 @@ cat > "$DIR/logo.svg" <<'SVGEOF'
 SVGEOF
 chmod 644 "$DIR/logo.svg"
 
-# What the launcher runs: nudge tor awake if it isn't (search fails closed
-# without it; chat doesn't need it), then the interactive chat - queries typed
-# at you> never touch shell history.
-cat > "$DIR/onionmind-launch.sh" <<'LAUNCH'
+# `onionmind` is the way in: one system-wide command for chat + Tor search.
+# ollama stays underneath as the server - it stops being something you type.
+sudo tee /usr/local/bin/onionmind >/dev/null <<'LAUNCH'
 #!/bin/sh
 DIR=@DIR@
 systemctl is-active --quiet tor 2>/dev/null || sudo -n systemctl start tor 2>/dev/null \
   || echo "[tor] not running - search will refuse until: sudo systemctl start tor"
 cd "$HOME"             # /save <file> lands here
-exec python3 "$DIR/onionmind.py"
+exec python3 "$DIR/onionmind.py" "$@"
 LAUNCH
-sed -i "s|@DIR@|$DIR|" "$DIR/onionmind-launch.sh"
-chmod 755 "$DIR/onionmind-launch.sh"
+sudo sed -i "s|@DIR@|$DIR|" /usr/local/bin/onionmind
+sudo chmod 755 /usr/local/bin/onionmind
 
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/onionmind.desktop" <<DESK
@@ -443,7 +442,7 @@ cat > "$HOME/.local/share/applications/onionmind.desktop" <<DESK
 Type=Application
 Name=Onionmind
 Comment=Local uncensored model with web search over Tor
-Exec=$DIR/onionmind-launch.sh
+Exec=onionmind
 Icon=$DIR/logo.svg
 Terminal=true
 Categories=Network;Utility;
@@ -458,7 +457,7 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$
 
 echo
 say "Ready"
-echo "  Chat:        ollama run $MODEL_NAME"
+echo "  Chat:        onionmind   (or double-click the desktop icon)"
 [ "$VISION" = 1 ] && echo "  Images:      ollama run $MODEL_NAME-vision   (then give it an image path)"
 echo "  Web search:  $DIR/onionmind.py \"your question\""
 echo "  Desktop:     Onionmind - double-click to chat"
