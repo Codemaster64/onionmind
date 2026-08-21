@@ -1,10 +1,14 @@
 name: usb kit
+# Manual dispatch only, and never on a private repo: Actions minutes are
+# billed there. On a public repo Actions is free and this runs the whole
+# validate suite; on this machine the same suite runs locally via the docker
+# commands in usb/tests/ headers, which is how the kit is normally validated.
 on:
-  push:
   workflow_dispatch:
 
 jobs:
   validate:
+    if: github.repository_visibility == 'public'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
