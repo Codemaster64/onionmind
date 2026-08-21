@@ -51,6 +51,7 @@ means running it again.
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | the search agent, written next to the weights |
+| Desktop shortcut | "Onionmind" — starts Tor Browser/daemon if needed, drops into the chat |
 | Python deps | `requests`, `PySocks` |
 
 ## Which build you get
@@ -357,6 +358,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `onionmind.py` | Search agent. Tor + tool-calling loop. |
 | `Modelfile` | Generated. Template, stop tokens, `num_gpu`, `num_ctx`. |
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |
+| `onionmind.ico` | The mark as Windows icon (16–256px), rendered from `logo.svg`. Regenerate: `rsvg-convert` each size + `convert` them into an ico (see `build.py`), then run `python build.py` to re-inject into the installers. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `usb/` | Live-USB build kit — Tails-style amnesia + the host machine's GPU. See `usb/README.md`. |
 

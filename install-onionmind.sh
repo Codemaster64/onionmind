@@ -399,8 +399,66 @@ PYEOF
 sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
 chmod 755 "$DIR/onionmind.py"
 
+# --- 9. Desktop launcher -----------------------------------------------------
+# .desktop files take SVG icons directly, unlike Windows shortcuts. build.py
+# injects logo.svg verbatim below - it stays the single source.
+say "Creating desktop launcher"
+cat > "$DIR/logo.svg" <<'SVGEOF'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"
+     fill="none" stroke="#7D4698" role="img" aria-label="Onionmind">
+  <!-- Onion cross-section: each ring is both an onion layer and a Tor hop.
+       The gaps rotate inward, tracing a route through the layers to the core.
+       #7D4698 is Tor's purple - an onion-routed tool should wear it. A fixed
+       colour, not currentColor: GitHub renders this as an <img>, where there
+       is no text colour to inherit and the mark silently turns black. -->
+  <g stroke-width="7" stroke-linecap="round">
+    <circle cx="64" cy="64" r="52" stroke-dasharray="290.4 36.3" transform="rotate(-104 64 64)" opacity=".35"/>
+    <circle cx="64" cy="64" r="40" stroke-dasharray="223.4 27.9" transform="rotate(-32 64 64)"  opacity=".55"/>
+    <circle cx="64" cy="64" r="28" stroke-dasharray="156.4 19.5" transform="rotate(40 64 64)"   opacity=".78"/>
+    <circle cx="64" cy="64" r="16" stroke-dasharray="89.3 11.2"  transform="rotate(112 64 64)"/>
+  </g>
+  <!-- the mind at the centre: local, and the only thing that never leaves -->
+  <circle cx="64" cy="64" r="6" fill="#7D4698" stroke="none"/>
+</svg>
+SVGEOF
+chmod 644 "$DIR/logo.svg"
+
+# What the launcher runs: nudge tor awake if it isn't (search fails closed
+# without it; chat doesn't need it), then the interactive chat - queries typed
+# at you> never touch shell history.
+cat > "$DIR/onionmind-launch.sh" <<'LAUNCH'
+#!/bin/sh
+DIR=@DIR@
+systemctl is-active --quiet tor 2>/dev/null || sudo -n systemctl start tor 2>/dev/null \
+  || echo "[tor] not running - search will refuse until: sudo systemctl start tor"
+cd "$HOME"             # /save <file> lands here
+exec python3 "$DIR/onionmind.py"
+LAUNCH
+sed -i "s|@DIR@|$DIR|" "$DIR/onionmind-launch.sh"
+chmod 755 "$DIR/onionmind-launch.sh"
+
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/onionmind.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=Onionmind
+Comment=Local uncensored model with web search over Tor
+Exec=$DIR/onionmind-launch.sh
+Icon=$DIR/logo.svg
+Terminal=true
+Categories=Network;Utility;
+DESK
+# desktop icon only if the DE actually has a Desktop dir
+DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
+if [ -d "$DESKTOP_DIR" ]; then
+  cp "$HOME/.local/share/applications/onionmind.desktop" "$DESKTOP_DIR/onionmind.desktop"
+  chmod +x "$DESKTOP_DIR/onionmind.desktop"
+fi
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+
 echo
 say "Ready"
 echo "  Chat:        ollama run $MODEL_NAME"
 [ "$VISION" = 1 ] && echo "  Images:      ollama run $MODEL_NAME-vision   (then give it an image path)"
 echo "  Web search:  $DIR/onionmind.py \"your question\""
+echo "  Desktop:     Onionmind - double-click to chat"

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Inject the canonical onionmind.py into both installers. Run after editing it.
+"""Inject the canonical onionmind.py, logo.svg and onionmind.ico into both
+installers. Run after editing any of them.
 
     python build.py            # inject, verify, report
     python build.py --check    # verify only; non-zero exit if stale (for CI)
@@ -9,11 +10,16 @@ and a shell heredoc. They drifted, and a fix applied to one silently missed the
 others - that is how the Windows MODEL-rewrite bug shipped. This file makes the
 repo copy the single source and the installers pure build artefacts.
 
+The same rule now covers the desktop-icon payloads: the .ico (rendered from
+logo.svg - regenerate with librsvg+imagemagick, see README) goes into the .ps1
+base64, and logo.svg itself into the .sh, where .desktop files can use it
+directly.
+
 Line endings are enforced per target: the .ps1 is CRLF, the .sh is LF. A CRLF
 shell script dies on Linux with `bad interpreter: /usr/bin/env bash^M`, which has
 also already happened here once.
 """
-import ast, pathlib, re, sys
+import ast, base64, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "onionmind.py"
@@ -34,6 +40,20 @@ TARGETS = [
     ("install-onionmind.ps1",   "$search = @'\n",         "\n'@\n",           "\r\n",  WINDOWS_SUBS),
     ("install-onionmind.sh",    "<<'PYEOF'\n",            "\nPYEOF\n",        "\n",    []),
 ]
+
+# The desktop-icon payloads, derived not hand-maintained: onionmind.ico is
+# rendered from logo.svg (see README Files table for the render command), the
+# .sh embeds the SVG itself because .desktop Icon= takes SVGs.
+def icon_payloads():
+    b64 = base64.b64encode((ROOT / "onionmind.ico").read_bytes()).decode()
+    ico = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
+    svg = (ROOT / "logo.svg").read_text(encoding="utf-8").rstrip("\n")
+    return {
+        ("install-onionmind.ps1", "$OnionIco = @'\n", "\n'@\n", "\r\n"): ico,
+        ("install-onionmind.sh",  "<<'SVGEOF'\n",     "\nSVGEOF\n", "\n"): svg,
+    }
+
+ICON_TARGETS = icon_payloads()
 
 
 def render(source: str, subs) -> str:
@@ -77,10 +97,26 @@ def main() -> int:
         path.write_text(splice(path, opener, closer, payload), encoding="utf-8", newline=newline)
         print(f"  injected     {name}  ({len(payload.splitlines())} lines, {newline!r} endings)")
 
+    for (name, opener, closer, newline), payload in ICON_TARGETS.items():
+        path = ROOT / name
+        current = path.read_text(encoding="utf-8")
+        i = current.index(opener) + len(opener)
+        j = current.index(closer, i)
+        if current[i:j] == payload:
+            print(f"  up to date   {name} (icon payload)")
+            continue
+        stale += 1
+        if check_only:
+            print(f"  STALE        {name} (icon payload)")
+            continue
+        path.write_text(splice(path, opener, closer, payload), encoding="utf-8", newline=newline)
+        print(f"  injected     {name}  (icon payload, {len(payload.splitlines())} lines)")
+
     if check_only and stale:
         print(f"\n{stale} installer(s) stale - run: python build.py")
         return 1
-    print(f"\nok - {len(TARGETS)} installer(s) carry onionmind.py verbatim")
+    print(f"\nok - {len(TARGETS)} installer(s) carry onionmind.py verbatim, "
+          f"plus {len(ICON_TARGETS)} icon payload(s)")
     return 0
 
 
