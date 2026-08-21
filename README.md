@@ -45,6 +45,14 @@ bash install-onionmind.sh
 Arch or Ubuntu/Debian. Same deal — one paste, the right model, an `onionmind`
 command and a desktop icon.
 
+**Android (light models)**
+
+Install [Termux from F-Droid](https://f-droid.org) (not the Play Store build),
+open it, and paste **[install-onionmind-android.sh](install-onionmind-android.sh)**.
+The 4B model runs on any 8 GB phone; 12 GB flagships get the 9B. Same chat,
+same Tor search — the whole thing lives on the phone, no cloud in sight.
+(One-time llama.cpp build takes ~15–20 minutes.)
+
 **Using it**
 
 ```bash
@@ -96,6 +104,7 @@ persists. Nothing to find.
 | 8 GB+ | The full 27B, squeezed to fit |
 | 6 GB+ | 9B — sharp, and *faster* than the big one |
 | Anything / no GPU | 4B — still uncensored, still searches Tor, runs on a potato |
+| **Android phone** *(Termux)* | the 4B on any 8 GB phone, the 9B on 12 GB flagships |
 
 **Matchstick editions** — you pick when building the stick:
 
@@ -155,6 +164,9 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 - What you *search for*, and how you *write*, can identify you regardless of any
   technology.
 - No GPU? It still runs — on the CPU. Fine for the small models, painful for the 27B.
+- On a phone: expect phone speeds — roughly 5–15 tokens/second on recent
+  chipsets — and disable battery optimisation for Termux, or Android will kill
+  it mid-chat.
 - Matchstick needs Secure Boot off (unsigned driver), and covers NVIDIA GTX 900 →
   RTX 40 plus modern AMD for GPU speed; RTX 50 falls back to CPU until Debian
   ships a newer driver.

@@ -153,6 +153,32 @@ Verified by inspecting a built ISO, not by reading config: 1,825 ROCm libraries 
 `usr/lib/ollama/rocm/`, 639 `amdgpu` firmware files, `nvidia.ko` present, CUDA v12 and v13
 alongside ROCm. Ollama selects the backend at runtime from the hardware it finds.
 
+## Android (Termux)
+
+The light tiers run entirely on a phone, no root, inside [Termux](https://f-droid.org)
+(the F-Droid build — the Play Store one is abandoned).
+
+- **Engine:** llama.cpp's `llama-server`, compiled in Termux. Ollama has no
+  Android build; llama-server speaks an OpenAI-compatible API and runs the same
+  GGUFs. One-time build: `pkg install git cmake clang`, ~15–20 minutes on a phone.
+- **Backend adapter:** `onionmind.py` auto-detects its server — ollama on
+  `:11434`, llama-server on `:8080` — and translates the tool-calling formats
+  (OpenAI ships tool arguments as JSON strings and requires positional
+  `tool_call_id`s). The adapter is tested against a mock llama-server in
+  `tests/test_backends.py`; the on-phone path is not yet hardware-verified.
+- **Tor:** the Termux `tor` package, a plain daemon on `9050` — the exact case
+  the tool has always supported. Orbot in Power User Mode binds the same port
+  and works too.
+- **Model by RAM:** `MemTotal` ≥ 11GB → the 9B (Q4, 5.2GB), else the 4B
+  (2.5GB). Override with `ONIONMIND_MODEL=9b|4b`.
+- **Speed:** community figures, not our measurements — roughly 5–15 tok/s for
+  the 4B Q4 depending on chipset (Snapdragon 8 Gen 2/3 at the top end,
+  midrange at the bottom). The 9B needs a flagship and patience.
+- **Keeping it alive:** the `onionmind` launcher takes a Termux wake-lock and
+  starts llama-server + tor as needed; Android will still kill Termux unless
+  battery optimisation is disabled for it. Expect warmth — sustained inference
+  is a benchmark workload for a phone.
+
 ## Going further on privacy
 
 Tor here proxies exactly one thing: the search HTTP request. Everything else about your
@@ -370,6 +396,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `install-onionmind.ps1` | One-paste installer. Everything below is produced by it. |
 | `onionmind.py` | Search agent. Tor + tool-calling loop. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
+| `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |
 | `build.py` | Single-sources `onionmind.py` + icon payloads into both installers; `--check` flags drift. |
 | `Modelfile` | Generated. Template, stop tokens, `num_gpu`, `num_ctx`. |
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |
@@ -397,6 +424,11 @@ The live-USB kit's internals were validated the same way, in `debian:trixie` con
 bakes and garbage-collects the model store, and it serves that store read-only. The full
 image build and a boot on real hardware have not been run — `usb/README.md` keeps the
 honest list.
+
+The llama-server backend adapter (the Android path) is exercised against a mock
+OpenAI server in `tests/test_backends.py` — translation, string-encoded tool
+arguments, positional tool ids, and a full search turn. Nothing has run on an
+actual phone yet.
 
 ## Notes
 

@@ -39,6 +39,7 @@ TARGETS = [
     # path,                     opening delimiter,        closing delimiter,  newline, subs
     ("install-onionmind.ps1",   "$search = @'\n",         "\n'@\n",           "\r\n",  WINDOWS_SUBS),
     ("install-onionmind.sh",    "<<'PYEOF'\n",            "\nPYEOF\n",        "\n",    []),
+    ("install-onionmind-android.sh", "<<'PYEOF'\n",       "\nPYEOF\n",        "\n",    []),
 ]
 
 # The desktop-icon payloads, derived not hand-maintained: onionmind.ico is

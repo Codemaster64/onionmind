@@ -166,13 +166,15 @@ $search = @'
 
 Needs Tor Browser open (it owns SOCKS on 9150) or a tor daemon on 9050.
 """
-import sys, re, html, secrets, urllib.parse, requests
+import sys, re, html, json, secrets, urllib.parse, requests
 
 for _s in (sys.stdout, sys.stderr):              # Windows console defaults to cp1252,
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
     except Exception: pass
 
 OLLAMA = "http://127.0.0.1:11434/api/chat"
+LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
+BACKEND = None
 MODEL  = "qwen38-uncensored"
 NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
 PORTS  = (9150, 9050)                            # 9150 = Tor Browser, 9050 = tor daemon
@@ -303,10 +305,75 @@ def _ask_ollama(messages):
     return r.json()["message"]
 
 
+def detect_backend():
+    """Prefer ollama; fall back to llama.cpp's llama-server. Ollama has no
+    Android build, so phones run llama-server with the same GGUFs."""
+    global BACKEND
+    for url, name in (("http://127.0.0.1:11434/api/version", "ollama"),
+                      ("http://127.0.0.1:8080/health", "llama-server")):
+        try:
+            if requests.get(url, proxies=NOPROXY, timeout=3).ok:
+                BACKEND = name
+                print(f"[model] backend: {name}", file=sys.stderr)
+                return
+        except Exception:
+            pass
+    sys.exit("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+
+
+def _to_openai(messages):
+    """Translate our ollama-shaped history into OpenAI shape for llama-server,
+    where each tool reply must reference the assistant's call by id. Ids are
+    positional: each tool message binds to the next unread call of the
+    assistant message preceding it."""
+    out, slot = [], 0
+    for m in messages:
+        if m.get("role") == "tool":
+            out.append({"role": "tool", "tool_call_id": f"tc{slot}", "content": m["content"]})
+            slot += 1
+            continue
+        calls = m.get("tool_calls")
+        if calls:
+            slot = 0
+            out.append({"role": "assistant", "content": m.get("content") or None,
+                        "tool_calls": [{"id": f"tc{i}", "type": "function",
+                                        "function": {"name": f["function"]["name"],
+                                                     "arguments": json.dumps(f["function"].get("arguments") or {})}}
+                                       for i, f in enumerate(calls)]})
+        else:
+            out.append({"role": m["role"], "content": m.get("content") or ""})
+    return out
+
+
+def _ask_llama(messages):
+    try:
+        r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800,
+                          json={"messages": _to_openai(messages), "tools": TOOLS,
+                                "stream": False, "max_tokens": NUM_PREDICT})
+    except requests.exceptions.ConnectionError:
+        sys.exit("llama-server is not running on 127.0.0.1:8080. Start it, then retry.")
+    if not r.ok:
+        sys.exit(f"llama-server returned {r.status_code}: {r.text[:200]}")
+    m = r.json()["choices"][0]["message"]
+    msg = {"role": "assistant", "content": m.get("content") or ""}
+    calls = []
+    for c in m.get("tool_calls") or []:
+        args = c["function"].get("arguments")
+        if isinstance(args, str):                    # OpenAI ships arguments as a JSON string
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {"query": args}
+        calls.append({"function": {"name": c["function"]["name"], "arguments": args or {}}})
+    if calls:
+        msg["tool_calls"] = calls
+    return msg
+
+
 def turn(messages):
     """Run one user turn to completion, letting the model search as often as it needs."""
     for _ in range(6):                            # ponytail: hard cap, not a retry policy
-        msg = _ask_ollama(messages)
+        msg = _ask_llama(messages) if BACKEND == "llama-server" else _ask_ollama(messages)
         messages.append(msg)
         calls = msg.get("tool_calls")
         if not calls:
@@ -324,19 +391,47 @@ def turn(messages):
     return "(gave up after 6 tool rounds)"
 
 
+def _save(history, path):
+    """Write the conversation so far to a file - the print workflow's front end.
+    The file lives wherever the user put it; power-off deletes it with the rest."""
+    lines = []
+    for m in history:
+        if m.get("role") == "user":
+            lines.append("you> " + m["content"])
+        elif m.get("role") == "assistant":
+            c = strip_thinking(m.get("content") or "")
+            if c:
+                lines.append("onion> " + c)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(lines) + "\n")
+    print(f"[saved] {path} ({len(lines)} entries)")
+
+
 if __name__ == "__main__":
+    detect_backend()
     tor_check()
     history = []
     if len(sys.argv) > 1:
         history.append({"role": "user", "content": " ".join(sys.argv[1:])})
         print("\n" + turn(history))
     else:
-        print("Chat - it searches over Tor when it needs to. Ctrl-C to quit.\n")
+        print("Chat - it searches over Tor when it needs to. /save <file> exports the")
+        print("conversation. Ctrl-C to quit.\n")
         while True:
             try:
                 q = input("you> ").strip()
             except (EOFError, KeyboardInterrupt):
                 break
+            if q.startswith("/save"):
+                parts = q.split(maxsplit=1)
+                if len(parts) < 2 or not parts[1].strip():
+                    print("usage: /save <file>   e.g. /save notes.txt")
+                else:
+                    try:
+                        _save(history, parts[1].strip())
+                    except OSError as e:
+                        print(f"[error] {e}")
+                continue
             if q:
                 history.append({"role": "user", "content": q})
                 print("\n" + turn(history) + "\n")

@@ -1,3 +1,50 @@
+#!/usr/bin/env bash
+# Onionmind for Android - light models, entirely on the phone, inside Termux.
+# Get Termux from F-Droid (the Play Store build is abandoned): https://f-droid.org
+# Then here:  bash install-onionmind-android.sh
+# Engine is llama.cpp's llama-server - ollama has no Android build. Tor comes
+# from the Termux tor package (Orbot in Power User mode works too - same port).
+set -euo pipefail
+say() { printf '\033[36m==> %s\033[0m\n' "$*"; }
+die() { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+[ -n "${TERMUX_VERSION:-}" ] || die "run this inside Termux (the F-Droid build, not Play Store)"
+
+say "Installing build tools, python and tor"
+pkg update -y >/dev/null
+pkg install -y python git cmake clang curl tor
+
+DIR="$HOME/onionmind"
+mkdir -p "$DIR/models"
+
+# --- 1. llama-server: build once, ~15-20 min on a phone ----------------------
+if [ ! -x "$DIR/llama.cpp/build/bin/llama-server" ]; then
+  say "Building llama-server (one-time - plug in a charger)"
+  git clone --depth 1 https://github.com/ggml-org/llama.cpp "$DIR/llama.cpp"
+  cmake -S "$DIR/llama.cpp" -B "$DIR/llama.cpp/build" \
+        -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DGGML_OPENMP=OFF >/dev/null
+  cmake --build "$DIR/llama.cpp/build" --target llama-server -j"$(nproc)"
+fi
+
+# --- 2. model by RAM: the 9b on 12GB flagships, the 4b below ------------------
+WANT="${ONIONMIND_MODEL:-auto}"
+RAM_MB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
+if [ "$WANT" = auto ]; then
+  [ "$RAM_MB" -ge 11000 ] && WANT=9b || WANT=4b
+fi
+case "$WANT" in
+  4b) REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
+      FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf ;;
+  9b) REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
+      FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf ;;
+  *) die "ONIONMIND_MODEL must be auto, 4b or 9b (got '$WANT')" ;;
+esac
+say "Model: $WANT ($FILE) - ${RAM_MB}MB RAM detected"
+[ -s "$DIR/models/$FILE" ] || curl -L -C - --fail -o "$DIR/models/$FILE" \
+      "https://huggingface.co/$REPO/resolve/main/$FILE"
+
+# --- 3. the search agent (build.py injects the canonical copy below) ---------
+cat > "$DIR/onionmind.py" <<'PYEOF'
 #!/usr/bin/env python3
 """Onionmind - a local uncensored model with web search over Tor.
 
@@ -275,3 +322,28 @@ if __name__ == "__main__":
             if q:
                 history.append({"role": "user", "content": q})
                 print("\n" + turn(history) + "\n")
+PYEOF
+sed -i "s|^MODEL  = .*|MODEL  = \"qwen35-$WANT-uncensored\"|" "$DIR/onionmind.py"
+
+# --- 4. `onionmind`: the way in. Starts llama-server and tor if needed -------
+cat > "$PREFIX/bin/onionmind" <<LAUNCH
+#!/data/data/com.termux/files/usr/bin/bash
+DIR="\$HOME/onionmind"
+command -v termux-wake-lock >/dev/null && termux-wake-lock   # Android kills background apps
+if ! curl -sf --noproxy '*' -m 2 http://127.0.0.1:8080/health >/dev/null; then
+  echo "[model] llama-server starting (first model load takes a minute)"
+  nohup "\$DIR/llama.cpp/build/bin/llama-server" \
+        -m "$DIR/models/$FILE" --host 127.0.0.1 --port 8080 -c 8192 \
+        > "\$DIR/llama-server.log" 2>&1 &
+fi
+(exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null || \
+  nohup tor > "\$DIR/tor.log" 2>&1 &
+cd "\$HOME"                     # /save <file> lands here
+exec python3 "\$DIR/onionmind.py" "\$@"
+LAUNCH
+chmod 755 "$PREFIX/bin/onionmind"
+
+say "Ready"
+echo "  Chat:        onionmind"
+echo "  First boot:  tor builds its circuits slowly on a phone - give it a minute"
+echo "  Keep alive:  disable battery optimisation for Termux, or Android will kill it"
