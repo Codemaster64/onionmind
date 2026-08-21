@@ -1,10 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"
-     fill="none" stroke="currentColor" role="img" aria-label="Onionmind">
+     fill="none" stroke="#7D4698" role="img" aria-label="Onionmind">
   <!-- Favicon variant: the full mark's four rings turn to mush below ~24px.
-       Two rings and a fatter stroke keep the same idea legible at 16px. -->
+       Two rings and a fatter stroke keep the same idea legible at 16px.
+       Tor purple, fixed - currentColor turns black under GitHub's <img>. -->
   <g stroke-width="14" stroke-linecap="round">
     <circle cx="64" cy="64" r="50" stroke-dasharray="279.3 34.9" transform="rotate(-100 64 64)" opacity=".45"/>
     <circle cx="64" cy="64" r="28" stroke-dasharray="156.4 19.5" transform="rotate(50 64 64)"/>
   </g>
-  <circle cx="64" cy="64" r="9" fill="currentColor" stroke="none"/>
+  <circle cx="64" cy="64" r="9" fill="#7D4698" stroke="none"/>
 </svg>
