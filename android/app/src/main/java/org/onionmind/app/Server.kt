@@ -75,7 +75,10 @@ object Server {
         // NanoHTTPD stores an application/x-www-form-urlencoded POST body in
         // POST_DATA. It does not split it into one map entry per form field.
         // The old lookup therefore rejected every install request silently.
-        val tier = formValue(files["postData"] ?: files["content"], "tier")
+        // NanoHTTPD decodes form-urlencoded POST fields into parms; older
+        // versions only exposed the raw body through postData.
+        val tier = session.parms["tier"]
+            ?: formValue(files["postData"] ?: files["content"], "tier")
         if (ProcessManager.models().none { it.tier == tier })
             return NanoHTTPD.newFixedLengthResponse(
                 Response.Status.BAD_REQUEST, "text/plain", "tier?")
