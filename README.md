@@ -9,7 +9,7 @@
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/data_sent_to_the_cloud-0-black)
 ![uncensored](https://img.shields.io/badge/uncensored-yes-9146F0)
-![speed](https://img.shields.io/benchmark-up%20to%20166%20tok%2Fs-59316C)
+![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
 
 No cloud · No account · No telemetry · No refusals
 
