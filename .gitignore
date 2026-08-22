@@ -2,3 +2,9 @@ __pycache__/
 usb/cache/
 usb/build/
 usb/out/
+android/.gradle/
+android/**/build/
+android/app/src/main/jniLibs/
+android/local.properties
+*.jks
+*.keystore
