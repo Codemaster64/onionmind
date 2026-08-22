@@ -21,10 +21,10 @@ object ProcessManager {
     fun models() = listOf(
         Model("4b", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
               "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
-              2_700_000_000L),
+              2_707_514_688L),
         Model("9b", "Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf",
               "https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf",
-              5_500_000_000L),
+              5_627_045_248L),
     )
 
     fun modelDir(ctx: Context) = File(ctx.filesDir, "models").apply { mkdirs() }
@@ -41,19 +41,26 @@ object ProcessManager {
             downloadProgress = 0.0; downloadTier = tier
             try {
                 val out = File(modelDir(ctx), m.file)
+                // A previous build could have left a truncated final name.
+                // Never treat it as resumable or let it block finalization.
+                if (out.exists() && out.length() != m.bytes) out.delete()
                 val part = File(modelDir(ctx), m.file + ".part")
-                val target = if (out.exists()) out else part
-                while (target.length() < m.bytes) {
+                while (part.length() < m.bytes) {
+                    val offset = part.length()
                     val c = URL(m.url).openConnection() as HttpURLConnection
-                    if (target.length() > 0) c.setRequestProperty("Range", "bytes=${target.length()}-")
+                    if (offset > 0) c.setRequestProperty("Range", "bytes=$offset-")
                     if (c.responseCode !in 200..299) { Thread.sleep(3000); continue }  // resume loop
+                    // Some mirrors ignore Range and return the whole object.
+                    // Appending that response would corrupt the resumable file.
+                    val append = offset > 0 && c.responseCode == HttpURLConnection.HTTP_PARTIAL
+                    if (offset > 0 && !append) part.delete()
                     c.inputStream.use { input ->
-                        target.outputStream().use { output ->
+                        part.outputStream(append = append).use { output ->
                             input.copyTo(output, 1 shl 16)
                         }
                     }
                 }
-                part.renameTo(out)
+                if (!part.renameTo(out)) throw IllegalStateException("could not finalize model")
                 downloadProgress = 1.0
             } catch (e: Exception) {
                 downloadProgress = -1.0
