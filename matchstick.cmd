@@ -31,6 +31,54 @@ Write-Host ""
 Write-Host "   Onionmind Matchstick - build + burn, the easy way" -ForegroundColor Magenta
 Write-Host "   The USB stick that forgets. It will be ERASED." -ForegroundColor DarkGray
 Write-Host ""
+Write-Host "   [D] Download the pre-built stick  (pocket/spark, 6.6GB - no Docker, no build)"
+Write-Host "   [B] Build from source             (any edition, needs Docker, ~1 hour)"
+Write-Host ""
+$mode = (Read-Host "   Download or build? [D/B, Enter = D]").Trim().ToUpper()
+$prebuilt = if ($mode -eq 'B') { $false } else { $true }
+
+if ($prebuilt) {
+  $edition = '4b'; $needGB = 16
+  Say "Pre-built pocket stick (spark edition)"
+  $iso = Join-Path $Repo "usb\out\onionmind-matchstick-4b-amd64.iso"
+  if (-not (Test-Path $iso)) {
+    if ($Dry) { Say "DRY: would download 4 parts + SHA256SUMS and rejoin into $iso"; exit }
+    Say "Downloading pre-built pocket stick (4 parts, ~6.6GB)"
+    $base = "https://github.com/Codemaster64/onionmind/releases/download/matchstick-pocket"
+    $partsDir = Join-Path $Repo "usb\out\parts"
+    New-Item -ItemType Directory -Force -Path $partsDir | Out-Null
+    # gh first: it authenticates, which private repos require. curl works once
+    # the repo is public.
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if ($gh) {
+      & gh release download matchstick-pocket --repo Codemaster64/onionmind `
+        --dir $partsDir --clobber `
+        --pattern 'onionmind-matchstick-4b-amd64.iso.part*' --pattern 'SHA256SUMS'
+      if ($LASTEXITCODE -ne 0) { throw "gh download failed - check: gh auth status" }
+    } else {
+      foreach ($p in 'part00','part01','part02','part03') {
+        $f = "onionmind-matchstick-4b-amd64.iso.$p"
+        & curl.exe -L -C - --fail -o (Join-Path $partsDir $f) "$base/$f"
+        if ($LASTEXITCODE -ne 0) { throw "download failed at $f - needs the repo public, or install GitHub CLI (gh) and run: gh auth login" }
+      }
+      & curl.exe -L -C - --fail -o (Join-Path $partsDir 'SHA256SUMS') "$base/SHA256SUMS"
+    }
+    Say "Rejoining parts"
+    $out = [IO.File]::Create($iso)
+    foreach ($p in 'part00','part01','part02','part03') {
+      $bytes = [IO.File]::ReadAllBytes((Join-Path $partsDir "onionmind-matchstick-4b-amd64.iso.$p"))
+      $out.Write($bytes, 0, $bytes.Length)
+    }
+    $out.Close()
+    Say "Verifying checksum"
+    $want = (Select-String -Path (Join-Path $partsDir 'SHA256SUMS') -Pattern '^([0-9a-f]{64})\s+\*?onionmind-matchstick-4b-amd64\.iso$').Matches[0].Groups[1].Value
+    $got = (Get-FileHash $iso -Algorithm SHA256).Hash.ToLower()
+    if ($got -ne $want) { throw "checksum mismatch (want $want got $got) - delete parts and retry" }
+    Say "Checksum OK"
+  }
+} else {
+
+Write-Host ""
 Write-Host "   1) pocket     - 4B,  runs on anything            (16GB stick)"
 Write-Host "   2) daily      - 9B,  fast small-GPU daily driver  (16GB stick)"
 Write-Host "   3) standard   - 27B squeezed, 8GB GPUs            (32GB stick)"
@@ -66,6 +114,7 @@ if (-not (Test-Path $iso)) {
     if ($LASTEXITCODE -ne 0) { throw "stick build failed" }
   }
 }
+} # end build-from-source branch
 Say "ISO: $iso ($([math]::Round((Get-Item $iso).Length/1GB,1)) GB)"
 
 # --- pick a stick ----------------------------------------------------------------

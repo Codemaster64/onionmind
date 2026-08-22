@@ -84,15 +84,18 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 > Strike it anywhere. Burns bright. Leaves only ash.
 
 1. **Double-click `matchstick.cmd`** (Windows) or run **`./matchstick.sh`**
-   (Linux), from inside a clone of this repo. Pick an edition from the menu,
-   plug a USB stick when asked, confirm the erase. It builds the stick with
-   [Docker](https://docker.com) (~1 hour, downloads cached) and writes it to
-   the stick for you — no Rufus, no command-line plumbing.
+   (Linux), from inside a clone of this repo. Answer two questions:
+   **Download** (grabs the pre-built pocket stick — ~6.6GB, checksum-verified,
+   no Docker, no build) or **Build** (any edition, Docker, ~1 hour). Plug a
+   USB stick when asked, confirm the erase — the script writes the stick for
+   you, no Rufus, no command-line plumbing.
 2. **Boot any PC** from it (Secure Boot off). You land straight in the chat —
    `sudo onionmind-status` shows every protection verifying itself live.
 
-*The DIY route* (manual docker commands, Rufus/Etcher, every knob) is still
-there: **[usb/README.md](usb/README.md)**.
+The pre-built stick is the **pocket** edition (spark model — runs on any PC,
+GPU optional). Heavier editions (up to the flagship) are one menu choice away
+via Build. *The DIY route* (manual docker commands, Rufus, every knob) is
+still there: **[usb/README.md](usb/README.md)**.
 
 Inside the stick: the AI and its weights baked in · a firewall where **Tor is the
 only process allowed to leave the machine** · a fresh fake MAC address every boot ·
