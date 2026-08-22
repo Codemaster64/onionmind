@@ -1,9 +1,9 @@
 name: usb kit
-# Manual dispatch only, and never on a private repo: Actions minutes are
-# billed there. On a public repo Actions is free and this runs the whole
-# validate suite; on this machine the same suite runs locally via the docker
-# commands in usb/tests/ headers, which is how the kit is normally validated.
+# Runs on every push now that the repo is public (Actions minutes are free for
+# public repos). The visibility guard still skips everything instantly if the
+# repo is ever private again - no billed failures, just silence.
 on:
+  push:
   workflow_dispatch:
 
 jobs:

@@ -10,6 +10,8 @@
 ![local](https://img.shields.io/badge/data_sent_to_the_cloud-0-black)
 ![uncensored](https://img.shields.io/badge/uncensored-yes-9146F0)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
+![license](https://img.shields.io/badge/license-MIT-black)
+![non-profit](https://img.shields.io/badge/non%E2%80%91profit-open_source-9146F0)
 
 [![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
 [![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
@@ -18,7 +20,8 @@
 
 [all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
 
-No cloud · No account · No telemetry · No refusals
+No cloud · No account · No telemetry · No refusals — and no business model:
+this is a **free, open-source, non-profit project** (MIT).
 
 A 27-billion-parameter AI that runs on a gaming GPU in your home — it can even read
 images. When it needs fresh information, it searches the web **through the Tor
@@ -193,7 +196,8 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 
 ## Legal
 
-Code: **MIT** ([LICENSE](LICENSE)). Models: **Apache-2.0**, redistribution
+Released as a **non-profit open-source work**: free to use, study, modify and
+redistribute (MIT, [LICENSE](LICENSE)). Models: **Apache-2.0**, redistribution
 permitted with attribution ([notices](THIRD_PARTY_NOTICES.md)). EU AI Act:
 local personal tool, open-source carve-out, no personal data processed. Tor
 and privacy tooling are lawful across the EU/EEA. An uncensored model removes
