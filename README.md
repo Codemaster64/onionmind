@@ -15,7 +15,7 @@
 
 [![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
 [![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
-[![Download for Android](https://img.shields.io/badge/Android-Onionmind.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)
+[![Download for Android](https://img.shields.io/badge/Android-Onionmind.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.1/Onionmind-0.1.apk)
 [![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-usb-stick-that-forgets)
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
@@ -87,7 +87,7 @@ onionmind-update
 
 **Android (light models)**
 
-**[⬇ Onionmind APK](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)**
+**[⬇ Onionmind APK](https://github.com/Codemaster64/onionmind/releases/download/v1.1/Onionmind-0.1.apk)**
 — 14 MB, one file, no app store. Tap it, allow installs from unknown sources,
 done. On first launch it downloads the model that fits your phone (the 4B on
 any 8 GB phone, the 9B on 12 GB flagships — resumable). The engine, Tor binary,
