@@ -127,9 +127,14 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 1. **Download the launcher:** [Windows `matchstick.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd)
    or [Linux/macOS `matchstick.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh).
    Double-click the `.cmd` on Windows, or run `chmod +x matchstick.sh && ./matchstick.sh`
-   on Linux/macOS. You do **not** need to clone the repository. Answer two questions:
-   **Download** (grabs the pre-built pocket stick — ~6.6GB, checksum-verified,
-   no Docker, no build) or **Build** (any edition, Docker, ~1 hour). Plug a
+   on Linux/macOS. You do **not** need to clone the repository. Choose one:
+
+   | Option | What it does | Choose this if… |
+   | --- | --- | --- |
+   | **Download** | Gets the ready-made **pocket/spark** stick (~6.6GB), verifies it, and writes it to USB. No Docker or build time. | You want the fastest, simplest route. |
+   | **Build** | Creates a stick from source and lets you choose any edition, including larger models. Requires Docker and about an hour. | You want a different edition or a customized, reproducible build. |
+
+   Plug a
    USB stick when asked, confirm the erase — the script writes the stick for
    you, no Rufus, no command-line plumbing.
 2. **Boot any PC** from it (Secure Boot off). You land straight in the chat —
