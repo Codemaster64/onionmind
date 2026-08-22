@@ -2,6 +2,7 @@ package org.onionmind.app
 
 import android.content.Context
 import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -55,7 +56,7 @@ object ProcessManager {
                     val append = offset > 0 && c.responseCode == HttpURLConnection.HTTP_PARTIAL
                     if (offset > 0 && !append) part.delete()
                     c.inputStream.use { input ->
-                        part.outputStream(append = append).use { output ->
+                        FileOutputStream(part, append).use { output ->
                             input.copyTo(output, 1 shl 16)
                         }
                     }
