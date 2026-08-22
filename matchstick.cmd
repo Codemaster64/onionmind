@@ -31,10 +31,10 @@ Write-Host ""
 Write-Host "   Onionmind Matchstick - build + burn, the easy way" -ForegroundColor Magenta
 Write-Host "   The USB stick that forgets. It will be ERASED." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "   [D] DOWNLOAD: ready-made pocket/spark stick, ~6.6GB, no Docker or build time"
-Write-Host "       Fastest and simplest; one edition, works on almost any PC"
-Write-Host "   [B] BUILD: create from source, choose any edition, needs Docker, ~1 hour"
-Write-Host "       For larger models or a customized, reproducible stick"
+Write-Host "   [D] DOWNLOAD: ready-made pocket/spark with Qwen3.5 4B, ~6.6GB total"
+Write-Host "       Fastest and simplest; runs on almost any PC"
+Write-Host "   [B] BUILD: choose Qwen3.5 4B, 9B, or 27B (+ vision), ~1 hour"
+Write-Host "       Needs Docker; for larger or vision-capable models"
 Write-Host ""
 $mode = (Read-Host "   Download or build? [D/B, Enter = D]").Trim().ToUpper()
 $prebuilt = if ($mode -eq 'B') { $false } else { $true }

@@ -64,10 +64,10 @@ download_prebuilt() {
   say "Checksum OK"
 }
 
-printf '\n   [D] DOWNLOAD: ready-made pocket/spark stick, ~6.6GB, no Docker or build time\n'
-printf '       Fastest and simplest; one edition, works on almost any PC\n'
-printf '   [B] BUILD: create from source, choose any edition, needs Docker, ~1 hour\n'
-printf '       For larger models or a customized, reproducible stick\n\n'
+printf '\n   [D] DOWNLOAD: ready-made pocket/spark with Qwen3.5 4B, ~6.6GB total\n'
+printf '       Fastest and simplest; runs on almost any PC\n'
+printf '   [B] BUILD: choose Qwen3.5 4B, 9B, or 27B (+ vision), ~1 hour\n'
+printf '       Needs Docker; for larger or vision-capable models\n\n'
 printf '   Download or build? [D/B, Enter = D] '
 read -r MODE
 if [ "$(echo "${MODE:-D}" | tr '[:lower:]' '[:upper:]')" != "B" ]; then

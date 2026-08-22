@@ -131,8 +131,8 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 
    | Option | What it does | Choose this if… |
    | --- | --- | --- |
-   | **Download** | Gets the ready-made **pocket/spark** stick (~6.6GB), verifies it, and writes it to USB. No Docker or build time. | You want the fastest, simplest route. |
-   | **Build** | Creates a stick from source and lets you choose any edition, including larger models. Requires Docker and about an hour. | You want a different edition or a customized, reproducible build. |
+   | **Download** | Gets the ready-made **pocket/spark** stick with the **Qwen3.5 4B** model (~6.6GB total), verifies it, and writes it to USB. No Docker or build time. | You want the fastest, simplest route and a model that runs on almost any PC. |
+   | **Build** | Creates a stick from source and lets you choose **Qwen3.5 4B (`spark`)**, **Qwen3.5 9B (`ember`)**, or **Qwen3.8 27B (`inferno`)** with vision support. Requires Docker and about an hour. | You want a larger or vision-capable model, or a customized, reproducible build. |
 
    Plug a
    USB stick when asked, confirm the erase — the script writes the stick for
