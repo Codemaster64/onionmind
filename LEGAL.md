@@ -16,7 +16,7 @@ Hugging Face repository metadata, August 2026):
 | Use | Repository | License |
 |:--|:--|:--|
 | spark (4B) | [`mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF) | Apache-2.0 |
-| torch (9B) | [`mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) | Apache-2.0 |
+| ember (9B) | [`mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) | Apache-2.0 |
 | inferno (27B, 12GB build) | [`soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf`](https://huggingface.co/soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf) | Apache-2.0 |
 | inferno (27B, other builds) | [`hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF`](https://huggingface.co/hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF) | Apache-2.0 |
 | inferno-vision (mmproj) | [`JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF) | Apache-2.0 |
@@ -30,26 +30,27 @@ repositories listed above, not by this project.
 
 ## EU AI Act (Regulation (EU) 2024/1689)
 
-- Onionmind is a **local, personal tool**: it is not "placed on the market" or
-  "put into service" as a service by this project, which is the trigger for
-  most system-level obligations.
-- The models are distributed under a **royalty-free open-source license**,
-  which engages the AI Act's open-source carve-outs (Art. 2(12); Recital 107):
-  most GPAI-provider obligations do not apply.
+- This is a local, personal tool, but that description is not by itself an
+  exemption from the AI Act or a conclusion about whether an obligation applies.
+- To the extent the AI Act applies, this project relies on the open-source
+  exception where applicable. The exception has conditions and is not automatic;
+  this is not a guarantee or a definitive legal conclusion.
 - The **systemic-risk regime** (Art. 3(63)) attaches to models *trained* with
   more than 10²⁵ FLOPs. Nothing here was trained by this project; the models
   are far below that scale.
 - **Transparency (Art. 50(1))**: the interface and documentation state plainly
   that you are interacting with an AI system.
-- This project **processes no personal data** (GDPR, Reg. (EU) 2016/679):
-  everything runs locally; only search queries transit the Tor network.
+- The maintainers do not collect, store, or process user prompts or outputs.
+  Prompts may contain personal data and are processed locally on the user's
+  device. When web search is used, the query is sent to DuckDuckGo over Tor and
+  is visible to DuckDuckGo.
 
 ## Anonymity tooling is lawful
 
-Using, running and distributing Tor and related privacy tools is legal across
-the EU and EEA, including in Norway. MAC randomization of one's own devices,
-RAM-only ("amnesic") operation, and per-request circuit isolation are lawful
-privacy measures.
+Using, running and distributing Tor and related privacy tools is generally lawful
+across the EU and EEA, including in Norway. This does not make unlawful uses
+lawful. MAC randomization of one's own devices, RAM-only ("amnesic") operation,
+and per-request circuit isolation are ordinary privacy measures.
 
 ## Web search
 
@@ -66,7 +67,8 @@ produce, possess or distribute remains unlawful when produced with this tool —
 under EU law and its national implementations (e.g. Directive 2011/93/EU on
 child sexual abuse, Regulation (EU) 2021/784 on terrorist content) and, in
 Norway, the general criminal code (straffeloven). Responsibility for generated
-content lies with the user.
+content lies with the user. See [ACCEPTABLE_USE.md](ACCEPTABLE_USE.md) and
+[TERMS_OF_USE.md](TERMS_OF_USE.md).
 
 ## Norway (EEA)
 

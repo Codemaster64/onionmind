@@ -23,7 +23,7 @@ doesn't. Override with `ONIONMIND_MODEL`:
 | `27b` | always Qwen3.8-27B, even if that means 1–2 tok/s on CPU |
 
 The models are named for the burn — Matchstick lights them, and the ladder
-encodes the size: `spark` (4B) < `torch` (9B, and yes, *Tor*ch) < `inferno`
+encodes the size: `spark` (4B) < `ember` (9B) < `inferno`
 (27B, with `inferno-vision` reading images). Lineage, exact quants and the
 size mapping are in the tables below; switching installs never silently
 replaces a model you already have.
@@ -41,6 +41,8 @@ means running it again.
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | the search agent, written next to the weights |
 | `onionmind` command + desktop icon | chat + Tor search in one command. PATH on Windows, `/usr/local/bin` on Linux; the icon runs the same thing |
+| `onionmind-code` | repository-aware coding agent via DeepSeek Harness and Ollama |
+| `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
 | Python deps | `requests`, `PySocks` |
 
 ## Which build you get
@@ -198,6 +200,17 @@ Termux (~15–20 min, one-time), installs the `tor` package, picks 4B/9B by
 `/proc/meminfo`, and installs an `onionmind` command. `onionmind.py` itself
 auto-detects its backend — ollama on `:11434`, llama-server on `:8080` — with
 the tool-calling format translation living in the script.
+
+DeepSeek Harness is intentionally separate from the Onionmind search loop. Use
+`onionmind-code` when an agent should inspect or modify a workspace. It is
+launched through Ollama's official DSH integration, so the model provider and
+local/cloud choice remain explicit.
+
+The DSH `web_search` provider is overridden by `dsh-onionmind-tor-search.js`.
+It invokes `onionmind.py --tor-search`, which verifies Tor and creates the same
+fresh Tor circuit used by Onionmind's normal search. This covers DSH's web
+search tool; an agent can still deliberately run arbitrary network commands
+through its shell tools, which is outside the provider boundary.
 
 **Phone realities, honestly:** community figures (not our measurements) put
 the 4B Q4 at roughly 5–15 tok/s depending on chipset. Android will kill

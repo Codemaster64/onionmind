@@ -1,0 +1,8 @@
+# This file is copied into the installed model directory with absolute paths.
+- insert:
+    - id: onionmind-tor-search
+      name: '@ONIONMIND_DSH_PLUGIN@'
+    - id: web
+      name: '@deepseek-ai/dsh-web'
+      config:
+        searchProvider: onionmind-tor

@@ -6,6 +6,7 @@ import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
+import java.net.URLDecoder
 import java.util.concurrent.Executors
 
 /** The app's whole backend: serves the chat page and a tiny JSON API on
@@ -63,12 +64,23 @@ object Server {
     private fun install(session: IHTTPSession): Response {
         val files = HashMap<String, String>()
         session.parseBody(files)
-        val tier = files["tier"] ?: ""
+        // NanoHTTPD stores an application/x-www-form-urlencoded POST body in
+        // POST_DATA. It does not split it into one map entry per form field.
+        // The old lookup therefore rejected every install request silently.
+        val tier = formValue(files["postData"], "tier")
         if (ProcessManager.models().none { it.tier == tier })
             return NanoHTTPD.newFixedLengthResponse(
                 Response.Status.BAD_REQUEST, "text/plain", "tier?")
         ProcessManager.downloadModel(ctx, tier)
         return json("{\"ok\":true}")
+    }
+
+    private fun formValue(body: String?, name: String): String {
+        return body.orEmpty().split('&').asSequence()
+            .map { it.split('=', limit = 2) }
+            .firstOrNull { it.size == 2 && URLDecoder.decode(it[0], "UTF-8") == name }
+            ?.let { URLDecoder.decode(it[1], "UTF-8") }
+            .orEmpty()
     }
 
     private fun chat(session: IHTTPSession): Response {

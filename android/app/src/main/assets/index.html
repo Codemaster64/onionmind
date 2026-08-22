@@ -105,7 +105,12 @@ async function poll() {
 }
 setInterval(poll, 2000); poll();
 
-async function install(tier) { await fetch('/api/install', {method:'POST', body:'tier='+tier}); }
+async function install(tier) {
+  const r = await fetch('/api/install', {method:'POST', body:'tier='+encodeURIComponent(tier)});
+  if (!r.ok) {
+    $('setup-text').textContent = 'Could not start the download. Please try again.';
+  }
+}
 
 function add(cls, text) {
   const d = document.createElement('div');

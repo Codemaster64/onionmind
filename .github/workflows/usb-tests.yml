@@ -20,7 +20,7 @@ jobs:
             -o -name '*.hook.chroot' -o -name '*.hook.binary' \
             -o -name 'onionmind*' -o -name 'link-store.sh' \) \
             -exec sh -n {} \;
-          python -m py_compile onionmind.py
+          python -m py_compile onionmind.py build.py
 
       - name: live-build flags + package names (trixie)
         run: docker run --rm -v "$PWD/usb/tests:/t" debian:trixie sh /t/validate-live-build.sh
@@ -37,24 +37,28 @@ jobs:
             debian:trixie sh /t/validate-ollama-bake.sh
 
       - name: privacy fixes (mac check, ram scrub, bridges)
-        run: docker run --rm --privileged \
-          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
-          debian:trixie sh /t/validate-fixes.sh
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+            debian:trixie sh /t/validate-fixes.sh
 
       - name: print + editors
-        run: docker run --rm --privileged \
-          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
-          debian:trixie sh /t/validate-print.sh
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+            debian:trixie sh /t/validate-print.sh
 
       - name: status script (every branch, degraded box)
-        run: docker run --rm \
-          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
-          debian:trixie sh /t/validate-status.sh
+        run: |
+          docker run --rm \
+            -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+            debian:trixie sh /t/validate-status.sh
 
       # Network-dependent: tor bootstrap from a CI runner is usually fine but
       # not guaranteed - a flake here must not fail the kit.
       - name: clock over tor (network-dependent)
         continue-on-error: true
-        run: docker run --rm \
-          -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
-          debian:trixie bash /t/validate-clock.sh
+        run: |
+          docker run --rm \
+            -v "$PWD/usb/tests:/t" -v "$PWD/usb/config:/c" \
+            debian:trixie bash /t/validate-clock.sh

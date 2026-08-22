@@ -62,7 +62,7 @@ case "$TIER" in
         MODEL_NAME=inferno; VISION=1 ;;
   daily|9b) TIER=9b; REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=torch; VISION=0 ;;
+        MODEL_NAME=ember; VISION=0 ;;
   pocket|4b) TIER=4b; REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf
         MODEL_NAME=spark; VISION=0 ;;

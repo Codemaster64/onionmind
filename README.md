@@ -8,10 +8,10 @@
 
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/data_sent_to_the_cloud-0-black)
-![uncensored](https://img.shields.io/badge/uncensored-yes-9146F0)
+![uncensored](https://img.shields.io/badge/uncensored-no%20built--in%20filters-9146F0)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
-![license](https://img.shields.io/badge/license-MIT-black)
-![non-profit](https://img.shields.io/badge/non%E2%80%91profit-open_source-9146F0)
+![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
+![project](https://img.shields.io/badge/free%20%26%20open%20source-non--commercial-9146F0)
 
 [![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
 [![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
@@ -20,13 +20,17 @@
 
 [all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
 
-No cloud · No account · No telemetry · No refusals — and no business model:
-this is a **free, open-source, non-profit project** (MIT).
+**No cloud · No account · No telemetry** for the Onionmind maintainers: this is a
+free, open-source, non-commercial project. The wrapper code is MIT-licensed;
+the model weights are distributed under Apache-2.0 with attribution.
 
 A 27-billion-parameter AI that runs on a gaming GPU in your home — it can even read
 images. When it needs fresh information, it searches the web **through the Tor
-network**, so nobody — not your ISP, not the search engine — sees what it looked up.
-Your questions, the AI's reasoning, its answers: **they never leave your computer.**
+network**, which is designed to hide your IP address from the search provider.
+Your questions, the AI's reasoning, and its answers stay on your computer. Search
+queries are the exception: they are sent to DuckDuckGo's onion endpoint through
+Tor. DuckDuckGo sees the query, but the design is intended to hide your IP address
+from it.
 
 *Onion-routed on the outside. A mind that stays local at the centre.*
 
@@ -55,14 +59,38 @@ then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
 user). Same deal — the right model for your GPU, an `onionmind` command and a
 desktop launcher.
 
+For repository-aware coding work, the setup also provides an
+**`onionmind-code` launcher**:
+
+```text
+onionmind-code
+```
+
+It starts DeepSeek Harness through Ollama. This is deliberately a separate
+mode: Onionmind remains the local Tor-search chat, while Harness is the agent
+that can inspect and modify a workspace. DeepSeek Harness is currently a
+developer preview.
+
+The desktop chat also has a **Coding agent** button. It opens the same Harness
+session using the currently selected Ollama model.
+
+Harness web searches are replaced with Onionmind's Tor-backed search provider;
+the search query is handled by the same Tor-verified code as the main chat.
+
+After the first setup, update the installed code without touching the model:
+
+```text
+onionmind-update
+```
+
 **Android (light models)**
 
 **[⬇ Onionmind APK](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)**
 — 14 MB, one file, no app store. Tap it, allow installs from unknown sources,
 done. On first launch it downloads the model that fits your phone (the 4B on
-any 8 GB phone, the 9B on 12 GB flagships — resumable). Same chat, same Tor
-search, everything on-device: the engine, the tor binary and the UI are all
-inside the APK. arm64 phones only.
+any 8 GB phone, the 9B on 12 GB flagships — resumable). The engine, Tor binary,
+and UI are on-device; web-search queries are sent to DuckDuckGo over Tor.
+arm64 phones only.
 
 Want a terminal on your phone too? [Termux](https://f-droid.org) +
 **[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind-android.sh)**
@@ -79,8 +107,9 @@ Or just double-click the icon. Type `/save notes.txt` in the chat to export the
 conversation — print it from there if you want it on paper.
 
 The models are named for the burn — Matchstick lights them, and the name
-encodes the size: **spark** (4B) < **torch** (9B — and yes, *Tor*ch) <
-**inferno** (27B, with **inferno-vision** reading images). `ollama run torch`
+encodes the size: **spark** (4B) < **ember** (9B) <
+**inferno-27b** (27B, with **inferno-27b-vision** reading images). Smaller installs use
+**ember-9b** or **spark-4b**.
 works too, for raw chat without search.
 
 ---
@@ -123,7 +152,7 @@ persists. Nothing to find.
 | 12 GB+ *(RTX 3080 / 4070 Ti class)* | **The full 27B, with vision** — reads images too |
 | 8 GB+ | The full 27B, squeezed to fit |
 | 6 GB+ | 9B — sharp, and *faster* than the big one |
-| Anything / no GPU | 4B — still uncensored, still searches Tor, runs on a potato |
+| Anything / no GPU | 4B — no built-in content filters, searches through Tor, runs on a potato |
 | **Android phone** *(Termux)* | the 4B on any 8 GB phone, the 9B on 12 GB flagships |
 
 **Matchstick editions** — you pick when building the stick (`flagship` and
@@ -158,9 +187,12 @@ disappointing ones. [See what has been verified, and what hasn't.](TECHNICAL.md#
 
 The 60-second version for engineers — [the long version is here](TECHNICAL.md):
 
-- **Searches can't leak.** Every web search builds a *fresh Tor circuit*, resolves
-  DNS through Tor, and hits DuckDuckGo's onion endpoint so no exit node ever sees
-  the query. If the circuit doesn't verify, the tool **refuses to search at all**.
+- **Searches are designed not to leak the user's IP address.** Every web search
+  builds a *fresh Tor circuit*, resolves DNS through Tor, and hits DuckDuckGo's
+  onion endpoint so no exit node ever sees the query. DuckDuckGo still sees the
+  search terms. Correlation risks remain: an adversary watching both ends may be
+  able to correlate traffic. If the circuit doesn't verify, the tool refuses to
+  search.
 - **The model is baked, not downloaded.** On Matchstick, weights are deduplicated
   into the image at build time and served from a read-only store — boot-time
   network usage: zero.
@@ -194,16 +226,31 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 
 ---
 
-## Legal
+## Legal and acceptable use
 
-Released as a **non-profit open-source work**: free to use, study, modify and
-redistribute (MIT, [LICENSE](LICENSE)). Models: **Apache-2.0**, redistribution
-permitted with attribution ([notices](THIRD_PARTY_NOTICES.md)). EU AI Act:
-local personal tool, open-source carve-out, no personal data processed. Tor
-and privacy tooling are lawful across the EU/EEA. An uncensored model removes
-*refusals*, not *laws* — responsibility for generated content lies with the
-user. Full analysis, EU-law-first: **[LEGAL.md](LEGAL.md)** *(not legal
-advice)*.
+Released as an open-source project. Wrapper code: **MIT** ([LICENSE](LICENSE)).
+Model weights: **Apache-2.0**, with attribution. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [NOTICE](NOTICE) for
+licenses and notices.
+
+To the extent the EU AI Act applies, this project relies on the open-source
+exception where applicable. This is not a guarantee and should not be read as a
+definitive legal conclusion.
+
+The maintainers do not operate a service and do not collect, store, or process
+user prompts or outputs. Processing happens locally on the user's device. Search
+queries are sent to DuckDuckGo over Tor and are visible to DuckDuckGo. Tor and
+privacy tooling are generally lawful, but lawful use depends on what you do with
+them and on applicable law.
+
+“Uncensored” means **no built-in content filters**. The model may still refuse or
+fail unpredictably. An uncensored model removes refusals, not laws — responsibility
+for generated content lies with the user.
+
+Read the [Acceptable Use Policy](ACCEPTABLE_USE.md), [Terms of Use](TERMS_OF_USE.md),
+and [LEGAL.md](LEGAL.md), labelled **not legal advice**. The project is intended
+to support privacy, local execution, journalism, research, human-rights work,
+and access to information—not unlawful activity.
 
 ---
 
