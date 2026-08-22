@@ -53,19 +53,19 @@ VISION_FILE=Qwen3.8-27B-Uncensored-vision-f16.gguf
 case "$TIER" in
   max|17gb) TIER=17gb; REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
         FILE=Qwen3.8-27B-abliterated-mtp-Q4_K_M.gguf
-        MODEL_NAME=onionmind-27b; VISION=1 ;;
+        MODEL_NAME=inferno; VISION=1 ;;
   flagship|12gb) TIER=12gb; REPO=soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
         FILE=qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
-        MODEL_NAME=onionmind-27b; VISION=1 ;;
+        MODEL_NAME=inferno; VISION=1 ;;
   standard|8gb) TIER=8gb; REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
         FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
-        MODEL_NAME=onionmind-27b; VISION=1 ;;
+        MODEL_NAME=inferno; VISION=1 ;;
   daily|9b) TIER=9b; REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=onionmind-9b; VISION=0 ;;
+        MODEL_NAME=torch; VISION=0 ;;
   pocket|4b) TIER=4b; REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=onionmind-4b; VISION=0 ;;
+        MODEL_NAME=spark; VISION=0 ;;
   *) die "tier must be max/17gb, flagship/12gb, standard/8gb, daily/9b or pocket/4b (got '$TIER')" ;;
 esac
 say "Tier $TIER: $FILE (vision: $([ "$VISION" = 1 ] && echo yes || echo no))"

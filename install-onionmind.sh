@@ -129,7 +129,7 @@ if [ "$WANT" = 27b ]; then
     REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
   fi
   [ "$VRAM" -lt 8000 ] && warn "${VRAM} MiB VRAM: the 27B will run mostly on CPU (~1-2 tok/s)."
-  MODEL_NAME=onionmind-27b
+  MODEL_NAME=inferno
   say "Model: Qwen3.8-27B (uncensored)"
 else
   if [ "$VRAM" -ge 6000 ]; then
@@ -229,7 +229,7 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "onionmind-27b"
+MODEL  = "inferno"
 NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
 PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.

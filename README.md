@@ -68,6 +68,11 @@ onionmind "who won the last election?"
 Or just double-click the icon. Type `/save notes.txt` in the chat to export the
 conversation — print it from there if you want it on paper.
 
+The models are named for the burn — Matchstick lights them, and the name
+encodes the size: **spark** (4B) < **torch** (9B — and yes, *Tor*ch) <
+**inferno** (27B, with **inferno-vision** reading images). `ollama run torch`
+works too, for raw chat without search.
+
 ---
 
 ## Matchstick — the USB stick that forgets

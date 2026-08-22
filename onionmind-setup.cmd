@@ -76,7 +76,7 @@ if ($want -eq '27b') {
                              $file='qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf' }
   else                     { $repo='hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF'; $file='Qwen3.8-27B-abliterated-IQ2_M.gguf' }
   if ($vram -lt 8000) { Write-Host "    ${vram} MiB VRAM: the 27B will run mostly on CPU (~1-2 tok/s)." -ForegroundColor Yellow }
-  $name = "onionmind-27b"
+  $name = "inferno"
   Say "Model: Qwen3.8-27B (uncensored)"
 } else {
   if ($vram -ge 6000) { $repo='mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF'; $file='Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf'; $sz='9B' }
@@ -181,7 +181,7 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "onionmind-27b"
+MODEL  = "inferno"
 NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
 PORTS  = (9150, 9050)                            # 9150 = Tor Browser, 9050 = tor daemon
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
@@ -443,10 +443,10 @@ if __name__ == "__main__":
                 print("\n" + turn(history) + "\n")
 '@
 # Point the tool at whichever model was installed - on the fast tier the model is NOT
-# named onionmind-27b, and the embedded default would reference a model that does
+# named inferno, and the embedded default would reference a model that does
 # not exist. Plain .Replace(), not a regex: this file has CRLF endings and a $
 # anchor cannot match before the carriage return. The shell installer uses sed.
-$search = $search.Replace('MODEL  = "onionmind-27b"', 'MODEL  = "' + $name + '"')
+$search = $search.Replace('MODEL  = "inferno"', 'MODEL  = "' + $name + '"')
 # Set-Content -Encoding UTF8 writes a BOM on Windows PowerShell 5.1, and a BOM ahead
 # of the shebang breaks ./onionmind.py on Linux. WriteAllText with $false does not.
 [System.IO.File]::WriteAllText("$Dir\onionmind.py", $search, (New-Object System.Text.UTF8Encoding($false)))

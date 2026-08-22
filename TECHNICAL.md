@@ -22,9 +22,11 @@ doesn't. Override with `ONIONMIND_MODEL`:
 | `fast` | always the small model — 116 tok/s (9B) or 166 tok/s (4B) |
 | `27b` | always Qwen3.8-27B, even if that means 1–2 tok/s on CPU |
 
-Each is registered under its real name — `onionmind-27b`, `onionmind-9b`,
-`onionmind-4b` — so switching never silently replaces a model you already have, and
-the search agent is pointed at whichever one was installed.
+The models are named for the burn — Matchstick lights them, and the ladder
+encodes the size: `spark` (4B) < `torch` (9B, and yes, *Tor*ch) < `inferno`
+(27B, with `inferno-vision` reading images). Lineage, exact quants and the
+size mapping are in the tables below; switching installs never silently
+replaces a model you already have.
 
 The installer is re-runnable and resumes partial downloads, so a dropped connection just
 means running it again.
@@ -308,7 +310,7 @@ gateway makes leaks architectural rather than a matter of configuring things cor
 Applying a change:
 
 ```powershell
-ollama create onionmind-27b -f "$env:LOCALAPPDATA\qwen\Modelfile"
+ollama create inferno -f "$env:LOCALAPPDATA\qwen\Modelfile"
 ```
 
 ## Troubleshooting
@@ -357,7 +359,7 @@ Missing chat template. Importing a bare GGUF gets you `TEMPLATE {{ .Prompt }}`, 
 passthrough — the model *continues text* instead of chatting. Check with:
 
 ```powershell
-ollama show --modelfile onionmind-27b | Select-String TEMPLATE
+ollama show --modelfile inferno | Select-String TEMPLATE
 ```
 
 It should show ChatML (`<|im_start|>`), not `{{ .Prompt }}`. The installer sets this.
@@ -456,7 +458,7 @@ actual phone yet.
 
 ## Notes
 
-- **Vision** is installed automatically as `onionmind-27b-vision`. The `mmproj` is the
+- **Vision** is installed automatically as `inferno-vision`. The `mmproj` is the
   vision tower in its own file — architecture-specific, not quant-specific — so one projector
   binds to any Qwen3.8-27B build. It shares the base blob, costing ~900MB rather than a second
   full model. Verified reading shapes, colours and text from a test image.
