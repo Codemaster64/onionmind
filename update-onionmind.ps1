@@ -18,6 +18,38 @@ Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster
 $dshPatch = (Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/dsh-onionmind-tor.patch.yml').Content
 $dshPatch.Replace('@ONIONMIND_DSH_PLUGIN@', ((Join-Path $InstallDir 'dsh-onionmind-tor-search.js') -replace '\\', '/')) |
   Set-Content (Join-Path $InstallDir 'dsh-onionmind-tor.patch.yml') -Encoding UTF8
+# Keep the installed command in sync with the UI entry point too. Older
+# installs may still have a terminal-only launcher, even after onionmind.py
+# itself has been updated.
+@'
+param([switch]$UI)
+$Host.UI.RawUI.WindowTitle = 'Onionmind'
+$tor = Get-Process firefox -ErrorAction SilentlyContinue |
+       Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
+if (-not $tor) {
+  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+    if (Test-Path $c) { Start-Process $c; break }
+  }
+}
+for ($i = 0; $i -lt 45; $i++) {
+  if (Get-NetTCPConnection -LocalPort 9150 -State Listen -ErrorAction SilentlyContinue) { break }
+  if (Get-NetTCPConnection -LocalPort 9050 -State Listen -ErrorAction SilentlyContinue) { break }
+  Start-Sleep 1
+}
+Set-Location ~
+if ($UI -or ($args.Count -eq 0)) {
+  & pythonw "$PSScriptRoot\onionmind.py" --ui
+} else {
+  & python "$PSScriptRoot\onionmind.py" @args
+}
+'@ | Set-Content (Join-Path $InstallDir 'onionmind-launch.ps1') -Encoding UTF8
+@"
+@echo off
+title Onionmind
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" %*
+"@ | Set-Content (Join-Path $InstallDir 'onionmind.cmd') -Encoding ASCII
 @"
 @echo off
 title Onionmind Code
@@ -25,4 +57,4 @@ set "ONIONMIND_PY=%~dp0onionmind.py"
 set "ONIONMIND_PYTHON=python"
 ollama launch dsh --model $model -- --patch "%~dp0dsh-onionmind-tor.patch.yml" %*
 "@ | Set-Content (Join-Path $InstallDir 'onionmind-code.cmd') -Encoding ASCII
-Write-Host "Updated Onionmind code and onionmind-code ($model). Model weights were not changed."
+Write-Host "Updated Onionmind UI launcher and coding launcher ($model). Model weights were not changed."
