@@ -83,19 +83,16 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 
 > Strike it anywhere. Burns bright. Leaves only ash.
 
-1. **Build the stick** — one command, needs [Docker](https://docker.com), ~1 hour
-   ([full guide](usb/README.md)):
-
-   ```bash
-   docker build -f usb/Dockerfile -t onionmind-usb .
-   docker run --rm --privileged -v "$(pwd)/usb/cache:/onionmind/usb/cache" \
-     -v "$(pwd)/usb/out:/onionmind/usb/out" onionmind-usb flagship
-   ```
-
-2. **Burn** `usb/out/onionmind-matchstick-12gb-amd64.iso` to a USB stick with
-   [Rufus](https://rufus.ie) or Etcher.
-3. **Boot any PC** from it (Secure Boot off). You land straight in the chat —
+1. **Double-click `matchstick.cmd`** (Windows) or run **`./matchstick.sh`**
+   (Linux), from inside a clone of this repo. Pick an edition from the menu,
+   plug a USB stick when asked, confirm the erase. It builds the stick with
+   [Docker](https://docker.com) (~1 hour, downloads cached) and writes it to
+   the stick for you — no Rufus, no command-line plumbing.
+2. **Boot any PC** from it (Secure Boot off). You land straight in the chat —
    `sudo onionmind-status` shows every protection verifying itself live.
+
+*The DIY route* (manual docker commands, Rufus/Etcher, every knob) is still
+there: **[usb/README.md](usb/README.md)**.
 
 Inside the stick: the AI and its weights baked in · a firewall where **Tor is the
 only process allowed to leave the machine** · a fresh fake MAC address every boot ·

@@ -122,7 +122,18 @@ Troubleshooting). Anything else runs on CPU: fine for 9b/4b, slow for the 27B.
 
 ## Build
 
-From the repo root:
+**The easy way** — from a clone of this repo, no command-line plumbing:
+
+- **Windows:** double-click **`matchstick.cmd`**
+- **Linux/macOS:** run **`./matchstick.sh`**
+
+Both show an edition menu, build the stick with Docker if the ISO isn't built
+yet, list your USB sticks, demand a typed `YES` before erasing one, write the
+ISO raw with a progress bar, and print the boot instructions. Set
+`MATCHSTICK_DRY=1` to watch the whole flow without building or writing
+anything.
+
+**The manual way**, from the repo root:
 
 ```bash
 docker build -f usb/Dockerfile -t onionmind-usb .
