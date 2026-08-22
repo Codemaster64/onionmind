@@ -60,7 +60,12 @@ object ProcessManager {
                     if (offset > 0 && !append) part.delete()
                     c.inputStream.use { input ->
                         FileOutputStream(part, append).use { output ->
-                            input.copyTo(output, 1 shl 16)
+                            val buffer = ByteArray(1 shl 16)
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                output.write(buffer, 0, read)
+                                downloadProgress = part.length().toDouble() / m.bytes
+                            }
                         }
                     }
                 }

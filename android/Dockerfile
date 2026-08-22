@@ -3,7 +3,7 @@
 #
 #   docker build -f android/Dockerfile -t onionmind-android .
 #   docker run --rm -v "$(pwd):/repo" -v "$(pwd)/../onionmind-out:/out" \
-#     onionmind-android            # writes /out/Onionmind-1.1.apk
+#     onionmind-android            # writes /out/Onionmind-1.2.apk
 #
 FROM gradle:8-jdk17 AS sdk
 ENV ANDROID_HOME=/opt/android-sdk
@@ -27,5 +27,5 @@ WORKDIR /repo
 RUN bash android/icons.sh && bash android/llama.sh
 WORKDIR /repo/android
 RUN bash itest.sh && gradle -q assembleDebug
-RUN mkdir -p /out-staging && cp app/build/outputs/apk/debug/app-debug.apk /out-staging/Onionmind-1.1.apk
-CMD ["bash", "-c", "mkdir -p /out && cp /out-staging/Onionmind-1.1.apk /out/ && echo 'APK -> /out/Onionmind-1.1.apk'"]
+RUN mkdir -p /out-staging && cp app/build/outputs/apk/debug/app-debug.apk /out-staging/Onionmind-1.2.apk
+CMD ["bash", "-c", "mkdir -p /out && cp /out-staging/Onionmind-1.2.apk /out/ && echo 'APK -> /out/Onionmind-1.2.apk'"]
