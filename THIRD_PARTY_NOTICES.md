@@ -17,6 +17,13 @@ https://www.apache.org/licenses/LICENSE-2.0
 - `hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF` (inferno, Q4_K_M / IQ2_M builds).
 - `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF` (inferno-vision mmproj).
 
+## Model weights (LFM1.0)
+
+- `Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF` (lfm-2.6b, mobile profile) —
+  Q4_K_M quantization of Liquid AI's LFM2.5-2.6B with reduced refusal behavior.
+
+License: https://huggingface.co/LiquidAI/LFM2.5-2.6B/blob/main/LICENSE
+
 All weights are re-distributed unmodified from the repositories above; the
 abliteration modifications were made upstream, not by this project.
 

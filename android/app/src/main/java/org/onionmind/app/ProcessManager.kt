@@ -20,6 +20,9 @@ object ProcessManager {
     data class Model(val tier: String, val file: String, val url: String, val bytes: Long)
 
     fun models() = listOf(
+        Model("lfm", "LFM2.5-2.6B-heretic-Q4_K_M.gguf",
+              "https://huggingface.co/Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF/resolve/main/LFM2.5-2.6B-heretic-Q4_K_M.gguf",
+              1_674_454_432L),
         Model("4b", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
               "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
               2_707_514_688L),

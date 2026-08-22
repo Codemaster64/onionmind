@@ -24,7 +24,7 @@
 
 **No cloud · No account · No telemetry** for the Onionmind maintainers: this is a
 free, open-source, non-commercial project. The wrapper code is MIT-licensed;
-the model weights are distributed under Apache-2.0 with attribution.
+model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md`.
 
 A 27-billion-parameter AI that runs on a gaming GPU in your home — it can even read
 images. When it needs fresh information, it searches the web **through the Tor

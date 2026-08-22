@@ -1,6 +1,8 @@
 package org.onionmind.app
 
 import android.content.Context
+import android.app.ActivityManager
+import android.os.StatFs
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
@@ -51,6 +53,10 @@ object Server {
 
     private fun status(): Response {
         val model = ProcessManager.installedModel(ctx)
+        val memory = ActivityManager.MemoryInfo()
+        (ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
+            .getMemoryInfo(memory)
+        val storage = StatFs(ctx.filesDir.path).availableBytes / (1024 * 1024)
         return json(buildJsonObject {
             put("tor", ProcessManager.torReady())
             put("llama", ProcessManager.llamaReady())
@@ -58,6 +64,8 @@ object Server {
                 ?: (if (ProcessManager.downloadProgress >= 0.0) ProcessManager.downloadTier else "none"))
             put("downloading", ProcessManager.downloadProgress in 0.0..0.99)
             put("progress", ProcessManager.downloadProgress)
+            put("ramMb", memory.totalMem / (1024 * 1024))
+            put("freeStorageMb", storage)
         }.toString())
     }
 

@@ -18,6 +18,7 @@
 #   standard|8gb    9.5GB  Qwen3.8-27B IQ2_M    + vision   -> 32GB+ stick
 #   daily|9b       5.2GB  Qwen3.5-9B            no vision -> 16GB+ stick
 #   pocket|4b      2.5GB  Qwen3.5-4B            no vision -> 16GB+ stick
+#   mobile|lfm     1.7GB  LFM2.5-2.6B           no vision -> 8GB+ stick
 #
 # env overrides: OLLAMA_URL (pin an ollama release), NUM_GPU (default 99),
 #   ROCM=0 (drop AMD/ROCm support, saves ~1GB),
@@ -66,7 +67,10 @@ case "$TIER" in
   pocket|4b) TIER=4b; REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf
         MODEL_NAME=spark; VISION=0 ;;
-  *) die "tier must be max/17gb, flagship/12gb, standard/8gb, daily/9b or pocket/4b (got '$TIER')" ;;
+  mobile|lfm) TIER=lfm; REPO=Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF
+        FILE=LFM2.5-2.6B-heretic-Q4_K_M.gguf
+        MODEL_NAME=lfm-2.6b; VISION=0 ;;
+  *) die "tier must be max/17gb, flagship/12gb, standard/8gb, daily/9b, pocket/4b or mobile/lfm (got '$TIER')" ;;
 esac
 say "Tier $TIER: $FILE (vision: $([ "$VISION" = 1 ] && echo yes || echo no))"
 

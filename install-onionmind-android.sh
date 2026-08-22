@@ -26,18 +26,23 @@ if [ ! -x "$DIR/llama.cpp/build/bin/llama-server" ]; then
   cmake --build "$DIR/llama.cpp/build" --target llama-server -j"$(nproc)"
 fi
 
-# --- 2. model by RAM: the 9b on 12GB flagships, the 4b below ------------------
+# --- 2. model by RAM: 9b on 12GB flagships, LFM on small phones --------------
 WANT="${ONIONMIND_MODEL:-auto}"
 RAM_MB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 ))
 if [ "$WANT" = auto ]; then
-  [ "$RAM_MB" -ge 11000 ] && WANT=9b || WANT=4b
+  if [ "$RAM_MB" -ge 11000 ]; then WANT=9b
+  elif [ "$RAM_MB" -ge 7000 ]; then WANT=4b
+  else WANT=lfm
+  fi
 fi
 case "$WANT" in
+  lfm) REPO=Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF
+       FILE=LFM2.5-2.6B-heretic-Q4_K_M.gguf ;;
   4b) REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
       FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf ;;
   9b) REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
       FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf ;;
-  *) die "ONIONMIND_MODEL must be auto, 4b or 9b (got '$WANT')" ;;
+  *) die "ONIONMIND_MODEL must be auto, lfm, 4b or 9b (got '$WANT')" ;;
 esac
 say "Model: $WANT ($FILE) - ${RAM_MB}MB RAM detected"
 [ -s "$DIR/models/$FILE" ] || curl -L -C - --fail -o "$DIR/models/$FILE" \

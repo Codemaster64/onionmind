@@ -54,14 +54,16 @@ if ($vram -eq 0) { Write-Host "  No NVIDIA GPU - will run on CPU (slow)" -Foregr
 
 # ONIONMIND_MODEL picks what gets installed:
 #   auto (default) - the 27B where it fits in VRAM, the fast small model where it doesn't
-#   fast           - always the small model, whatever the hardware
+#   fast           - always the mobile-sized LFM model, whatever the hardware
+#   mobile        - alias for fast
 #   27b            - always Qwen3.8-27B, even if it runs on CPU at 1-2 tok/s
 # There is NO small Qwen3.8: as of Aug 2026 the family is 27B and a 2.4T MoE, nothing else,
 # and no generation newer than 3.8 exists. Qwen3.5 is the newest line WITH small dense
 # models, so that is what "fast" means here.
 # MTP builds keep the multi-token-prediction head; ollama uses it for speculative decoding.
 $want = if ($env:ONIONMIND_MODEL) { $env:ONIONMIND_MODEL.ToLower() } else { 'auto' }
-if ($want -notin @('auto','fast','27b')) { throw "ONIONMIND_MODEL must be auto, fast or 27b (got '$want')" }
+if ($want -notin @('auto','fast','mobile','27b')) { throw "ONIONMIND_MODEL must be auto, fast, mobile or 27b (got '$want')" }
+if ($want -eq 'mobile') { $want = 'fast' }
 if ($want -eq 'auto') { $want = if ($vram -ge 8000) { '27b' } else { 'fast' } }
 
 $Vision = ($want -eq '27b')          # the mmproj is built for the 27B architecture
@@ -74,12 +76,11 @@ if ($want -eq '27b') {
   $name = "inferno-27b"
   Say "Model: Inferno (27B)"
 } else {
-  if ($vram -ge 6000) { $repo='mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF'; $file='Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf'; $sz='9B' }
-  else                { $repo='mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF'; $file='Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf'; $sz='4B' }
-  $name = if ($sz -eq '4B') { 'spark-4b' } else { 'ember-9b' } # ember progression, keep size honest
-  Say "Model: $(if ($sz -eq '4B') { 'Spark' } else { 'Ember' }) ($sz) - fits entirely in VRAM"
+  $repo='Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF'; $file='LFM2.5-2.6B-heretic-Q4_K_M.gguf'; $sz='2.6B'
+  $name = 'lfm-2.6b'
+  Say "Model: LFM ($sz) - mobile/fast profile"
   if ($vram -lt 8000) {
-    Write-Host "    Using the smaller Ember family for much faster local responses." -ForegroundColor Yellow
+    Write-Host "    Using LFM2.5 for much faster local responses." -ForegroundColor Yellow
   }
   Write-Host "    Vision is available with Inferno. Set ONIONMIND_MODEL=27b to install it." -ForegroundColor Yellow
 }

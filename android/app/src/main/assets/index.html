@@ -33,6 +33,14 @@
   #setup { margin: auto; max-width: 340px; text-align: center; padding: 24px; }
   #setup .ring { margin: 0 auto 18px; width: 84px; height: 84px; }
   #setup p { color: #b9aec4; font-size: 14px; margin: 8px 0 18px; }
+  #device-note { color: #9ef0b0; font-size: 12px; margin: -8px 0 14px; }
+  #model-list { display: grid; gap: 10px; text-align: left; }
+  .model-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .model-card.recommended { border-color: #9ef0b0; box-shadow: 0 0 0 1px #2c5e3c inset; }
+  .model-head { display: flex; align-items: baseline; gap: 8px; }
+  .model-head strong { font-size: 14px; }
+  .model-head span { color: #9ef0b0; font-size: 11px; margin-left: auto; }
+  .model-meta { color: #b9aec4; font-size: 12px; margin: 4px 0 9px; }
   .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 14px 0; }
   .bar i { display: block; height: 100%; background: var(--purple); width: 0%; transition: width .5s; }
   #busy { text-align: center; color: var(--dim); font-size: 13px; padding: 6px; display: none; }
@@ -64,8 +72,9 @@
     </svg>
   </div>
   <p id="setup-text"></p>
+  <div id="device-note"></div>
   <div class="bar"><i id="prog"></i></div>
-  <div class="row" id="setup-buttons"></div>
+  <div id="model-list"></div>
 </div>
 
 <div id="chat"></div>
@@ -88,15 +97,13 @@ async function poll() {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
     $('setup-text').textContent = 'Download the model? Everything stays on this phone.';
     $('prog').style.width = '0%';
-    $('setup-buttons').innerHTML =
-      '<button onclick="install(\'4b\')">4B · any phone</button>' +
-      '<button onclick="install(\'9b\')">9B · 12GB flagships</button>';
+    renderModelPicker();
   } else if (status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
     $('setup-text').textContent = 'Downloading the ' + status.model.toUpperCase() +
       ' model — resumable, leave the app open.';
     $('prog').style.width = Math.round(status.progress * 100) + '%';
-    $('setup-buttons').innerHTML = '';
+    $('model-list').innerHTML = '';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
     if (!ready) { add('bot', 'Ready. Tor ' + (status.tor ? 'is up' : 'is still building circuits — ' +
@@ -104,6 +111,36 @@ async function poll() {
   }
 }
 setInterval(poll, 2000); poll();
+
+function recommendedTier() {
+  const ram = Number(status.ramMb || 0);
+  if (ram >= 11000) return '9b';
+  if (ram >= 7000) return '4b';
+  return 'lfm';
+}
+
+function renderModelPicker() {
+  const ram = Number(status.ramMb || 0);
+  const storage = Number(status.freeStorageMb || 0);
+  const rec = recommendedTier();
+  $('device-note').textContent = ram
+    ? ('Detected: ' + Math.round(ram / 1024 * 10) / 10 + ' GB RAM · ' +
+       Math.round(storage / 102.4) / 10 + ' GB free storage. Recommended: ' + rec.toUpperCase())
+    : 'Scanning this phone for the best match…';
+  const models = [
+    {tier:'lfm', name:'LFM2.5 Heretic', params:'2.6B parameters', size:'~1.7 GB download', specs:'Recommended: 4 GB RAM · 3 GB free storage', note:'Fastest; best for small phones, tools and quick chat'},
+    {tier:'4b', name:'Qwen3.5 Heretic', params:'4B parameters', size:'~2.7 GB download', specs:'Recommended: 8 GB RAM · 4 GB free storage', note:'Balanced quality and speed'},
+    {tier:'9b', name:'Qwen3.5 Heretic', params:'9B parameters', size:'~5.6 GB download', specs:'Recommended: 12 GB RAM · 7 GB free storage', note:'Best answers; slower and heavier'}
+  ];
+  $('model-list').innerHTML = models.map(m =>
+    '<div class="model-card ' + (m.tier === rec ? 'recommended' : '') + '">' +
+      '<div class="model-head"><strong>' + m.name + '</strong>' +
+      (m.tier === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
+      '<div class="model-meta">' + m.params + ' · ' + m.size + '<br>' + m.specs + '<br>' + m.note + '</div>' +
+      '<button onclick="install(\'' + m.tier + '\')">Download ' + m.tier.toUpperCase() + '</button>' +
+    '</div>'
+  ).join('');
+}
 
 async function install(tier) {
   try {
