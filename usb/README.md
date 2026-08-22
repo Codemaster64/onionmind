@@ -129,24 +129,27 @@ docker build -f usb/Dockerfile -t onionmind-usb .
 docker run --rm --privileged \
   -v "$(pwd)/usb/cache:/onionmind/usb/cache" \
   -v "$(pwd)/usb/out:/onionmind/usb/out" \
-  onionmind-usb 12gb
+  onionmind-usb flagship
 ```
 
 `--privileged` is required: live-build chroots and bind-mounts `/proc`,
 `/sys`, `/dev` inside the image it assembles. On a Debian trixie+ box you can
-skip Docker: `sudo apt install live-build && sudo ./usb/build.sh 12gb`.
+skip Docker: `sudo apt install live-build && sudo ./usb/build.sh flagship`.
 
 The tier argument is the GPU class of the machines you'll boot it on — the
 build machine's hardware is irrelevant. `auto` doesn't exist here because the
 stick can't see the target's VRAM; you decide once:
 
-| Tier | Weights | Model | Vision | Stick |
+| Edition (code) | Weights | Model | Vision | Stick |
 |---|---|---|---|---|
-| `17gb` | 16.0 GB | Qwen3.8-27B `Q4_K_M` | yes | 32GB |
-| `12gb` | 11.7 GB | Qwen3.8-27B `3.69bpw` | yes | 32GB |
-| `8gb` | 9.5 GB | Qwen3.8-27B `IQ2_M` | yes | 32GB |
-| `9b` | 5.2 GB | Qwen3.5-9B | no | 16GB |
-| `4b` | 2.5 GB | Qwen3.5-4B | no | 16GB |
+| `max` (`17gb`) | 16.0 GB | Qwen3.8-27B `Q4_K_M` | yes | 32GB |
+| `flagship` (`12gb`) | 11.7 GB | Qwen3.8-27B `3.69bpw` | yes | 32GB |
+| `standard` (`8gb`) | 9.5 GB | Qwen3.8-27B `IQ2_M` | yes | 32GB |
+| `daily` (`9b`) | 5.2 GB | Qwen3.5-9B | no | 16GB |
+| `pocket` (`4b`) | 2.5 GB | Qwen3.5-4B | no | 16GB |
+
+Both spellings work as the build argument - `./usb/build.sh flagship` and
+`./usb/build.sh 12gb` build the identical stick.
 
 Output lands in `usb/out/onionmind-matchstick-<tier>-amd64.iso` with a `.sha256`.
 
@@ -159,7 +162,7 @@ https://bridges.torproject.org, semicolon- or newline-separated):
 
 ```bash
 ONIONMIND_BRIDGES="obfs4 1.2.3.4:9130 cert=abc iat-mode=0" \
-  docker run --rm --privileged ... onionmind-usb 12gb
+  docker run --rm --privileged ... onionmind-usb flagship
 ```
 
 ## Burn
@@ -341,7 +344,7 @@ can't catch prompt text.
 | `onionmind-status` reports every branch honestly on a degraded box | ✅ `validate-status.sh` |
 | All of the above, on every push | CI: `.github/workflows/usb-tests.yml` |
 | **Full `lb build` produces an ISO** | ✅ 4b (5.5GB) and 12gb (16GB) tiers — DKMS NVIDIA module compiled in-chroot, hooks ran, single-copy stores confirmed inside both artifacts |
-| 12gb vision bake | ✅ both manifests (`qwen38-uncensored`, `-vision`) in the image; blobs deduplicated to one 11.7GB base + one 885MB projector shared by both models |
+| 12gb vision bake | ✅ both manifests (`onionmind-27b`, `-vision`) in the image; blobs deduplicated to one 11.7GB base + one 885MB projector shared by both models |
 | Boot-menu entries in the final ISO | ✅ syslinux + grub print/debug entries verified in both shipped images (after fixing the hook's CWD assumption in build #1) |
 | **Boots on real hardware; driver loads; firewall order holds** | ❌ first boot is yours |
 

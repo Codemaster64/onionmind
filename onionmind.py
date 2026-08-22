@@ -15,7 +15,7 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "qwen38-uncensored"
+MODEL  = "onionmind-27b"
 NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
 PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.

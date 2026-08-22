@@ -10,13 +10,14 @@
 #     onionmind-usb 12gb
 #
 # Tier = the GPU class of the machines you'll boot it on (weights are baked in;
-# the booted machine's VRAM decides speed, the stick's contents are fixed):
+# the booted machine's VRAM decides speed, the stick's contents are fixed).
+# Edition names or size codes both work - "flagship" and "12gb" are the same stick:
 #
-#   17gb   16.0GB  Qwen3.8-27B Q4_K_M   + vision   -> 32GB+ stick
-#   12gb   11.7GB  Qwen3.8-27B 3.69bpw  + vision   -> 32GB+ stick
-#   8gb     9.5GB  Qwen3.8-27B IQ2_M    + vision   -> 32GB+ stick
-#   9b      5.2GB  Qwen3.5-9B            no vision -> 16GB+ stick
-#   4b      2.5GB  Qwen3.5-4B            no vision -> 16GB+ stick
+#   max|17gb       16.0GB  Qwen3.8-27B Q4_K_M   + vision   -> 32GB+ stick
+#   flagship|12gb  11.7GB  Qwen3.8-27B 3.69bpw  + vision   -> 32GB+ stick
+#   standard|8gb    9.5GB  Qwen3.8-27B IQ2_M    + vision   -> 32GB+ stick
+#   daily|9b       5.2GB  Qwen3.5-9B            no vision -> 16GB+ stick
+#   pocket|4b      2.5GB  Qwen3.5-4B            no vision -> 16GB+ stick
 #
 # env overrides: OLLAMA_URL (pin an ollama release), NUM_GPU (default 99),
 #   ROCM=0 (drop AMD/ROCm support, saves ~1GB),
@@ -47,25 +48,25 @@ mkdir -p "$CACHE" "$OUT"
 # --- 1. tier ----------------------------------------------------------------
 # Same build table as install-onionmind.sh, minus `auto` - the build machine
 # can't see the target's VRAM, so you pick for the machines you'll boot.
-TIER="${1:-12gb}"
+TIER="${1:-flagship}"
 VISION_FILE=Qwen3.8-27B-Uncensored-vision-f16.gguf
 case "$TIER" in
-  17gb) REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
+  max|17gb) TIER=17gb; REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
         FILE=Qwen3.8-27B-abliterated-mtp-Q4_K_M.gguf
-        MODEL_NAME=qwen38-uncensored; VISION=1 ;;
-  12gb) REPO=soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
+        MODEL_NAME=onionmind-27b; VISION=1 ;;
+  flagship|12gb) TIER=12gb; REPO=soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
         FILE=qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
-        MODEL_NAME=qwen38-uncensored; VISION=1 ;;
-  8gb)  REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
+        MODEL_NAME=onionmind-27b; VISION=1 ;;
+  standard|8gb) TIER=8gb; REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF
         FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
-        MODEL_NAME=qwen38-uncensored; VISION=1 ;;
-  9b)   REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
+        MODEL_NAME=onionmind-27b; VISION=1 ;;
+  daily|9b) TIER=9b; REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=qwen35-9b-uncensored; VISION=0 ;;
-  4b)   REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
+        MODEL_NAME=onionmind-9b; VISION=0 ;;
+  pocket|4b) TIER=4b; REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=qwen35-4b-uncensored; VISION=0 ;;
-  *) die "tier must be 17gb, 12gb, 8gb, 9b or 4b (got '$TIER')" ;;
+        MODEL_NAME=onionmind-4b; VISION=0 ;;
+  *) die "tier must be max/17gb, flagship/12gb, standard/8gb, daily/9b or pocket/4b (got '$TIER')" ;;
 esac
 say "Tier $TIER: $FILE (vision: $([ "$VISION" = 1 ] && echo yes || echo no))"
 

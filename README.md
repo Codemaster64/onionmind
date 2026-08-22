@@ -84,7 +84,7 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
    ```bash
    docker build -f usb/Dockerfile -t onionmind-usb .
    docker run --rm --privileged -v "$(pwd)/usb/cache:/onionmind/usb/cache" \
-     -v "$(pwd)/usb/out:/onionmind/usb/out" onionmind-usb 12gb
+     -v "$(pwd)/usb/out:/onionmind/usb/out" onionmind-usb flagship
    ```
 
 2. **Burn** `usb/out/onionmind-matchstick-12gb-amd64.iso` to a USB stick with
@@ -111,15 +111,16 @@ persists. Nothing to find.
 | Anything / no GPU | 4B — still uncensored, still searches Tor, runs on a potato |
 | **Android phone** *(Termux)* | the 4B on any 8 GB phone, the 9B on 12 GB flagships |
 
-**Matchstick editions** — you pick when building the stick:
+**Matchstick editions** — you pick when building the stick (`flagship` and
+`12gb` both work — name or code):
 
-| Edition | | Runs great on | Stick |
+| Edition | Code | Runs great on | Stick |
 |:---|:---|:---|:---|
-| `4b` | the pocket rocket | any PC, GPU optional | 16 GB |
-| `9b` | the daily driver | 6 GB+ GPU | 16 GB |
-| `8gb` | the big brain, squeezed | 8 GB GPU | 32 GB |
-| `12gb` | **the flagship** 💜 — 27B + vision | 12 GB GPU *(3080 Ti class)* | 32 GB |
-| `17gb` | the flagship, full fat | 17 GB+ GPU *(4090 class)* | 32 GB |
+| **pocket** — the pocket rocket | `4b` | any PC, GPU optional | 16 GB |
+| **daily** — the daily driver | `9b` | 6 GB+ GPU | 16 GB |
+| **standard** — the big brain, squeezed | `8gb` | 8 GB GPU | 32 GB |
+| **flagship** 💜 — 27B + vision | `12gb` | 12 GB GPU *(3080 Ti class)* | 32 GB |
+| **max** — the flagship, full fat | `17gb` | 17 GB+ GPU *(4090 class)* | 32 GB |
 
 ---
 
