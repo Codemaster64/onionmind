@@ -191,8 +191,20 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 
 ---
 
+## Legal
+
+Code: **MIT** ([LICENSE](LICENSE)). Models: **Apache-2.0**, redistribution
+permitted with attribution ([notices](THIRD_PARTY_NOTICES.md)). EU AI Act:
+local personal tool, open-source carve-out, no personal data processed. Tor
+and privacy tooling are lawful across the EU/EEA. An uncensored model removes
+*refusals*, not *laws* — responsibility for generated content lies with the
+user. Full analysis, EU-law-first: **[LEGAL.md](LEGAL.md)** *(not legal
+advice)*.
+
+---
+
 <div align="center">
 
-**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [TECHNICAL.md](TECHNICAL.md)
+**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [TECHNICAL.md](TECHNICAL.md) · [Legal](LEGAL.md)
 
 </div>
