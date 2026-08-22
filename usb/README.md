@@ -127,10 +127,13 @@ Troubleshooting). Anything else runs on CPU: fine for 9b/4b, slow for the 27B.
 - **Windows:** double-click **`matchstick.cmd`**
 - **Linux/macOS:** run **`./matchstick.sh`**
 
-Both show an edition menu, build the stick with Docker if the ISO isn't built
-yet, list your USB sticks, demand a typed `YES` before erasing one, write the
-ISO raw with a progress bar, and print the boot instructions. Set
-`MATCHSTICK_DRY=1` to watch the whole flow without building or writing
+Both first offer to **download the pre-built pocket stick** (4 parts from the
+`matchstick-pocket` release, rejoined and checksum-verified - no Docker at
+all), or **build from source** in any edition. Either way they then list your
+USB sticks, demand a typed `YES` before erasing one, write the ISO raw with a
+progress bar, and print the boot instructions. Downloads go through `gh` when
+installed (required while this repo is private), plain `curl` otherwise. Set
+`MATCHSTICK_DRY=1` to watch the whole flow without downloading or writing
 anything.
 
 **The manual way**, from the repo root:
