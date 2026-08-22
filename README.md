@@ -11,6 +11,13 @@
 ![uncensored](https://img.shields.io/badge/uncensored-yes-9146F0)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
 
+[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
+[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
+[![Download for Android](https://img.shields.io/badge/Android-Onionmind.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)
+[![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-usb-stick-that-forgets)
+
+[all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
+
 No cloud · No account · No telemetry · No refusals
 
 A 27-billion-parameter AI that runs on a gaming GPU in your home — it can even read
