@@ -37,21 +37,30 @@ object ProcessManager {
 
     @Volatile var downloadProgress: Double = -1.0   // -1 none, 0..1 active, 1 done
     @Volatile var downloadTier: String = ""
+    @Volatile var downloadBytes: Long = 0L
+    @Volatile var downloadTotal: Long = 0L
+    @Volatile var downloadSpeedBps: Long = 0L
 
     fun downloadModel(ctx: Context, tier: String) {
         val m = models().firstOrNull { it.tier == tier } ?: return
         if (downloadProgress in 0.0..0.99) return          // one download at a time
         Thread {
             downloadProgress = 0.0; downloadTier = tier
+            downloadBytes = 0L; downloadTotal = m.bytes; downloadSpeedBps = 0L
             try {
                 val out = File(modelDir(ctx), m.file)
                 // A previous build could have left a truncated final name.
                 // Never treat it as resumable or let it block finalization.
                 if (out.exists() && out.length() != m.bytes) out.delete()
                 val part = File(modelDir(ctx), m.file + ".part")
+                val started = System.nanoTime()
                 while (part.length() < m.bytes) {
                     val offset = part.length()
+                    downloadBytes = offset
+                    downloadProgress = offset.toDouble() / m.bytes
                     val c = URL(m.url).openConnection() as HttpURLConnection
+                    c.connectTimeout = 30_000
+                    c.readTimeout = 30_000
                     if (offset > 0) c.setRequestProperty("Range", "bytes=$offset-")
                     if (c.responseCode !in 200..299) { Thread.sleep(3000); continue }  // resume loop
                     // Some mirrors ignore Range and return the whole object.
@@ -64,15 +73,21 @@ object ProcessManager {
                             var read: Int
                             while (input.read(buffer).also { read = it } != -1) {
                                 output.write(buffer, 0, read)
-                                downloadProgress = part.length().toDouble() / m.bytes
+                                val bytes = part.length()
+                                downloadBytes = bytes
+                                downloadProgress = (bytes.toDouble() / m.bytes).coerceAtMost(1.0)
+                                val elapsed = (System.nanoTime() - started) / 1_000_000_000L
+                                if (elapsed > 0) downloadSpeedBps = bytes / elapsed
                             }
                         }
                     }
                 }
                 if (!part.renameTo(out)) throw IllegalStateException("could not finalize model")
+                downloadBytes = m.bytes
                 downloadProgress = 1.0
             } catch (e: Exception) {
                 downloadProgress = -1.0
+                downloadBytes = 0L; downloadTotal = 0L; downloadSpeedBps = 0L
                 File(modelDir(ctx), m.file + ".part").let { if (it.exists()) it.delete() }
             }
         }.start()

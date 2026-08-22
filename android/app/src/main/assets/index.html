@@ -103,6 +103,10 @@ async function poll() {
     $('setup-text').textContent = 'Downloading the ' + status.model.toUpperCase() +
       ' model — resumable, leave the app open.';
     $('prog').style.width = Math.round(status.progress * 100) + '%';
+    const done = Number(status.downloadBytes || 0);
+    const total = Number(status.downloadTotal || 0);
+    const speed = Number(status.downloadSpeedBps || 0);
+    $('device-note').textContent = downloadDetails(done, total, speed);
     $('model-list').innerHTML = '';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
@@ -117,6 +121,22 @@ function recommendedTier() {
   if (ram >= 11000) return '9b';
   if (ram >= 7000) return '4b';
   return 'lfm';
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 MB';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? Math.round(n) : n.toFixed(n >= 10 ? 0 : 1)) + ' ' + units[i];
+}
+
+function downloadDetails(done, total, speed) {
+  if (!total) return 'Preparing download…';
+  const eta = speed > 0 ? Math.ceil((total - done) / speed) : 0;
+  const etaText = eta > 0 ? ' · ' + (eta >= 60 ? Math.ceil(eta / 60) + ' min left' : eta + ' sec left') : '';
+  return formatBytes(done) + ' / ' + formatBytes(total) +
+    (speed > 0 ? ' · ' + formatBytes(speed) + '/s' : '') + etaText;
 }
 
 function renderModelPicker() {
