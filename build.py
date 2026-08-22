@@ -113,11 +113,40 @@ def main() -> int:
         path.write_text(splice(path, opener, closer, payload), encoding="utf-8", newline=newline)
         print(f"  injected     {name}  (icon payload, {len(payload.splitlines())} lines)")
 
+    # The one-click Windows download: a batch file that carries the ENTIRE
+    # PowerShell installer after a marker line. cmd stops at `exit /b` and
+    # hands its own file to powershell, which skips to the marker and runs
+    # the payload. Double-click = full install, no paste, no second download.
+    CMD = ROOT / "onionmind-setup.cmd"
+    marker = "#__ONIONMIND_PS__"
+    # the command line must NOT contain the marker literally, or IndexOf finds
+    # itself instead of the payload - hence the split concatenation
+    half1, half2 = marker[:8], marker[8:]
+    ps1 = (ROOT / "install-onionmind.ps1").read_text(encoding="utf-8")
+    polyglot = (
+        "@echo off\n"
+        "rem Onionmind one-click installer. This file is BOTH a batch file and the\n"
+        "rem full PowerShell installer, appended below the marker. Built by build.py.\n"
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
+        "$c = Get-Content -Raw '%~f0'; iex $c.Substring($c.IndexOf('" + half1 + "'+'" + half2 + "'))\"\n"
+        "exit /b %ERRORLEVEL%\n"
+        + marker + "\n" + ps1
+    )
+    if CMD.exists() and CMD.read_text(encoding="utf-8").replace("\r\n", "\n") == polyglot:
+        print("  up to date   onionmind-setup.cmd (one-click wrapper)")
+    else:
+        stale += 1
+        if check_only:
+            print("  STALE        onionmind-setup.cmd (one-click wrapper)")
+        else:
+            CMD.write_text(polyglot, encoding="utf-8", newline="\r\n")
+            print(f"  injected     onionmind-setup.cmd  (one-click wrapper, {len(ps1.splitlines())} payload lines)")
+
     if check_only and stale:
         print(f"\n{stale} installer(s) stale - run: python build.py")
         return 1
     print(f"\nok - {len(TARGETS)} installer(s) carry onionmind.py verbatim, "
-          f"plus {len(ICON_TARGETS)} icon payload(s)")
+          f"plus {len(ICON_TARGETS)} icon payload(s) and the one-click cmd")
     return 0
 
 

@@ -26,37 +26,37 @@ Your questions, the AI's reasoning, its answers: **they never leave your compute
 
 ## Get it in 60 seconds
 
-**Windows**
+Every install also gives you the **`onionmind` command** for the terminal —
+same thing the desktop icon runs.
 
-1. Open **[install-onionmind.ps1](install-onionmind.ps1)** → click *Raw* → copy everything.
-2. Paste into **PowerShell**, press Enter.
-3. When the download finishes (10–16 GB, resumes if interrupted), **double-click the
-   Onionmind icon on your desktop**.
+**Windows** — one download, one double-click:
+**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)**
+(75 KB — the entire installer in one file). Double-click it, wait out the
+model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
+in new terminals. SmartScreen may grumble at a self-contained script — that's
+what it does; *More info → Run anyway*.
 
-The installer detects your GPU and installs the right model automatically. No
-decisions required.
+*Prefer pasting?* The classic way still works: copy
+[install-onionmind.ps1](install-onionmind.ps1) into PowerShell.
 
-**Linux**
-
-```bash
-bash install-onionmind.sh
-```
-
-Arch or Ubuntu/Debian. Same deal — one paste, the right model, an `onionmind`
-command and a desktop icon.
+**Linux** — one download, one command:
+**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)**,
+then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
+user). Same deal — the right model for your GPU, an `onionmind` command and a
+desktop launcher.
 
 **Android (light models)**
 
-**[⬇ Download the APK](https://github.com/Codemaster64/onionmind/releases/tag/v0.1-android)**
+**[⬇ Onionmind APK](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)**
 — 14 MB, one file, no app store. Tap it, allow installs from unknown sources,
 done. On first launch it downloads the model that fits your phone (the 4B on
 any 8 GB phone, the 9B on 12 GB flagships — resumable). Same chat, same Tor
 search, everything on-device: the engine, the tor binary and the UI are all
 inside the APK. arm64 phones only.
 
-Prefer terminals? [Termux](https://f-droid.org) + one paste
-([install-onionmind-android.sh](install-onionmind-android.sh)) does the same
-thing the tinkerable way.
+Want a terminal on your phone too? [Termux](https://f-droid.org) +
+**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind-android.sh)**
+gives you the same `onionmind` command Android-side.
 
 **Using it**
 
