@@ -18,6 +18,8 @@
 [![Download for Android](https://img.shields.io/badge/Android-Onionmind.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/Onionmind-0.1.apk)
 [![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-usb-stick-that-forgets)
 
+**Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
+
 [all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
 
 **No cloud · No account · No telemetry** for the Onionmind maintainers: this is a
@@ -122,8 +124,10 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 
 > Strike it anywhere. Burns bright. Leaves only ash.
 
-1. **Double-click `matchstick.cmd`** (Windows) or run **`./matchstick.sh`**
-   (Linux), from inside a clone of this repo. Answer two questions:
+1. **Download the launcher:** [Windows `matchstick.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd)
+   or [Linux/macOS `matchstick.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh).
+   Double-click the `.cmd` on Windows, or run `chmod +x matchstick.sh && ./matchstick.sh`
+   on Linux/macOS. You do **not** need to clone the repository. Answer two questions:
    **Download** (grabs the pre-built pocket stick — ~6.6GB, checksum-verified,
    no Docker, no build) or **Build** (any edition, Docker, ~1 hour). Plug a
    USB stick when asked, confirm the erase — the script writes the stick for
