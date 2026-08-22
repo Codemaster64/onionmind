@@ -57,4 +57,9 @@ set "ONIONMIND_PY=%~dp0onionmind.py"
 set "ONIONMIND_PYTHON=python"
 ollama launch dsh --model $model -- --patch "%~dp0dsh-onionmind-tor.patch.yml" %*
 "@ | Set-Content (Join-Path $InstallDir 'onionmind-code.cmd') -Encoding ASCII
+@"
+@echo off
+title Onionmind Update
+powershell -NoProfile -ExecutionPolicy Bypass -Command "`$u=Join-Path `$env:TEMP 'onionmind-update.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.ps1' -OutFile `$u; & `$u -InstallDir '%~dp0'; exit `$LASTEXITCODE"
+"@ | Set-Content (Join-Path $InstallDir 'onionmind-update.cmd') -Encoding ASCII
 Write-Host "Updated Onionmind UI launcher and coding launcher ($model). Model weights were not changed."
