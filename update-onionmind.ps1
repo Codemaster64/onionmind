@@ -47,19 +47,58 @@ if ($UI -or ($args.Count -eq 0)) {
 '@ | Set-Content (Join-Path $InstallDir 'onionmind-launch.ps1') -Encoding UTF8
 @"
 @echo off
+title Onionmind Code
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-code-launch.ps1" %*
+"@ | Set-Content (Join-Path $InstallDir 'onionmind-code.cmd') -Encoding ASCII
+@"
+@echo off
 title Onionmind
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-code-launch.ps1" %*
 "@ | Set-Content (Join-Path $InstallDir 'onionmind.cmd') -Encoding ASCII
 @"
 @echo off
-title Onionmind Code
-set "ONIONMIND_PY=%~dp0onionmind.py"
-set "ONIONMIND_PYTHON=python"
-ollama launch dsh --model $model -- --patch "%~dp0dsh-onionmind-tor.patch.yml" %*
-"@ | Set-Content (Join-Path $InstallDir 'onionmind-code.cmd') -Encoding ASCII
+title Onionmind Chat
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" -UI %*
+"@ | Set-Content (Join-Path $InstallDir 'onionmind-chat.cmd') -Encoding ASCII
 @"
 @echo off
 title Onionmind Update
 powershell -NoProfile -ExecutionPolicy Bypass -Command "`$u=Join-Path `$env:TEMP 'onionmind-update.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.ps1' -OutFile `$u; & `$u -InstallDir '%~dp0'; exit `$LASTEXITCODE"
 "@ | Set-Content (Join-Path $InstallDir 'onionmind-update.cmd') -Encoding ASCII
+@'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+$ErrorActionPreference = 'Stop'
+$Model = '@ONIONMIND_MODEL@'
+$tor = Get-Process firefox -ErrorAction SilentlyContinue |
+       Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
+if (-not $tor) {
+  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+    if (Test-Path $c) { Start-Process $c; break }
+  }
+}
+$torPort = $null
+for ($i = 0; $i -lt 45; $i++) {
+  foreach ($port in 9150, 9050) {
+    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
+      $torPort = $port
+      break
+    }
+  }
+  if ($torPort) { break }
+  Start-Sleep 1
+}
+if (-not $torPort) {
+  Write-Host 'Tor: NOT READY - open Tor Browser and click Connect.' -ForegroundColor Red
+  exit 1
+}
+Write-Host ("Tor: UP (SOCKS {0})" -f $torPort) -ForegroundColor Green
+$env:ONIONMIND_PY = Join-Path $PSScriptRoot 'onionmind.py'
+$env:ONIONMIND_PYTHON = 'python'
+$patch = Join-Path $PSScriptRoot 'dsh-onionmind-tor.patch.yml'
+& ollama launch dsh --model $Model -- --patch $patch @Arguments
+exit $LASTEXITCODE
+'@.Replace('@ONIONMIND_MODEL@', $model) |
+  Set-Content (Join-Path $InstallDir 'onionmind-code-launch.ps1') -Encoding UTF8
 Write-Host "Updated Onionmind UI launcher and coding launcher ($model). Model weights were not changed."

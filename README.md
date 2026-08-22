@@ -42,8 +42,9 @@ from it.
 
 ## Get it in 60 seconds
 
-Every install also gives you the **`onionmind` command** for the terminal —
-same thing the desktop icon runs.
+Every install gives you **`onionmind`**, the Ollama/DeepSeek Harness command
+with a Tor preflight and live `Tor: UP` status. The desktop icon remains the
+local desktop chat; launch that explicitly with `onionmind-chat`.
 
 **Windows** — one download, one double-click:
 **[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)**
@@ -61,17 +62,16 @@ then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
 user). Same deal — the right model for your GPU, an `onionmind` command and a
 desktop launcher.
 
-For repository-aware coding work, the setup also provides an
-**`onionmind-code` launcher**:
+For repository-aware coding work, `onionmind-code` is an alias for the same
+Harness launcher:
 
 ```text
 onionmind-code
 ```
 
-It starts DeepSeek Harness through Ollama. This is deliberately a separate
-mode: Onionmind remains the local Tor-search chat, while Harness is the agent
-that can inspect and modify a workspace. DeepSeek Harness is currently a
-developer preview.
+It starts DeepSeek Harness through Ollama after verifying Tor. The launcher
+prints `Tor: UP (SOCKS 9150)` or refuses to start with `Tor: NOT READY`.
+DeepSeek Harness is currently a developer preview.
 
 The desktop chat also has a **Coding agent** button. It opens the same Harness
 session using the currently selected Ollama model.

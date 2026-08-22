@@ -1566,24 +1566,62 @@ if ($UI -or ($args.Count -eq 0)) {
 
 # `onionmind` is the way in: same engine, callable from any terminal. ollama
 # stays underneath as the server - it stops being something you type.
-@"
-@echo off
-title Onionmind
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" %*
-"@ | Set-Content "$Dir\onionmind.cmd" -Encoding ASCII
-
 # Repository-aware coding agent, kept separate from Onionmind's local Tor chat.
 Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/dsh-onionmind-tor-search.js' -OutFile "$Dir\dsh-onionmind-tor-search.js"
 $dshPatch = (Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/dsh-onionmind-tor.patch.yml').Content
 $dshPatch.Replace('@ONIONMIND_DSH_PLUGIN@', (($Dir + '\dsh-onionmind-tor-search.js') -replace '\\', '/')) |
   Set-Content "$Dir\dsh-onionmind-tor.patch.yml" -Encoding UTF8
+@'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+$ErrorActionPreference = 'Stop'
+$Model = '@ONIONMIND_MODEL@'
+$tor = Get-Process firefox -ErrorAction SilentlyContinue |
+       Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
+if (-not $tor) {
+  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+    if (Test-Path $c) { Start-Process $c; break }
+  }
+}
+$torPort = $null
+for ($i = 0; $i -lt 45; $i++) {
+  foreach ($port in 9150, 9050) {
+    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
+      $torPort = $port
+      break
+    }
+  }
+  if ($torPort) { break }
+  Start-Sleep 1
+}
+if (-not $torPort) {
+  Write-Host 'Tor: NOT READY - open Tor Browser and click Connect.' -ForegroundColor Red
+  exit 1
+}
+Write-Host ("Tor: UP (SOCKS {0})" -f $torPort) -ForegroundColor Green
+$env:ONIONMIND_PY = Join-Path $PSScriptRoot 'onionmind.py'
+$env:ONIONMIND_PYTHON = 'python'
+$patch = Join-Path $PSScriptRoot 'dsh-onionmind-tor.patch.yml'
+& ollama launch dsh --model $Model -- --patch $patch @Arguments
+exit $LASTEXITCODE
+'@.Replace('@ONIONMIND_MODEL@', $name) |
+  Set-Content "$Dir\onionmind-code-launch.ps1" -Encoding UTF8
 @"
 @echo off
 title Onionmind Code
-set "ONIONMIND_PY=%~dp0onionmind.py"
-set "ONIONMIND_PYTHON=python"
-ollama launch dsh --model $name -- --patch "%~dp0dsh-onionmind-tor.patch.yml" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-code-launch.ps1" %*
 "@ | Set-Content "$Dir\onionmind-code.cmd" -Encoding ASCII
+@"
+@echo off
+title Onionmind
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-code-launch.ps1" %*
+"@ | Set-Content "$Dir\onionmind.cmd" -Encoding ASCII
+@"
+@echo off
+title Onionmind Chat
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" -UI %*
+"@ | Set-Content "$Dir\onionmind-chat.cmd" -Encoding ASCII
 
 @"
 @echo off
@@ -1608,8 +1646,9 @@ $lnk.Save()
 
 Write-Host ""
 Say "Ready"
-Write-Host "  Chat:        onionmind   (or double-click the desktop icon)"
-Write-Host "  Coding:      onionmind-code   (DeepSeek Harness via Ollama)"
+Write-Host "  Harness:     onionmind   (DeepSeek Harness via Ollama + Tor)"
+Write-Host "  Chat:        onionmind-chat   (local desktop chat)"
+Write-Host "  Coding:      onionmind-code   (same Harness launcher)"
 Write-Host "  Updates:     onionmind-update   (code only, model untouched)"
 if ($Vision) { Write-Host "  Images:      $name-vision   (vision model)" }
 Write-Host "  Web search:  python `"$Dir\onionmind.py`" `"your question`""

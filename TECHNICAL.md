@@ -40,8 +40,9 @@ means running it again.
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | the search agent, written next to the weights |
-| `onionmind` command + desktop icon | chat + Tor search in one command. PATH on Windows, `/usr/local/bin` on Linux; the icon runs the same thing |
-| `onionmind-code` | repository-aware coding agent via DeepSeek Harness and Ollama |
+| `onionmind` | DeepSeek Harness via Ollama, with Tor preflight/status and the Tor search provider |
+| `onionmind-chat` + desktop icon | local Tk desktop chat |
+| `onionmind-code` | alias for the Harness launcher |
 | `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
 | Python deps | `requests`, `PySocks` |
 
@@ -201,10 +202,9 @@ Termux (~15–20 min, one-time), installs the `tor` package, picks 4B/9B by
 auto-detects its backend — ollama on `:11434`, llama-server on `:8080` — with
 the tool-calling format translation living in the script.
 
-DeepSeek Harness is intentionally separate from the Onionmind search loop. Use
-`onionmind-code` when an agent should inspect or modify a workspace. It is
-launched through Ollama's official DSH integration, so the model provider and
-local/cloud choice remain explicit.
+DeepSeek Harness is the primary `onionmind` command and is launched through
+Ollama's official DSH integration. `onionmind-code` is an alias. The launcher
+checks Tor before starting and reports the active SOCKS port.
 
 The DSH `web_search` provider is overridden by `dsh-onionmind-tor-search.js`.
 It invokes `onionmind.py --tor-search`, which verifies Tor and creates the same
