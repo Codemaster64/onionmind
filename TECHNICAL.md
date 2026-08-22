@@ -153,31 +153,54 @@ Verified by inspecting a built ISO, not by reading config: 1,825 ROCm libraries 
 `usr/lib/ollama/rocm/`, 639 `amdgpu` firmware files, `nvidia.ko` present, CUDA v12 and v13
 alongside ROCm. Ollama selects the backend at runtime from the hardware it finds.
 
-## Android (Termux)
+## Android
 
-The light tiers run entirely on a phone, no root, inside [Termux](https://f-droid.org)
-(the F-Droid build — the Play Store one is abandoned).
+Two ways to run the light tiers on a phone — the **APK** (the product) and
+**Termux** (the tinkerer's path). Both run the model entirely on-device with
+Tor-routed search; neither needs root.
 
-- **Engine:** llama.cpp's `llama-server`, compiled in Termux. Ollama has no
-  Android build; llama-server speaks an OpenAI-compatible API and runs the same
-  GGUFs. One-time build: `pkg install git cmake clang`, ~15–20 minutes on a phone.
-- **Backend adapter:** `onionmind.py` auto-detects its server — ollama on
-  `:11434`, llama-server on `:8080` — and translates the tool-calling formats
-  (OpenAI ships tool arguments as JSON strings and requires positional
-  `tool_call_id`s). The adapter is tested against a mock llama-server in
-  `tests/test_backends.py`; the on-phone path is not yet hardware-verified.
-- **Tor:** the Termux `tor` package, a plain daemon on `9050` — the exact case
-  the tool has always supported. Orbot in Power User Mode binds the same port
-  and works too.
-- **Model by RAM:** `MemTotal` ≥ 11GB → the 9B (Q4, 5.2GB), else the 4B
-  (2.5GB). Override with `ONIONMIND_MODEL=9b|4b`.
-- **Speed:** community figures, not our measurements — roughly 5–15 tok/s for
-  the 4B Q4 depending on chipset (Snapdragon 8 Gen 2/3 at the top end,
-  midrange at the bottom). The 9B needs a flagship and patience.
-- **Keeping it alive:** the `onionmind` launcher takes a Termux wake-lock and
-  starts llama-server + tor as needed; Android will still kill Termux unless
-  battery optimisation is disabled for it. Expect warmth — sustained inference
-  is a benchmark workload for a phone.
+### The APK (`android/`)
+
+A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
+
+- **Engine:** llama.cpp's `llama-server`, cross-compiled for arm64 with the
+  NDK (the host-compiled web-UI embed tool needs a host `g++` present — the
+  Dockerfile documents it). Shipped as `jniLibs` with `LD_LIBRARY_PATH`
+  pointing the linker at the app's native dir.
+- **Tor:** the prebuilt `libtor.so` from Maven Central
+  (`info.guardianproject:tor-android` — the same binary Orbot runs), exec'd
+  with a generated torrc.
+- **UI:** a WebView talking to a NanoHTTPD server on `127.0.0.1:8081` only —
+  onboarding (model download with progress), chat, status dots for tor/model.
+- **Search agent:** `android/core` is a pure-Kotlin port of `onionmind.py` —
+  including a hand-written SOCKS5 client with username/password auth, because
+  **fresh random credentials per search are what make tor build a separate
+  circuit per query**, and the JVM's stock SOCKS support can't authenticate.
+  The agent loop, DDG onion endpoint, per-block result parsing and
+  thinking-strip mirror the Python line for line.
+- **Model:** downloaded on first launch into app storage (4B/9B by RAM),
+  resumable with HTTP Range. APK stays 14 MB; the 4B adds 2.5 GB on-device.
+- **Verified:** `:core` runs live network tests against a real tor daemon
+  inside the build image (`android/itest.sh`) — SOCKS auth handshake, circuit
+  isolation, onion search, result parsing. The adapter logic has the same
+  mock-server test as the desktop (`tests/test_backends.py`).
+- **Not verified: anything on a phone.** No device or emulator ran this APK;
+  it is debug-signed, first install is yours, and the Termux path is the
+  battle-tested fallback.
+
+### Termux
+
+Get [Termux from F-Droid](https://f-droid.org) (the Play Store build is
+abandoned) and paste `install-onionmind-android.sh`. It builds llama.cpp in
+Termux (~15–20 min, one-time), installs the `tor` package, picks 4B/9B by
+`/proc/meminfo`, and installs an `onionmind` command. `onionmind.py` itself
+auto-detects its backend — ollama on `:11434`, llama-server on `:8080` — with
+the tool-calling format translation living in the script.
+
+**Phone realities, honestly:** community figures (not our measurements) put
+the 4B Q4 at roughly 5–15 tok/s depending on chipset. Android will kill
+background apps — disable battery optimisation for the app or Termux, and
+expect warmth: sustained inference is a benchmark workload for a phone.
 
 ## Going further on privacy
 
@@ -397,6 +420,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `onionmind.py` | Search agent. Tor + tool-calling loop. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |
+| `android/` | The standalone APK: Kotlin app + pure-Kotlin port of the search agent (`:core`), Docker build from source. |
 | `build.py` | Single-sources `onionmind.py` + icon payloads into both installers; `--check` flags drift. |
 | `Modelfile` | Generated. Template, stop tokens, `num_gpu`, `num_ctx`. |
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |

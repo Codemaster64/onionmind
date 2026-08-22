@@ -47,11 +47,16 @@ command and a desktop icon.
 
 **Android (light models)**
 
-Install [Termux from F-Droid](https://f-droid.org) (not the Play Store build),
-open it, and paste **[install-onionmind-android.sh](install-onionmind-android.sh)**.
-The 4B model runs on any 8 GB phone; 12 GB flagships get the 9B. Same chat,
-same Tor search — the whole thing lives on the phone, no cloud in sight.
-(One-time llama.cpp build takes ~15–20 minutes.)
+**[⬇ Download the APK](https://github.com/Codemaster64/onionmind/releases/tag/v0.1-android)**
+— 14 MB, one file, no app store. Tap it, allow installs from unknown sources,
+done. On first launch it downloads the model that fits your phone (the 4B on
+any 8 GB phone, the 9B on 12 GB flagships — resumable). Same chat, same Tor
+search, everything on-device: the engine, the tor binary and the UI are all
+inside the APK. arm64 phones only.
+
+Prefer terminals? [Termux](https://f-droid.org) + one paste
+([install-onionmind-android.sh](install-onionmind-android.sh)) does the same
+thing the tinkerable way.
 
 **Using it**
 
