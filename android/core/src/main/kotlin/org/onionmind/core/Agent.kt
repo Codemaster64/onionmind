@@ -160,8 +160,16 @@ object Agent {
                     .build()
             ).execute()
             if (!r.isSuccessful) return "(llama-server returned HTTP ${r.code})"
-            val msg = json.parseToJsonElement(r.body!!.string())
-                .jsonObject["choices"]!!.jsonArray[0].jsonObject["message"]!!.jsonObject
+            val wire = try {
+                json.parseToJsonElement(r.body?.string().orEmpty()).jsonObject
+            } catch (e: Exception) {
+                return "(llama-server returned invalid JSON: ${e.message ?: "parse error"})"
+            }
+            val msg = try {
+                wire["choices"]!!.jsonArray[0].jsonObject["message"]!!.jsonObject
+            } catch (e: Exception) {
+                return "(llama-server response missing a chat message: ${e.message ?: "invalid response"})"
+            }
             val assistant = buildJsonObject {
                 put("role", "assistant")
                 put("content", msg["content"] ?: JsonNull)
@@ -171,7 +179,11 @@ object Agent {
                         val f = c.jsonObject["function"]!!.jsonObject
                         val args = f["arguments"]?.let { a ->
                             // OpenAI ships arguments as a JSON string
-                            if (a is JsonPrimitive) Json.parseToJsonElement(a.content)
+                            if (a is JsonPrimitive) try {
+                                Json.parseToJsonElement(a.content)
+                            } catch (_: Exception) {
+                                buildJsonObject { put("raw", a.content) }
+                            }
                             else a
                         } ?: buildJsonObject { }
                         buildJsonObject {
@@ -187,7 +199,7 @@ object Agent {
             }
             messages.add(assistant)
             val calls = assistant["tool_calls"]?.jsonArray ?: run {
-                val answer = stripThinking(assistant["content"]?.jsonPrimitive?.content ?: "")
+                val answer = stripThinking((assistant["content"] as? JsonPrimitive)?.content ?: "")
                 return if (answer.isEmpty())
                     "(the model spent its whole token budget thinking and never answered)"
                 else answer

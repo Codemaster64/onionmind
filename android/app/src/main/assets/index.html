@@ -176,10 +176,15 @@ $('form').onsubmit = async e => {
   history.push({role:'user', content:q});
   $('busy').style.display = 'block';
   try {
-    const r = await (await fetch('/api/chat', {method:'POST',
-      body: 'messages=' + encodeURIComponent(JSON.stringify(history))})).json();
-    add('bot', r.answer);
-    history = r.messages;
+    const response = await fetch('/api/chat', {method:'POST',
+      body: 'messages=' + encodeURIComponent(JSON.stringify(history))});
+    const raw = await response.text();
+    let r;
+    try { r = JSON.parse(raw); }
+    catch (_) { throw new Error(raw.slice(0, 240) || 'invalid server response'); }
+    if (!response.ok || r.error) throw new Error(r.error || 'chat request failed');
+    add('bot', r.answer || '(empty response)');
+    history = r.messages || history;
   } catch (err) { add('bot', '(error: ' + err + ')'); }
   $('busy').style.display = 'none';
 };

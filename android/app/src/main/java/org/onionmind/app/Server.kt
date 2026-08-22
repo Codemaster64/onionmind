@@ -9,6 +9,7 @@ import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
 import java.net.URLDecoder
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
 /** The app's whole backend: serves the chat page and a tiny JSON API on
@@ -35,8 +36,7 @@ object Server {
                             Response.Status.NOT_FOUND, "text/plain", "?")
                     }
                 } catch (e: Exception) {
-                    NanoHTTPD.newFixedLengthResponse(
-                        Response.Status.INTERNAL_ERROR, "text/plain", e.toString())
+                    error(Response.Status.INTERNAL_ERROR, rootMessage(e))
                 }
             }
         }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) }
@@ -50,6 +50,11 @@ object Server {
 
     private fun json(body: String): Response =
         NanoHTTPD.newFixedLengthResponse(Response.Status.OK, "application/json", body)
+
+    private fun error(status: Response.Status, message: String): Response =
+        NanoHTTPD.newFixedLengthResponse(status, "application/json", buildJsonObject {
+            put("error", message)
+        }.toString())
 
     private fun status(): Response {
         val model = ProcessManager.installedModel(ctx)
@@ -100,10 +105,19 @@ object Server {
         val messages = Json.parseToJsonElement(files["messages"] ?: "[]").jsonArray
             .map { it.jsonObject }.toMutableList()
         // the UI sends plain {role, content} turns; the agent extends the list
-        val answer = chatLock.submit<String> { Agent.turn(LLAMA, messages) }.get()
+        val answer = try {
+            chatLock.submit<String> { Agent.turn(LLAMA, messages) }.get()
+        } catch (e: ExecutionException) {
+            return error(Response.Status.INTERNAL_ERROR, rootMessage(e))
+        }
         return json(buildJsonObject {
             put("answer", answer)
             put("messages", JsonArray(messages))
         }.toString())
     }
+
+    private fun rootMessage(error: Throwable): String =
+        generateSequence(error) { it.cause }
+            .lastOrNull()?.let { it.message?.takeIf(String::isNotBlank) ?: it.toString() }
+            ?: "unknown server error"
 }
