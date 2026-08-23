@@ -115,8 +115,19 @@ def tor_check():
     sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
 
 
+def strip_tag(name):
+    """"inferno:latest" -> "inferno". ollama's /api/tags always reports a tag;
+    MODEL never carries one, so raw comparisons between the two never matched."""
+    return name[:-7] if name.endswith(":latest") else name
+
+
 def _clean(x):
-    return html.unescape(re.sub(r"<[^>]+>", "", x)).strip()
+    # Collapse ALL whitespace, newlines included. web_search emits three lines
+    # per result and dsh-onionmind-tor-search.js strides through them 3 at a
+    # time; one wrapped snippet used to shift every later result onto the wrong
+    # title - the same silent mis-citation parse_results exists to prevent,
+    # reintroduced at the serialisation boundary.
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
 
 
 def parse_results(page, n=5):
@@ -221,14 +232,18 @@ def _ask_ollama_stream(messages, on_text, stop_event=None):
                 return {"role": "assistant", "content": "", "stopped": True}
             if not raw:
                 continue
-            chunk = json.loads(raw).get("message") or {}
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue          # a partial or non-JSON line must not kill the stream
+            chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
                 message["content"] += content
                 on_text(content)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
-            if json.loads(raw).get("done"):
+            if event.get("done"):
                 break
     finally:
         r.close()
@@ -509,7 +524,10 @@ def run_ui():
     stream_start = [None]
 
     def populate_models(models):
-        choices = list(dict.fromkeys(models or [MODEL]))
+        # ollama reports "inferno:latest"; MODEL is plain "inferno". Compared raw,
+        # an installed model never matched - the picker listed it twice and the
+        # vision auto-switch below decided the vision model was not installed.
+        choices = list(dict.fromkeys(strip_tag(m) for m in (models or [MODEL])))
         if MODEL not in choices:
             choices.insert(0, MODEL)
         model_box.configure(values=choices, state="readonly")
@@ -517,9 +535,13 @@ def run_ui():
         model_use.configure(state="normal" if BACKEND == "ollama" else "disabled")
         install_model_button.configure(state="normal" if BACKEND == "ollama" else "disabled")
 
-    def choose_model():
+    def choose_model(reset=True):
+        """reset=False keeps the conversation: used by the automatic switch to the
+        vision model, where discarding what the user was doing is not a choice
+        they made. An explicit model change still starts fresh - a new model
+        cannot make sense of another model's context."""
         global MODEL
-        selected = model_var.get().strip()
+        selected = strip_tag(model_var.get().strip())
         if not selected or selected == MODEL:
             return
         MODEL = selected
@@ -529,8 +551,11 @@ def run_ui():
                 preference.write(MODEL)
         except OSError:
             pass
-        history.clear()
-        append("onion", f"Now using {MODEL}. New conversation started.")
+        if reset:
+            history.clear()
+            append("onion", f"Now using {MODEL}. New conversation started.")
+        else:
+            append("onion", f"Switched to {MODEL} to read the image.")
         set_status(f"ready · {MODEL}", "#9ef0b0")
 
     def install_model():
@@ -566,14 +591,16 @@ def run_ui():
         image_path[0] = path
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
-        choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
-        if vision in choices and vision != MODEL:
-            model_var.set(vision)
-            choose_model()
-        elif vision not in choices:
-            append("onion", "Install the Inferno vision model to ask questions about images.")
+        choices = [strip_tag(c) for c in model_box["values"]]
+        # Prefer THIS model's vision build if there is one, else the 27B's.
+        wanted = [MODEL] if MODEL.endswith("-vision") else [MODEL + "-vision", "inferno-vision"]
+        vision = next((v for v in wanted if v in choices or v == MODEL), None)
+        if vision is None:
+            append("onion", "Install a vision model to ask questions about images.")
             clear_image()
+        elif vision != MODEL:
+            model_var.set(vision)
+            choose_model(reset=False)      # keep the conversation the image belongs to
 
     def attach_image():
         path = filedialog.askopenfilename(
@@ -748,6 +775,8 @@ if __name__ == "__main__":
         history.append({"role": "user", "content": " ".join(sys.argv[1:])})
         print("\n" + turn(history))
     else:
+        # AI Act Art. 50(1): the interface itself must say it is an AI.
+        print("You are talking to an AI. It can be wrong; you are responsible for what you do with the output.")
         print("Chat - it searches over Tor when it needs to. /save <file> exports the")
         print("conversation. Ctrl-C to quit.\n")
         while True:

@@ -64,9 +64,21 @@ else
   # Ollama is not in apt. This is upstream's documented installer; fetched to a file
   # first so it can be read before it runs, rather than piped blind into a shell.
   if ! command -v ollama >/dev/null 2>&1; then
-    say "Installing Ollama (upstream script -> /tmp/ollama-install.sh)"
-    curl -fsSL https://ollama.com/install.sh -o /tmp/ollama-install.sh
-    sh /tmp/ollama-install.sh
+    # mktemp, not a fixed /tmp name: a predictable path in a world-writable
+    # directory can be pre-created as a symlink, and `curl -o` follows it, so
+    # another local user could redirect this write. The file is fetched rather
+    # than piped so it CAN be inspected - ONIONMIND_SHOW_OLLAMA_SCRIPT=1 prints
+    # it and waits, instead of only claiming that is possible.
+    oi=$(mktemp) || die "could not create a temp file"
+    trap 'rm -f "$oi"' EXIT
+    say "Installing Ollama (upstream script -> $oi)"
+    curl -fsSL https://ollama.com/install.sh -o "$oi"
+    if [ "${ONIONMIND_SHOW_OLLAMA_SCRIPT:-0}" = 1 ]; then
+      echo "--- ollama install.sh ---"; cat "$oi"; echo "--- end ---"
+      printf 'Run it? [y/N] '; read -r ok
+      case "$ok" in y|Y) ;; *) die "aborted before running the ollama installer" ;; esac
+    fi
+    sh "$oi"
   fi
 fi
 command -v ollama >/dev/null || die "ollama not on PATH after install"
@@ -148,10 +160,32 @@ fi
 sudo mkdir -p "$DIR"
 sudo chown "$(id -u):$(id -g)" "$DIR"
 sudo chmod 755 "$DIR"                  # traversable by the ollama service user
+
+# Huggingface publishes each LFS object's sha256 in X-Linked-ETag, so a 16GB
+# download can be checked against the digest the host itself serves - no hash
+# table to maintain here. Integrity only, not supply-chain pinning: it catches
+# the truncated or corrupted file that otherwise shows up much later as an
+# inscrutable model-load error. ONIONMIND_SKIP_VERIFY=1 opts out.
+verify() {  # file url
+  [ "${ONIONMIND_SKIP_VERIFY:-0}" = 1 ] && return 0
+  command -v sha256sum >/dev/null 2>&1 || return 0
+  want=$(curl -fsSLI "$2" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "x-linked-etag:" {gsub(/"/, "", $2); print $2}' | tail -1)
+  case "$want" in
+    *[!0-9a-f]* | "") return 0 ;;      # nothing published; nothing to check
+  esac
+  got=$(sha256sum "$1" | cut -d' ' -f1)
+  if [ "$got" != "$want" ]; then
+    rm -f "$1"
+    die "$(basename "$1") downloaded corrupt (sha256 $got, expected $want) - deleted it; rerun to try again"
+  fi
+  say "verified $(basename "$1")"
+}
+
 say "Downloading $FILE (resumable, ~10-16GB)"
 # ponytail: curl -C - resumes a dropped download; no retry logic of our own
-curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" \
-     "https://huggingface.co/$REPO/resolve/main/$FILE"
+WEIGHTS_URL="https://huggingface.co/$REPO/resolve/main/$FILE"
+curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" "$WEIGHTS_URL"
+verify "$DIR/$FILE" "$WEIGHTS_URL"
 chmod 644 "$DIR/$FILE"
 
 # --- 7. Model ---------------------------------------------------------------
@@ -186,7 +220,9 @@ if [ "$VISION" = 1 ]; then
 # it costs ~900MB on top, not another full model.
 VIS=Qwen3.8-27B-Uncensored-vision-f16.gguf
 say "Downloading vision projector (885 MiB)"
-curl -L -C - --fail --noproxy '*' -o "$DIR/$VIS"      "https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$VIS"
+VIS_URL="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$VIS"
+curl -L -C - --fail --noproxy '*' -o "$DIR/$VIS" "$VIS_URL"
+verify "$DIR/$VIS" "$VIS_URL"
 chmod 644 "$DIR/$VIS"
 # ponytail: just write the second Modelfile; editing the first one with sed needs a
 # literal newline in the replacement, which sed rejects.
@@ -278,8 +314,19 @@ def tor_check():
     sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
 
 
+def strip_tag(name):
+    """"inferno:latest" -> "inferno". ollama's /api/tags always reports a tag;
+    MODEL never carries one, so raw comparisons between the two never matched."""
+    return name[:-7] if name.endswith(":latest") else name
+
+
 def _clean(x):
-    return html.unescape(re.sub(r"<[^>]+>", "", x)).strip()
+    # Collapse ALL whitespace, newlines included. web_search emits three lines
+    # per result and dsh-onionmind-tor-search.js strides through them 3 at a
+    # time; one wrapped snippet used to shift every later result onto the wrong
+    # title - the same silent mis-citation parse_results exists to prevent,
+    # reintroduced at the serialisation boundary.
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
 
 
 def parse_results(page, n=5):
@@ -384,14 +431,18 @@ def _ask_ollama_stream(messages, on_text, stop_event=None):
                 return {"role": "assistant", "content": "", "stopped": True}
             if not raw:
                 continue
-            chunk = json.loads(raw).get("message") or {}
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue          # a partial or non-JSON line must not kill the stream
+            chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
                 message["content"] += content
                 on_text(content)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
-            if json.loads(raw).get("done"):
+            if event.get("done"):
                 break
     finally:
         r.close()
@@ -672,7 +723,10 @@ def run_ui():
     stream_start = [None]
 
     def populate_models(models):
-        choices = list(dict.fromkeys(models or [MODEL]))
+        # ollama reports "inferno:latest"; MODEL is plain "inferno". Compared raw,
+        # an installed model never matched - the picker listed it twice and the
+        # vision auto-switch below decided the vision model was not installed.
+        choices = list(dict.fromkeys(strip_tag(m) for m in (models or [MODEL])))
         if MODEL not in choices:
             choices.insert(0, MODEL)
         model_box.configure(values=choices, state="readonly")
@@ -680,9 +734,13 @@ def run_ui():
         model_use.configure(state="normal" if BACKEND == "ollama" else "disabled")
         install_model_button.configure(state="normal" if BACKEND == "ollama" else "disabled")
 
-    def choose_model():
+    def choose_model(reset=True):
+        """reset=False keeps the conversation: used by the automatic switch to the
+        vision model, where discarding what the user was doing is not a choice
+        they made. An explicit model change still starts fresh - a new model
+        cannot make sense of another model's context."""
         global MODEL
-        selected = model_var.get().strip()
+        selected = strip_tag(model_var.get().strip())
         if not selected or selected == MODEL:
             return
         MODEL = selected
@@ -692,8 +750,11 @@ def run_ui():
                 preference.write(MODEL)
         except OSError:
             pass
-        history.clear()
-        append("onion", f"Now using {MODEL}. New conversation started.")
+        if reset:
+            history.clear()
+            append("onion", f"Now using {MODEL}. New conversation started.")
+        else:
+            append("onion", f"Switched to {MODEL} to read the image.")
         set_status(f"ready · {MODEL}", "#9ef0b0")
 
     def install_model():
@@ -729,14 +790,16 @@ def run_ui():
         image_path[0] = path
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
-        choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
-        if vision in choices and vision != MODEL:
-            model_var.set(vision)
-            choose_model()
-        elif vision not in choices:
-            append("onion", "Install the Inferno vision model to ask questions about images.")
+        choices = [strip_tag(c) for c in model_box["values"]]
+        # Prefer THIS model's vision build if there is one, else the 27B's.
+        wanted = [MODEL] if MODEL.endswith("-vision") else [MODEL + "-vision", "inferno-vision"]
+        vision = next((v for v in wanted if v in choices or v == MODEL), None)
+        if vision is None:
+            append("onion", "Install a vision model to ask questions about images.")
             clear_image()
+        elif vision != MODEL:
+            model_var.set(vision)
+            choose_model(reset=False)      # keep the conversation the image belongs to
 
     def attach_image():
         path = filedialog.askopenfilename(
@@ -911,6 +974,8 @@ if __name__ == "__main__":
         history.append({"role": "user", "content": " ".join(sys.argv[1:])})
         print("\n" + turn(history))
     else:
+        # AI Act Art. 50(1): the interface itself must say it is an AI.
+        print("You are talking to an AI. It can be wrong; you are responsible for what you do with the output.")
         print("Chat - it searches over Tor when it needs to. /save <file> exports the")
         print("conversation. Ctrl-C to quit.\n")
         while True:

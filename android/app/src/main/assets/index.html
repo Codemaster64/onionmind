@@ -71,6 +71,11 @@
   </div>
 </header>
 
+<!-- AI Act Art. 50(1): the interface itself must say it is an AI. -->
+<p style="padding:8px 16px;font-size:12px;opacity:.65;line-height:1.4">
+  You are talking to an AI. It can be wrong; you are responsible for what you do with the output.
+</p>
+
 <section id="manager" hidden>
   <div class="manage-head"><h2>Models on this phone</h2><button class="muted" onclick="closeManager()">Done</button></div>
   <p>Download several models and switch between them any time. Models are stored locally.</p>
@@ -118,6 +123,7 @@ const api = (path, init) => fetch(path, {...init,
   headers: {...(init && init.headers), 'X-Onionmind-Token': TOKEN}});
 const form = body => ({method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
+const errorText = err => err instanceof Error ? (err.message || String(err)) : String(err);
 let history = [], status = {model:'none', models:[]}, ready = false;
 const $ = id => document.getElementById(id);
 
@@ -253,7 +259,7 @@ $('form').onsubmit = async e => {
     if (!response.ok || r.error) throw new Error(r.error || 'chat request failed');
     add('bot', r.answer || '(empty response)');
     history = r.messages || history;
-  } catch (err) { add('bot', '(error: ' + err + ')'); }
+  } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); }
   $('busy').style.display = 'none';
 };
 </script>
