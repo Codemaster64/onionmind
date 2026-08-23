@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
   density="${d%%:*}"; size="${d##*:}"
   mkdir -p "android/app/src/main/res/mipmap-$density"
-  convert "onionmind.ico[0]" -resize "${size}x${size}" \
+  convert "onionmind.ico[0]" -background none -alpha on -resize "${size}x${size}" \
     "android/app/src/main/res/mipmap-$density/ic_launcher.png"
 done
 echo "icons: $(ls android/app/src/main/res/mipmap-*/ic_launcher.png | wc -l) densities"
