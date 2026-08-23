@@ -13,6 +13,8 @@ android {
         versionCode = 4
         versionName = "1.3"
         ndk { abiFilters += listOf("arm64-v8a") }   // phones this app is for are all arm64
+        val modelMirrorBase = providers.gradleProperty("modelMirrorBase").orNull ?: ""
+        buildConfigField("String", "MODEL_MIRROR_BASE", "\"${modelMirrorBase.replace("\\\"", "\\\\\"")}\"")
     }
     buildTypes {
         release {
@@ -20,6 +22,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
+    buildFeatures { buildConfig = true }
     // extractNativeLibs: llama-server and tor must be real files on disk to exec()
     packagingOptions { jniLibs { useLegacyPackaging = true } }
     compileOptions {
