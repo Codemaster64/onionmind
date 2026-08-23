@@ -7,6 +7,7 @@ and one full search turn through the real loop with web_search stubbed.
 Run: python3 tests/test_backends.py   (needs: requests)
 """
 import json, threading, http.server, sys, pathlib
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import onionmind
@@ -60,6 +61,47 @@ def test_llama_backend():
     print("llama-server adapter OK: translation, string-args, positional ids, full turn")
 
 
+def test_stream_reports_tool_activity():
+    """Native clients get semantic activity without parsing assistant prose."""
+    replies = iter([
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "function": {"name": "web_search", "arguments": {"query": "onions"}}
+        }]},
+        {"role": "assistant", "content": "Found it."},
+    ])
+    old_backend = onionmind.BACKEND
+    old_stream = onionmind._ask_ollama_stream
+    old_search = onionmind.web_search
+    try:
+        onionmind.BACKEND = "ollama"
+        onionmind._ask_ollama_stream = lambda *_args, **_kwargs: next(replies)
+        onionmind.web_search = lambda query, n=5: f"result for {query}"
+        events = []
+        answer = onionmind.turn_stream(
+            [{"role": "user", "content": "search"}], lambda _chunk: None,
+            on_event=events.append)
+        assert answer == "Found it.", answer
+        assert [event["kind"] for event in events] == [
+            "tool_started", "tool_finished"], events
+        assert events[0]["arguments"] == {"query": "onions"}, events
+        assert events[1]["result"] == "result for onions", events
+    finally:
+        onionmind.BACKEND = old_backend
+        onionmind._ask_ollama_stream = old_stream
+        onionmind.web_search = old_search
+
+
+def test_old_python_uses_legacy_ui_without_importing_native_module():
+    legacy = mock.Mock(return_value="legacy")
+    with mock.patch.object(onionmind.sys, "version_info", (3, 9, 18)), \
+         mock.patch.object(onionmind, "run_legacy_ui", legacy), \
+         mock.patch.dict(sys.modules, {"onionmind_desktop": None}):
+        assert onionmind.run_ui() == "legacy"
+    legacy.assert_called_once_with()
+
+
 if __name__ == "__main__":
     test_llama_backend()
+    test_stream_reports_tool_activity()
+    test_old_python_uses_legacy_ui_without_importing_native_module()
     print("DONE_BACKEND_OK")

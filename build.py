@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject the canonical onionmind.py, logo.svg and onionmind.ico into both
+"""Inject the canonical Python sources, logo.svg and onionmind.ico into the
 installers. Run after editing any of them.
 
     python build.py            # inject, verify, report
@@ -23,6 +23,14 @@ import ast, base64, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "onionmind.py"
+
+AUXILIARY_SOURCES = [
+    # source,                      path,                    opening delimiter,            closing delimiter, newline
+    ("onionmind_desktop_core.py", "install-onionmind.ps1", "$desktopCore = @'\n",        "\n'@\n",           "\r\n"),
+    ("onionmind_desktop_core.py", "install-onionmind.sh",  "<<'DESKTOPCOREEOF'\n",       "\nDESKTOPCOREEOF\n", "\n"),
+    ("onionmind_desktop.py",      "install-onionmind.ps1", "$desktopUi = @'\n",          "\n'@\n",           "\r\n"),
+    ("onionmind_desktop.py",      "install-onionmind.sh",  "<<'DESKTOPUIEOF'\n",         "\nDESKTOPUIEOF\n",   "\n"),
+]
 
 # The only intentional per-platform differences. Everything else is identical by
 # construction. Keep this list short - each entry is a place drift can hide.
@@ -73,6 +81,16 @@ def splice(path: pathlib.Path, opener: str, closer: str, payload: str) -> str:
     return text[:i] + payload + text[j:]
 
 
+def has_expected_newlines(path: pathlib.Path, newline: str) -> bool:
+    """Check physical newlines; ``Path.read_text`` intentionally hides them."""
+
+    raw = path.read_bytes()
+    if newline == "\r\n":
+        remainder = raw.replace(b"\r\n", b"")
+        return b"\r" not in remainder and b"\n" not in remainder
+    return b"\r" not in raw
+
+
 def main() -> int:
     check_only = "--check" in sys.argv
     source = SOURCE.read_text(encoding="utf-8")
@@ -97,6 +115,28 @@ def main() -> int:
             continue
         path.write_text(splice(path, opener, closer, payload), encoding="utf-8", newline=newline)
         print(f"  injected     {name}  ({len(payload.splitlines())} lines, {newline!r} endings)")
+
+    for source_name, target_name, opener, closer, newline in AUXILIARY_SOURCES:
+        source_path = ROOT / source_name
+        target_path = ROOT / target_name
+        payload = source_path.read_text(encoding="utf-8").rstrip("\n")
+        ast.parse(payload)
+        current = target_path.read_text(encoding="utf-8")
+        i = current.index(opener) + len(opener)
+        j = current.index(closer, i)
+        if current[i:j] == payload:
+            print(f"  up to date   {target_name} ({source_name})")
+            continue
+        stale += 1
+        if check_only:
+            print(f"  STALE        {target_name} ({source_name})")
+            continue
+        target_path.write_text(
+            splice(target_path, opener, closer, payload),
+            encoding="utf-8",
+            newline=newline,
+        )
+        print(f"  injected     {target_name} ({source_name}, {len(payload.splitlines())} lines)")
 
     for (name, opener, closer, newline), payload in ICON_TARGETS.items():
         path = ROOT / name
@@ -127,8 +167,10 @@ def main() -> int:
         "@echo off\n"
         "rem Onionmind one-click installer. This file is BOTH a batch file and the\n"
         "rem full PowerShell installer, appended below the marker. Built by build.py.\n"
+        "set \"ONIONMIND_SETUP=%~f0\"\n"
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
-        "$c = Get-Content -Raw '%~f0'; iex $c.Substring($c.IndexOf('" + half1 + "'+'" + half2 + "'))\"\n"
+        "$c = [IO.File]::ReadAllText($env:ONIONMIND_SETUP, [Text.Encoding]::UTF8); "
+        "iex $c.Substring($c.IndexOf('" + half1 + "'+'" + half2 + "'))\"\n"
         "exit /b %ERRORLEVEL%\n"
         + marker + "\n" + ps1
     )
@@ -142,11 +184,31 @@ def main() -> int:
             CMD.write_text(polyglot, encoding="utf-8", newline="\r\n")
             print(f"  injected     onionmind-setup.cmd  (one-click wrapper, {len(ps1.splitlines())} payload lines)")
 
+    line_ending_targets = {
+        name: newline for name, _opener, _closer, newline, _subs in TARGETS
+    }
+    line_ending_targets.update(
+        {name: newline for _source, name, _opener, _closer, newline in AUXILIARY_SOURCES}
+    )
+    line_ending_targets.update({"onionmind-setup.cmd": "\r\n"})
+    for name, newline in line_ending_targets.items():
+        path = ROOT / name
+        if has_expected_newlines(path, newline):
+            continue
+        stale += 1
+        if check_only:
+            print(f"  STALE        {name} (expected {newline!r} line endings)")
+            continue
+        normalized = path.read_text(encoding="utf-8")
+        path.write_text(normalized, encoding="utf-8", newline=newline)
+        print(f"  normalized   {name} ({newline!r} line endings)")
+
     if check_only and stale:
-        print(f"\n{stale} installer(s) stale - run: python build.py")
+        print(f"\n{stale} generated-file issue(s) - run: python build.py")
         return 1
-    print(f"\nok - {len(TARGETS)} installer(s) carry onionmind.py verbatim, "
-          f"plus {len(ICON_TARGETS)} icon payload(s) and the one-click cmd")
+    print(f"\nok - {len(TARGETS)} installer(s) carry onionmind.py, "
+          f"{len(AUXILIARY_SOURCES)} desktop source payload(s), "
+          f"{len(ICON_TARGETS)} icon payload(s), and the one-click cmd")
     return 0
 
 

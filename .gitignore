@@ -8,3 +8,5 @@ android/app/src/main/jniLibs/
 android/local.properties
 *.jks
 *.keystore
+.desktop-build-venv/
+dist/

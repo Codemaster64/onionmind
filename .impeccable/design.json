@@ -1,0 +1,519 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-23T18:41:09Z",
+  "title": "Design System: Onionmind Workbench",
+  "extensions": {
+    "colorMeta": {
+      "graphite-window": {
+        "role": "neutral",
+        "displayName": "Window Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.004 84.6)",
+          "oklch(25% 0.004 84.6)",
+          "oklch(35% 0.004 84.6)",
+          "oklch(45% 0.004 84.6)",
+          "oklch(55% 0.004 84.6)",
+          "oklch(65% 0.004 84.6)",
+          "oklch(80% 0.004 84.6)",
+          "oklch(95% 0.004 84.6)"
+        ]
+      },
+      "graphite-workspace": {
+        "role": "neutral",
+        "displayName": "Workspace Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.004 84.6)",
+          "oklch(25% 0.004 84.6)",
+          "oklch(35% 0.004 84.6)",
+          "oklch(45% 0.004 84.6)",
+          "oklch(55% 0.004 84.6)",
+          "oklch(65% 0.004 84.6)",
+          "oklch(80% 0.004 84.6)",
+          "oklch(95% 0.004 84.6)"
+        ]
+      },
+      "graphite-panel": {
+        "role": "neutral",
+        "displayName": "Panel Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.004 84.6)",
+          "oklch(25% 0.004 84.6)",
+          "oklch(35% 0.004 84.6)",
+          "oklch(45% 0.004 84.6)",
+          "oklch(55% 0.004 84.6)",
+          "oklch(65% 0.004 84.6)",
+          "oklch(80% 0.004 84.6)",
+          "oklch(95% 0.004 84.6)"
+        ]
+      },
+      "graphite-terminal": {
+        "role": "neutral",
+        "displayName": "Terminal Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.003 67.7)",
+          "oklch(25% 0.003 67.7)",
+          "oklch(35% 0.003 67.7)",
+          "oklch(45% 0.003 67.7)",
+          "oklch(55% 0.003 67.7)",
+          "oklch(65% 0.003 67.7)",
+          "oklch(80% 0.003 67.7)",
+          "oklch(95% 0.003 67.7)"
+        ]
+      },
+      "graphite-raised": {
+        "role": "neutral",
+        "displayName": "Raised Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.005 67.6)",
+          "oklch(25% 0.005 67.6)",
+          "oklch(35% 0.005 67.6)",
+          "oklch(45% 0.005 67.6)",
+          "oklch(55% 0.005 67.6)",
+          "oklch(65% 0.005 67.6)",
+          "oklch(80% 0.005 67.6)",
+          "oklch(95% 0.005 67.6)"
+        ]
+      },
+      "graphite-card": {
+        "role": "neutral",
+        "displayName": "Card Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.005 67.6)",
+          "oklch(25% 0.005 67.6)",
+          "oklch(35% 0.005 67.6)",
+          "oklch(45% 0.005 67.6)",
+          "oklch(55% 0.005 67.6)",
+          "oklch(65% 0.005 67.6)",
+          "oklch(80% 0.005 67.6)",
+          "oklch(95% 0.005 67.6)"
+        ]
+      },
+      "graphite-tool": {
+        "role": "neutral",
+        "displayName": "Tool Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.004 84.6)",
+          "oklch(25% 0.004 84.6)",
+          "oklch(35% 0.004 84.6)",
+          "oklch(45% 0.004 84.6)",
+          "oklch(55% 0.004 84.6)",
+          "oklch(65% 0.004 84.6)",
+          "oklch(80% 0.004 84.6)",
+          "oklch(95% 0.004 84.6)"
+        ]
+      },
+      "graphite-control": {
+        "role": "neutral",
+        "displayName": "Control Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.006 78.2)",
+          "oklch(25% 0.006 78.2)",
+          "oklch(35% 0.006 78.2)",
+          "oklch(45% 0.006 78.2)",
+          "oklch(55% 0.006 78.2)",
+          "oklch(65% 0.006 78.2)",
+          "oklch(80% 0.006 78.2)",
+          "oklch(95% 0.006 78.2)"
+        ]
+      },
+      "charcoal-seam": {
+        "role": "neutral",
+        "displayName": "Charcoal Seam",
+        "tonalRamp": [
+          "oklch(15% 0.012 78.2)",
+          "oklch(25% 0.012 78.2)",
+          "oklch(35% 0.012 78.2)",
+          "oklch(45% 0.012 78.2)",
+          "oklch(55% 0.012 78.2)",
+          "oklch(65% 0.012 78.2)",
+          "oklch(80% 0.012 78.2)",
+          "oklch(95% 0.012 78.2)"
+        ]
+      },
+      "charcoal-seam-subtle": {
+        "role": "neutral",
+        "displayName": "Subtle Charcoal Seam",
+        "tonalRamp": [
+          "oklch(15% 0.010 80.7)",
+          "oklch(25% 0.010 80.7)",
+          "oklch(35% 0.010 80.7)",
+          "oklch(45% 0.010 80.7)",
+          "oklch(55% 0.010 80.7)",
+          "oklch(65% 0.010 80.7)",
+          "oklch(80% 0.010 80.7)",
+          "oklch(95% 0.010 80.7)"
+        ]
+      },
+      "bone": {
+        "role": "neutral",
+        "displayName": "Soft Bone",
+        "tonalRamp": [
+          "oklch(15% 0.014 78.3)",
+          "oklch(25% 0.014 78.3)",
+          "oklch(35% 0.014 78.3)",
+          "oklch(45% 0.014 78.3)",
+          "oklch(55% 0.014 78.3)",
+          "oklch(65% 0.014 78.3)",
+          "oklch(80% 0.014 78.3)",
+          "oklch(95% 0.014 78.3)"
+        ]
+      },
+      "bone-strong": {
+        "role": "neutral",
+        "displayName": "Strong Bone",
+        "tonalRamp": [
+          "oklch(15% 0.012 75.4)",
+          "oklch(25% 0.012 75.4)",
+          "oklch(35% 0.012 75.4)",
+          "oklch(45% 0.012 75.4)",
+          "oklch(55% 0.012 75.4)",
+          "oklch(65% 0.012 75.4)",
+          "oklch(80% 0.012 75.4)",
+          "oklch(95% 0.012 75.4)"
+        ]
+      },
+      "bone-on-accent": {
+        "role": "neutral",
+        "displayName": "Bone on Aubergine",
+        "tonalRamp": [
+          "oklch(15% 0.009 78.3)",
+          "oklch(25% 0.009 78.3)",
+          "oklch(35% 0.009 78.3)",
+          "oklch(45% 0.009 78.3)",
+          "oklch(55% 0.009 78.3)",
+          "oklch(65% 0.009 78.3)",
+          "oklch(80% 0.009 78.3)",
+          "oklch(95% 0.009 78.3)"
+        ]
+      },
+      "ash": {
+        "role": "neutral",
+        "displayName": "Warm Ash",
+        "tonalRamp": [
+          "oklch(15% 0.015 74.4)",
+          "oklch(25% 0.015 74.4)",
+          "oklch(35% 0.015 74.4)",
+          "oklch(45% 0.015 74.4)",
+          "oklch(55% 0.015 74.4)",
+          "oklch(65% 0.015 74.4)",
+          "oklch(80% 0.015 74.4)",
+          "oklch(95% 0.015 74.4)"
+        ]
+      },
+      "stone-icon": {
+        "role": "neutral",
+        "displayName": "Warm Stone Icon",
+        "tonalRamp": [
+          "oklch(15% 0.017 73.7)",
+          "oklch(25% 0.017 73.7)",
+          "oklch(35% 0.017 73.7)",
+          "oklch(45% 0.017 73.7)",
+          "oklch(55% 0.017 73.7)",
+          "oklch(65% 0.017 73.7)",
+          "oklch(80% 0.017 73.7)",
+          "oklch(95% 0.017 73.7)"
+        ]
+      },
+      "aubergine": {
+        "role": "primary",
+        "displayName": "Workbench Aubergine",
+        "tonalRamp": [
+          "oklch(15% 0.060 315.4)",
+          "oklch(25% 0.060 315.4)",
+          "oklch(35% 0.060 315.4)",
+          "oklch(45% 0.060 315.4)",
+          "oklch(55% 0.060 315.4)",
+          "oklch(65% 0.060 315.4)",
+          "oklch(80% 0.060 315.4)",
+          "oklch(95% 0.060 315.4)"
+        ]
+      },
+      "aubergine-hover": {
+        "role": "primary",
+        "displayName": "Aubergine Hover",
+        "tonalRamp": [
+          "oklch(15% 0.066 315.6)",
+          "oklch(25% 0.066 315.6)",
+          "oklch(35% 0.066 315.6)",
+          "oklch(45% 0.066 315.6)",
+          "oklch(55% 0.066 315.6)",
+          "oklch(65% 0.066 315.6)",
+          "oklch(80% 0.066 315.6)",
+          "oklch(95% 0.066 315.6)"
+        ]
+      },
+      "aubergine-selection": {
+        "role": "primary",
+        "displayName": "Aubergine Selection",
+        "tonalRamp": [
+          "oklch(15% 0.031 312.7)",
+          "oklch(25% 0.031 312.7)",
+          "oklch(35% 0.031 312.7)",
+          "oklch(45% 0.031 312.7)",
+          "oklch(55% 0.031 312.7)",
+          "oklch(65% 0.031 312.7)",
+          "oklch(80% 0.031 312.7)",
+          "oklch(95% 0.031 312.7)"
+        ]
+      },
+      "aubergine-mode": {
+        "role": "primary",
+        "displayName": "Aubergine Mode",
+        "tonalRamp": [
+          "oklch(15% 0.048 314.7)",
+          "oklch(25% 0.048 314.7)",
+          "oklch(35% 0.048 314.7)",
+          "oklch(45% 0.048 314.7)",
+          "oklch(55% 0.048 314.7)",
+          "oklch(65% 0.048 314.7)",
+          "oklch(80% 0.048 314.7)",
+          "oklch(95% 0.048 314.7)"
+        ]
+      },
+      "aubergine-on-selection": {
+        "role": "primary",
+        "displayName": "Bone on Selection",
+        "tonalRamp": [
+          "oklch(15% 0.017 316.9)",
+          "oklch(25% 0.017 316.9)",
+          "oklch(35% 0.017 316.9)",
+          "oklch(45% 0.017 316.9)",
+          "oklch(55% 0.017 316.9)",
+          "oklch(65% 0.017 316.9)",
+          "oklch(80% 0.017 316.9)",
+          "oklch(95% 0.017 316.9)"
+        ]
+      },
+      "aubergine-focus": {
+        "role": "primary",
+        "displayName": "Aubergine Focus",
+        "tonalRamp": [
+          "oklch(15% 0.084 315.0)",
+          "oklch(25% 0.084 315.0)",
+          "oklch(35% 0.084 315.0)",
+          "oklch(45% 0.084 315.0)",
+          "oklch(55% 0.084 315.0)",
+          "oklch(65% 0.084 315.0)",
+          "oklch(80% 0.084 315.0)",
+          "oklch(95% 0.084 315.0)"
+        ]
+      },
+      "status-good": {
+        "role": "tertiary",
+        "displayName": "Ready Green",
+        "tonalRamp": [
+          "oklch(15% 0.095 151.9)",
+          "oklch(25% 0.095 151.9)",
+          "oklch(35% 0.095 151.9)",
+          "oklch(45% 0.095 151.9)",
+          "oklch(55% 0.095 151.9)",
+          "oklch(65% 0.095 151.9)",
+          "oklch(80% 0.095 151.9)",
+          "oklch(95% 0.095 151.9)"
+        ]
+      },
+      "status-warn": {
+        "role": "tertiary",
+        "displayName": "Caution Ochre",
+        "tonalRamp": [
+          "oklch(15% 0.086 76.5)",
+          "oklch(25% 0.086 76.5)",
+          "oklch(35% 0.086 76.5)",
+          "oklch(45% 0.086 76.5)",
+          "oklch(55% 0.086 76.5)",
+          "oklch(65% 0.086 76.5)",
+          "oklch(80% 0.086 76.5)",
+          "oklch(95% 0.086 76.5)"
+        ]
+      },
+      "status-bad": {
+        "role": "tertiary",
+        "displayName": "Failure Coral",
+        "tonalRamp": [
+          "oklch(15% 0.112 32.6)",
+          "oklch(25% 0.112 32.6)",
+          "oklch(35% 0.112 32.6)",
+          "oklch(45% 0.112 32.6)",
+          "oklch(55% 0.112 32.6)",
+          "oklch(65% 0.112 32.6)",
+          "oklch(80% 0.112 32.6)",
+          "oklch(95% 0.112 32.6)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "brand": {
+        "displayName": "Brand",
+        "purpose": "Compact Onionmind identity in native chrome only."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Message authors, card titles, repository names, and summaries."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "System-scaled proportional transcript and explanatory copy."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Small section labels for dense workbench regions."
+      },
+      "mono": {
+        "displayName": "Terminal / Diff",
+        "purpose": "Terminal output, terminal input, and diff content only."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "rail-collapse",
+        "value": "820px"
+      },
+      {
+        "name": "brand-compact",
+        "value": "900px"
+      },
+      {
+        "name": "inspector-collapse",
+        "value": "1080px"
+      },
+      {
+        "name": "toolbar-compact",
+        "value": "1100px"
+      },
+      {
+        "name": "model-status-hide",
+        "value": "1280px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The compact high-emphasis action used for Send and model installation.",
+      "html": "<button class=\"ds-button-primary\" type=\"button\">Send</button>",
+      "css": ".ds-button-primary { background:#5c4566; color:#faf6f0; border:1px solid #765984; border-radius:4px; padding:5px 17px; min-height:18px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; font-weight:600; } .ds-button-primary:hover { background:#684e73; border-color:#8a6b98; } .ds-button-primary:focus-visible { border-color:#a481b4; outline:none; } .ds-button-primary:active { background:#191816; } .ds-button-primary:disabled { color:#6f6961; background:#211f1d; border-color:#37342f; }"
+    },
+    {
+      "name": "Compact Icon Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A native secondary action with Onionmind's authored platform-neutral line icon.",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\"><svg class=\"ds-button-icon\" viewBox=\"0 0 18 18\" aria-hidden=\"true\"><path d=\"M4.5 2.5h6L14 6v9.5H4.5zM10.5 2.8V6h3.2M6.2 10h4M8.2 8v4\"/></svg><span class=\"ds-button-label\">New task</span></button>",
+      "css": ".ds-button-secondary { display:inline-flex; align-items:center; gap:8px; background:#24221f; color:#eee8df; border:1px solid #45413b; border-radius:4px; padding:5px 9px; min-height:18px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; } .ds-button-icon { width:18px; height:18px; fill:none; stroke:#c9c1b7; stroke-width:1.45; stroke-linecap:round; stroke-linejoin:round; } .ds-button-label { color:inherit; } .ds-button-secondary:hover { background:#2c2926; border-color:#5a554d; } .ds-button-secondary:focus-visible { border-color:#a481b4; outline:none; } .ds-button-secondary:active { background:#191816; } .ds-button-secondary:disabled { color:#6f6961; background:#211f1d; border-color:#37342f; }"
+    },
+    {
+      "name": "Service Status",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "A compact service fact whose dot supports, but never replaces, its explicit text.",
+      "html": "<div class=\"ds-status-pill\" role=\"status\" aria-label=\"Model status: Local, Ready\"><span class=\"ds-status-prefix\">Model</span><span class=\"ds-status-dot\" aria-hidden=\"true\"></span><span class=\"ds-status-value\">Local · Ready</span></div>",
+      "css": ".ds-status-pill { display:inline-flex; align-items:center; gap:5px; background:#211f1d; color:#eee8df; border:1px solid #403c36; border-radius:4px; padding:4px 8px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; } .ds-status-prefix { color:#aaa39a; } .ds-status-dot { width:6px; height:6px; border-radius:50%; background:#78b889; } .ds-status-value { color:#eee8df; }"
+    },
+    {
+      "name": "Chat / Agent Mode Switch",
+      "kind": "nav",
+      "refersTo": "mode-selected",
+      "description": "The compact mutually exclusive mode control above the task boundary disclosure.",
+      "html": "<div class=\"ds-mode-switch\" role=\"group\" aria-label=\"Run mode\"><button class=\"ds-mode-button\" type=\"button\" aria-pressed=\"false\">Chat</button><button class=\"ds-mode-button ds-mode-button-selected\" type=\"button\" aria-pressed=\"true\">Agent</button></div>",
+      "css": ".ds-mode-switch { display:inline-flex; background:#191816; border:1px solid #403c36; border-radius:4px; padding:2px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; } .ds-mode-button { background:transparent; color:#b8b1a8; border:1px solid transparent; border-radius:4px; padding:4px 16px; } .ds-mode-button:hover { background:#292724; color:#eee8df; } .ds-mode-button:focus-visible { border-color:#a481b4; outline:none; } .ds-mode-button:active, .ds-mode-button-selected { background:#47364f; color:#f5edf8; border-color:#684f73; }"
+    },
+    {
+      "name": "Task Composer",
+      "kind": "input",
+      "refersTo": "composer",
+      "description": "The proportional multiline field for Chat prompts and Harness repository tasks.",
+      "html": "<textarea class=\"ds-composer\" aria-label=\"Task composer\" rows=\"5\" placeholder=\"Describe the repository task for DeepSeek Harness…\"></textarea>",
+      "css": ".ds-composer { width:min(100%, 74ch); min-height:96px; resize:vertical; background:#24211f; color:#eee8df; border:1px solid #4a453e; border-radius:4px; padding:10px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; line-height:normal; } .ds-composer::placeholder { color:#aaa39a; } .ds-composer:hover { border-color:#5a554d; } .ds-composer:focus-visible { border-color:#a481b4; outline:none; } .ds-composer:disabled { color:#6f6961; background:#211f1d; border-color:#37342f; }"
+    },
+    {
+      "name": "Tool Activity Card",
+      "kind": "custom",
+      "refersTo": "tool-card",
+      "description": "A selectable grouped record of file reads, commands, and their observed outcomes.",
+      "html": "<section class=\"ds-tool-card\" aria-label=\"Read project context\"><header class=\"ds-tool-header\"><strong class=\"ds-tool-title\">Read project context</strong><span class=\"ds-tool-count\">2 items</span></header><div class=\"ds-tool-row\"><span class=\"ds-tool-path\">tests/factories/user_factory.rb</span><span class=\"ds-tool-state\">142 lines · OK</span></div><div class=\"ds-tool-row\"><span class=\"ds-tool-path\">tests/support/test_users.rb</span><span class=\"ds-tool-state\">98 lines · OK</span></div></section>",
+      "css": ".ds-tool-card { width:min(100%, 78ch); background:#1e1d1b; color:#eee8df; border:1px solid #423e38; border-radius:5px; padding:8px 11px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; user-select:text; } .ds-tool-header, .ds-tool-row { display:flex; align-items:baseline; gap:12px; } .ds-tool-header { margin-bottom:5px; } .ds-tool-title { color:#f2ece4; font-weight:650; } .ds-tool-count { margin-left:auto; color:#aaa39a; } .ds-tool-path { flex:1; min-width:0; overflow-wrap:anywhere; } .ds-tool-state { color:#c3a1d3; white-space:nowrap; }"
+    },
+    {
+      "name": "Inspector Tabs",
+      "kind": "nav",
+      "refersTo": "inspector-tabs",
+      "description": "The proportional Context, Changes, and Activity navigation with a restrained active underline.",
+      "html": "<div class=\"ds-inspector-tabs\" role=\"tablist\" aria-label=\"Workspace inspector\"><button class=\"ds-inspector-tab ds-inspector-tab-selected\" type=\"button\" role=\"tab\" aria-selected=\"true\">Context</button><button class=\"ds-inspector-tab\" type=\"button\" role=\"tab\" aria-selected=\"false\">Changes</button><button class=\"ds-inspector-tab\" type=\"button\" role=\"tab\" aria-selected=\"false\">Activity</button></div>",
+      "css": ".ds-inspector-tabs { display:flex; background:#1c1b19; border-bottom:1px solid #38352f; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; } .ds-inspector-tab { background:transparent; color:#b7b0a7; border:0; border-bottom:2px solid transparent; padding:12px 16px 10px; } .ds-inspector-tab:hover { color:#eee8df; } .ds-inspector-tab:focus-visible { outline:1px solid #a481b4; outline-offset:-1px; } .ds-inspector-tab:active, .ds-inspector-tab-selected { color:#f5efe8; border-bottom-color:#9570a7; }"
+    },
+    {
+      "name": "Privacy Boundary Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The canonical wording pattern that keeps local inference, Tor search, and Harness networking distinct.",
+      "html": "<section class=\"ds-privacy-card\" aria-labelledby=\"ds-privacy-title\"><header class=\"ds-privacy-header\"><strong class=\"ds-privacy-title\" id=\"ds-privacy-title\">Privacy boundary</strong><span class=\"ds-privacy-state\">Local inference</span></header><p class=\"ds-privacy-copy\">Prompts and model inference stay on this machine. Search queries are the explicit exception and use Tor when Chat invokes search. Harness network access is separate.</p></section>",
+      "css": ".ds-privacy-card { background:#23211f; color:#eee8df; border:1px solid #403c36; border-radius:5px; padding:9px 10px; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"Noto Sans\", \"DejaVu Sans\", sans-serif; font-size:1em; } .ds-privacy-header { display:flex; align-items:baseline; gap:12px; } .ds-privacy-title { color:#f2ece4; font-weight:650; } .ds-privacy-state { margin-left:auto; color:#84c08f; } .ds-privacy-copy { margin:8px 0 0; color:#aaa39a; line-height:normal; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Calm Local Work Loop",
+    "overview": "Onionmind is one native workbench for choosing a repository and local model, describing work, watching an interruptible Chat or Harness run, and verifying what was observed. The transcript stays primary while projects, sessions, terminal output, context, changes, and activity remain part of the same legible loop.\n\nThe interface is quiet and operational: matte warm graphite planes, fine charcoal seams, soft bone type, and aubergine held back for selection, focus, and the primary action. Density is compact and information-rich without becoming a dashboard; balanced Workbench A in Operate mode is the canonical expression.",
+    "keyCharacteristics": [
+      "Transcript-dominant three-pane workbench",
+      "Flat, warm, low-chroma material palette",
+      "Compact native controls and platform-neutral monochrome icons",
+      "Explicit privacy, permission, service, and observed-change states",
+      "Keyboard-first behavior with responsive pane collapse"
+    ],
+    "rules": [
+      {
+        "name": "The Restrained Aubergine Rule",
+        "body": "Aubergine marks selection, focus, and the primary action; it never becomes ambient decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Proportional Workbench Rule",
+        "body": "Use the platform-scaled proportional UI face everywhere except terminal output, terminal input, and diff content.",
+        "section": "typography"
+      },
+      {
+        "name": "The Transcript-First Rule",
+        "body": "The center transcript remains the largest pane; at narrow widths the inspector collapses before the project rail.",
+        "section": "layout"
+      },
+      {
+        "name": "The Tonal Depth Rule",
+        "body": "Separate planes with matte tone shifts and one-pixel seams; do not add shadows, glow, gradients, glass, or blur.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Compact Native Rule",
+        "body": "Keep controls square and compact at 3–5px radii; reserve the 16px avatar radius for 32px identity marks.",
+        "section": "shapes"
+      },
+      {
+        "name": "The Honest State Rule",
+        "body": "Model, Tor, Harness, permission, activity, and observed-change states are always named in text and never encoded by color alone.",
+        "section": "components"
+      },
+      {
+        "name": "The Separate Boundaries Rule",
+        "body": "Present local inference, Tor-routed Chat search, and Harness networking as separate facts; never imply Harness traffic is Tor-confined.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "Do preserve the platform UI point size and use proportional text throughout the workbench except in terminal and diff surfaces.",
+      "Do keep the transcript largest, with a responsive 74-character message measure and 78-character tool measure.",
+      "Do use the authored monochrome icon set for actions and the supplied Onionmind asset for product identity.",
+      "Do provide visible keyboard focus, accessible names, selectable output, and textual state labels.",
+      "Do distinguish local inference, Tor search, and Harness networking wherever privacy boundaries appear."
+    ],
+    "donts": [
+      "Don't add shadows, glow, gradients, glass, blur, or neon terminal styling.",
+      "Don't turn compact controls into pills or introduce oversized headings and decorative cards.",
+      "Don't substitute emoji, Unicode symbols, or platform-dependent glyphs for authored action icons.",
+      "Don't use monospace for transcript prose, navigation, tool activity, or ordinary file paths.",
+      "Don't imply a repository changed until the application has observed the change on disk."
+    ]
+  }
+}
