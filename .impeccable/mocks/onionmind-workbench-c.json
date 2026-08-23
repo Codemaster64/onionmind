@@ -1,0 +1,6 @@
+{
+  "name": "Conversation-first workbench",
+  "viewport": "1440x900",
+  "approved": false,
+  "prompt": "Create a high-fidelity flat 1440x900 desktop application UI concept for a standalone native coding-agent workbench named Onionmind. Use a quiet conversation-first layout: project/session rail, spacious central agent transcript with compact tool rows and composer, a Changes inspector with file list and unified diff, and a slim terminal/activity drawer. Show repository, branch, Ollama, Tor, approval, and INFERNO model state. Use restrained warm graphite and charcoal-brown panels, soft bone text, subtle aubergine selection, compact system sans, developer monospace, fine one-pixel seams, and 5-7px radii. No neon, glow, gradients, glass, oversized headings, decorative cards, proprietary marks, or browser chrome. It must look like a real native software screenshot."
+}

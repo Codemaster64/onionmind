@@ -1,0 +1,7 @@
+{
+  "name": "Balanced workbench",
+  "viewport": "1440x900",
+  "approved": true,
+  "approval": "Delegated by the user's explicit Claude Code/Codex direction; selected because it keeps chat primary while exposing projects, sessions, context, changes, terminal output, models, and privacy state together.",
+  "prompt": "Create a high-fidelity flat 1440x900 desktop application UI concept for a standalone native coding-agent workbench named Onionmind. Use a balanced Codex-style three-pane composition: a 224px project/session rail, a large central agent transcript with an open integrated terminal drawer and multiline composer, and a 292px Context/Changes/Activity inspector. Add a compact native toolbar with repository, branch, INFERNO local model, and Tor status. Show realistic grouped file-read and shell-command activity. Use restrained warm graphite and charcoal-brown panels, soft bone text, subtle aubergine selection, compact system sans, developer monospace, fine one-pixel seams, and 5-7px radii. No neon, glow, gradients, glass, oversized headings, pill-heavy controls, decorative cards, proprietary marks, or browser chrome. It must look like a real native software screenshot, not a poster or website."
+}

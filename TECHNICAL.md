@@ -10,8 +10,19 @@ hardware, and every claim says how it was checked.
 
 ## Quick start
 
-**Windows** — paste `install-onionmind.ps1` into PowerShell.
+**Windows** — run `onionmind-setup.cmd` or paste `install-onionmind.ps1` into PowerShell.
 **Linux** — `bash install-onionmind.sh` (Arch or Ubuntu/Debian; run as your normal user, it calls `sudo` where needed).
+
+The desktop entry point opens a native PySide6 workbench. For development:
+
+```text
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-desktop.txt
+.venv\Scripts\python onionmind_desktop.py
+```
+
+There is no embedded browser, WebView, or local HTTP frontend in the desktop
+program. `tools/build-desktop.ps1` produces the standalone Windows artifact.
 
 By default you get **Qwen3.8-27B** where it fits in VRAM, and the fast small model where it
 doesn't. Override with `ONIONMIND_MODEL`:
@@ -63,12 +74,57 @@ means running it again.
 | Tor Browser | via winget, then **started automatically** — it owns the SOCKS proxy on 9150 |
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
-| `onionmind.py` | the search agent, written next to the weights |
-| `onionmind` | DeepSeek Harness via Ollama, with Tor preflight/status and the Tor search provider |
-| `onionmind-chat` + desktop icon | local Tk desktop chat |
-| `onionmind-code` | alias for the Harness launcher |
+| `onionmind.py` | local chat/search engine and compatibility CLI, written next to the weights |
+| `onionmind_desktop.py` | native PySide6 presentation and process orchestration |
+| `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Harness command construction |
+| `onionmind` + desktop icon | native project/session workbench |
+| `onionmind-chat` | compatibility alias for the same native workbench |
+| `onionmind-code "task"` | one-shot DeepSeek Harness headless task through Ollama |
 | `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
-| Python deps | `requests`, `PySocks` |
+| Isolated desktop runtime | `requests`, `PySocks`, and `PySide6-Essentials` in `desktop-env` |
+
+Agent mode additionally requires a Node.js version accepted by the current DSH
+package (`^22.19` or `24+`). Both the native preflight and generated CLI launcher
+check this before claiming Harness is ready.
+
+## Native desktop architecture
+
+The desktop rewrite keeps three deliberately narrow seams:
+
+- `onionmind.py` owns Ollama/llama.cpp inference, streaming, image messages,
+  tool calls, and fail-closed Tor search. Existing CLI, Android, and Matchstick
+  paths continue to use this core.
+- `onionmind_desktop_core.py` has no Qt dependency. It owns atomic JSON settings
+  and sessions, Onionmind tier/display names, bounded workspace and Git snapshots,
+  terminal parsing, and the exact DeepSeek Harness command. This layer is covered
+  by unit tests without starting a GUI.
+- `onionmind_desktop.py` owns the Qt widget tree and asynchronous workers. Model
+  generation, terminal commands, Git refreshes, model pulls, and Harness tasks
+  stay off the UI thread; cancel actions terminate the corresponding operation.
+
+The application window is a native, resizable three-pane workbench: projects and
+sessions on the left; conversation, terminal, and composer in the centre; context,
+changes, and activity on the right. Narrow windows collapse inspectors before the
+conversation. Keyboard focus, tooltips, visible selection, and standard controls
+remain available without a mouse.
+
+Ollama remains the model seam: discovery and pulls use its public local API and
+inference continues through `onionmind.py`. Harness remains the agent seam:
+
+```text
+ollama launch dsh --model <raw-ollama-name> -- --profile headless "<task>"
+```
+
+The raw Ollama model name is always passed to external tools; labels such as
+SPARK, EMBER, BLAZE, and INFERNO are presentation metadata only. Harness output
+is streamed into the native transcript, and its working directory is the active
+project rather than the user's home directory.
+
+The stock DSH headless profile has no interactive approval answerer, so approval
+requests fail closed. Custom DSH profiles can alter that composition. Stop
+terminates the shell or Harness launcher managed by Onionmind; deliberately
+detached/background child processes can outlive their launcher and may need
+manual termination.
 
 ## Which build you get
 
@@ -146,9 +202,16 @@ In interactive chat, `/save notes.txt` exports the conversation so far.
 
 ### The privacy boundary, precisely
 
-**Only searches leave your machine.** Your prompts, the model's reasoning, and its answers are
-all local and never touch the network under any circumstances. Tor hides the search queries,
-which were the only exposed part. It does not anonymize anything else you do.
+**In Chat mode, only searches leave your machine after installation.** Prompts,
+model reasoning, answers, project snapshots, and session files remain local.
+Search queries go to DuckDuckGo through Tor. Model pulls and application updates
+also require direct downloads when explicitly requested.
+
+**Agent mode has a different boundary.** DeepSeek Harness can execute repository
+tools and network-capable commands. Ollama's current DSH launcher does not accept
+Onionmind's custom Tor-provider patch, so Harness network traffic is direct. The
+desktop and CLI label this boundary instead of implying that arbitrary agent
+traffic is anonymized.
 
 ## GPU support on the live USB
 
@@ -226,15 +289,19 @@ Termux (~15–20 min, one-time), installs the `tor` package, picks 4B/9B by
 auto-detects its backend — ollama on `:11434`, llama-server on `:8080` — with
 the tool-calling format translation living in the script.
 
-DeepSeek Harness is the primary `onionmind` command and is launched through
-Ollama's official DSH integration. `onionmind-code` is an alias. The launcher
-checks Tor before starting and reports the active SOCKS port.
+On desktop, `onionmind` opens the native workbench. `onionmind-code "task"`
+launches Ollama's official DSH integration with the public `headless` profile,
+so it returns output in the current terminal and never opens DSH's browser UI.
+The native workbench uses the same command in Agent mode and sets the selected
+project as the working directory.
 
-The DSH `web_search` provider is overridden by `dsh-onionmind-tor-search.js`.
-It invokes `onionmind.py --tor-search`, which verifies Tor and creates the same
-fresh Tor circuit used by Onionmind's normal search. This covers DSH's web
-search tool; an agent can still deliberately run arbitrary network commands
-through its shell tools, which is outside the provider boundary.
+`dsh-onionmind-tor-search.js` remains a current DSH search-provider adapter for
+direct Harness configurations that support patches. It invokes
+`onionmind.py --tor-search`, which verifies Tor and creates the same fresh circuit
+used by Onionmind Chat. Ollama's current `ollama launch dsh` wrapper rejects a
+custom `--patch`, so the shipped wrapper does not claim to load it. Arbitrary
+Harness shell/network tools are outside the Tor-search provider boundary in all
+configurations.
 
 **Phone realities, honestly:** community figures (not our measurements) put
 the 4B Q4 at roughly 5–15 tok/s depending on chipset. Android will kill
@@ -456,11 +523,15 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | File | |
 |---|---|
 | `install-onionmind.ps1` | One-paste installer. Everything below is produced by it. |
-| `onionmind.py` | Search agent. Tor + tool-calling loop. |
+| `onionmind.py` | Local inference/search core, compatibility CLI, and legacy-UI fallback. |
+| `onionmind_desktop.py` | Native PySide6 workbench and asynchronous process/UI adapters. |
+| `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |
 | `android/` | The standalone APK: Kotlin app + pure-Kotlin port of the search agent (`:core`), Docker build from source. |
-| `build.py` | Single-sources `onionmind.py` + icon payloads into both installers; `--check` flags drift. |
+| `build.py` | Single-sources all three desktop Python modules + icon payloads into the installers; `--check` flags drift. |
+| `pyproject.toml` / `requirements-desktop.txt` | Constrained native runtime and standalone-build dependencies. |
+| `tools/build-desktop.ps1` | PowerShell 5.1-compatible Nuitka standalone build and validation entry point. |
 | `Modelfile` | Generated. Template, stop tokens, `num_gpu`, `num_ctx`. |
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |
 | `onionmind.ico` | The mark as Windows icon (16–256px), rendered from `logo.svg`. Regenerate: `rsvg-convert` each size + `convert` them into an ico (see `build.py`), then run `python build.py` to re-inject into the installers. |

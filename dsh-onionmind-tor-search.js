@@ -5,19 +5,21 @@ export const name = 'onionmind-tor-search'
 export const inject = ['web']
 
 import { spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
 
 const script = process.env.ONIONMIND_PY
 const python = process.env.ONIONMIND_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
 
-async function usable() {
-  if (!script) return false
-  try { await access(script); return true } catch { return false }
-}
+function search(request, signal) {
+  const query = typeof request === 'string' ? request : request?.query
+  const maxResults = Number.isFinite(request?.maxResults)
+    ? Math.max(1, Math.trunc(request.maxResults))
+    : undefined
+  if (typeof query !== 'string' || !query.trim()) {
+    return Promise.reject(new Error('Tor search requires a non-empty query'))
+  }
 
-function search(query, signal) {
   return new Promise((resolve, reject) => {
-    const child = spawn(python, [script, '--tor-search', query], {
+    const child = spawn(python, [script, '--tor-search', query.trim()], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       env: { ...process.env, HTTP_PROXY: '', HTTPS_PROXY: '', ALL_PROXY: '' },
@@ -45,7 +47,12 @@ function search(query, signal) {
           url,
         })
       }
-      resolve({ content: sources.length ? undefined : stdout.trim(), sources, truncated: false })
+      const selected = maxResults ? sources.slice(0, maxResults) : sources
+      resolve({
+        content: selected.length ? undefined : stdout.trim(),
+        sources: selected,
+        truncated: selected.length < sources.length,
+      })
     })
   })
 }

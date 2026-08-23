@@ -51,6 +51,21 @@ The Android APK embeds the prebuilt binary from
 https://github.com/ollama/ollama — downloaded (not bundled) by the desktop
 installers. Copyright (c) Ollama contributors.
 
+## Qt for Python / PySide6 Essentials (LGPL-3.0 / GPL-3.0 / commercial)
+
+https://doc.qt.io/qtforpython-6/ — the official Python bindings and Qt runtime
+used by Onionmind's native desktop workbench. Community wheels are offered
+under LGPL-3.0/GPL-3.0; commercial Qt terms are also available. Onionmind uses
+the dynamically linked community wheel and does not modify Qt. Full license and
+third-party attribution details:
+https://doc.qt.io/qtforpython-6/licenses.html
+
+## DeepSeek Harness (MIT)
+
+https://github.com/deepseek-ai/deepseek-harness — the optional repository-aware
+agent runtime launched through Ollama. Copyright (c) 2026 DeepSeek. Full text:
+https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE
+
 ## Android APK dependencies
 
 - OkHttp (`com.squareup.okhttp3`) — Apache-2.0, Square Inc.

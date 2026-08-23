@@ -330,8 +330,13 @@ def turn(messages, stop_event=None):
     return "(gave up after 6 tool rounds)"
 
 
-def turn_stream(messages, on_text, stop_event=None):
-    """Run a turn with live text for Ollama; llama-server uses the safe fallback."""
+def turn_stream(messages, on_text, stop_event=None, on_event=None):
+    """Run a turn with live text and optional structured tool activity.
+
+    The extra callback is deliberately optional so existing CLI, installer, and
+    Android callers keep the same interface.  Native desktop clients can use it
+    to render real tool state without scraping transcript text.
+    """
     if BACKEND != "ollama":
         return turn(messages, stop_event)
     for _ in range(6):
@@ -352,8 +357,14 @@ def turn_stream(messages, on_text, stop_event=None):
                 return "(stopped)"
             fn = c["function"]
             args = fn.get("arguments") or {}
+            if on_event:
+                on_event({"kind": "tool_started", "name": fn.get("name", "unknown"),
+                          "arguments": args})
             result = web_search(args.get("query", "")) if fn["name"] == "web_search" \
                      else f"(unknown tool {fn['name']})"
+            if on_event:
+                on_event({"kind": "tool_finished", "name": fn.get("name", "unknown"),
+                          "result": result})
             messages.append({"role": "tool", "tool_name": fn["name"], "content": result})
     return "(gave up after 6 tool rounds)"
 
@@ -375,7 +386,7 @@ def _save(history, path):
     print(f"[saved] {path} ({len(lines)} entries)")
 
 
-def run_ui():
+def run_legacy_ui():
     """Run the Windows desktop chat without putting conversation in a console."""
     import base64
     import os
@@ -703,6 +714,19 @@ def run_ui():
     root.after(100, lambda: threading.Thread(target=start, daemon=True).start())
     question.focus_set()
     root.mainloop()
+
+
+def run_ui():
+    """Run the native workbench, falling back only when its runtime is absent."""
+    if sys.version_info < (3, 10):
+        return run_legacy_ui()
+    try:
+        import onionmind_desktop
+    except ModuleNotFoundError as exc:
+        if exc.name != "onionmind_desktop" and not (exc.name or "").startswith("PySide6"):
+            raise
+        return run_legacy_ui()
+    return onionmind_desktop.run(core_module=sys.modules[__name__])
 
 
 if __name__ == "__main__":

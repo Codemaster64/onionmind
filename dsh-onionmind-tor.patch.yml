@@ -2,7 +2,6 @@
 - insert:
     - id: onionmind-tor-search
       name: '@ONIONMIND_DSH_PLUGIN@'
-    - id: web
-      name: '@deepseek-ai/dsh-web'
-      config:
-        searchProvider: onionmind-tor
+- id: web
+  config:
+    searchProvider: onionmind-tor
