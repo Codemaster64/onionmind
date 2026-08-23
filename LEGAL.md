@@ -30,6 +30,14 @@ repositories listed above, not by this project.
 
 ## EU AI Act (Regulation (EU) 2024/1689)
 
+**Role in the supply chain.** This project did not train, fine-tune, quantise or
+"abliterate" any model. The weights are taken unmodified from the third-party
+repositories listed above, under Apache-2.0. Onionmind is a launcher and a search
+integration around a third-party runtime (Ollama / llama.cpp) and third-party
+weights. It is not the *provider* of a general-purpose AI model and does not
+place a model on the market; it distributes an integration under a free and
+open-source licence, with no monetisation.
+
 - This is a local, personal tool, but that description is not by itself an
   exemption from the AI Act or a conclusion about whether an obligation applies.
 - To the extent the AI Act applies, this project relies on the open-source
@@ -38,12 +46,76 @@ repositories listed above, not by this project.
 - The **systemic-risk regime** (Art. 3(63)) attaches to models *trained* with
   more than 10²⁵ FLOPs. Nothing here was trained by this project; the models
   are far below that scale.
-- **Transparency (Art. 50(1))**: the interface and documentation state plainly
-  that you are interacting with an AI system.
+- Onionmind performs none of the practices prohibited by Art. 5 and falls under
+  no Annex III high-risk use. If the AI Act applies, the duties that remain are
+  the Art. 50 transparency duties.
+- **Transparency (Art. 50(1))**: the interface and the documentation state
+  plainly that you are interacting with an AI system.
 - The maintainers do not collect, store, or process user prompts or outputs.
   Prompts may contain personal data and are processed locally on the user's
   device. When web search is used, the query is sent to DuckDuckGo over Tor and
   is visible to DuckDuckGo.
+
+## Product liability (Directive (EU) 2024/2853)
+
+The revised Product Liability Directive treats software — including AI systems —
+as a *product*, and applies to products placed on the market from 9 December 2026.
+It also brings evidence-disclosure duties and presumptions of defectiveness that
+make a defence on the merits expensive even when it wins. What matters for this
+project is therefore scope, not merits.
+
+**The Directive excludes free and open-source software developed or supplied
+outside the course of a commercial activity** (Art. 2(2), Recital 14). Onionmind
+is supplied under the MIT License, at no charge, with no paid tier, no paid
+support, no advertising, no sponsorship and no donations
+([CONTRIBUTING.md](CONTRIBUTING.md): *"No CLA, no donations, no sponsorships"*),
+and is not bundled into any commercial offering. On that basis the Directive
+does not apply to it.
+
+That exclusion is a **condition, not a status**. It holds only while the project
+stays non-commercial. Selling pre-loaded USB sticks, paid support, a paid hosted
+variant, or a commercial fork supplied by the same maintainers would place the
+supply in the course of a commercial activity and bring the project inside the
+Directive, disclosure and presumption rules included. Any such step is a
+decision to take legal advice on beforehand, not afterwards.
+
+Where the Directive does not apply, ordinary national liability still can. In
+Norway that is fault-based tort liability (culpa), which requires blameworthy
+conduct by the maintainers and an adequate causal link to the harm — not merely
+that a general-purpose tool existed and someone misused it.
+
+## Facilitation, intent, and reports of misuse
+
+Liability for another person's offence requires participation — in Norway,
+*medvirkning* under straffeloven § 15 — and, for the offences relevant here,
+intent. Negligence does not suffice. Distributing a general-purpose, dual-use
+tool that has substantial lawful uses, without knowledge of any specific
+unlawful use, and without any technical means of controlling what a user does
+offline on their own device, is not participation.
+
+There is no general obligation to monitor (Art. 8, Regulation (EU) 2022/2065;
+Art. 15, Directive 2000/31/EC), and here there is nothing that *could* be
+monitored: the project operates no server and receives no prompts, outputs or
+identifiers. Equally, the hosting and caching safe harbours are not needed,
+because the project hosts no user content.
+
+Knowledge is the hinge. A credible report identifying a specific unlawful use is
+the moment at which indifference could begin to look like intent. Reports are
+received through the project's issue tracker at
+<https://github.com/Codemaster64/onionmind/issues>; they are read, recorded with
+a date, and answered. Where a report
+identifies something the project can actually change — a link, a distribution
+channel, a document, a default — it is changed, and the change is visible in the
+public git history.
+
+## Record of diligence
+
+Model licences were verified against upstream repository metadata and recorded,
+with dates, in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and in this file.
+The decisions that bear on safety and legality — local-only processing, no
+telemetry, a Tor preflight that refuses to run rather than leak, no monetisation
+— are dated commits in the public git history. That history is the evidence that
+these questions were addressed in advance rather than reconstructed afterwards.
 
 ## Anonymity tooling is lawful
 

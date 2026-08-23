@@ -28,7 +28,10 @@ if (-not (Test-Path $O)) { throw "The local model engine could not be installed.
 try { python -m pip install --user --disable-pip-version-check tkinterdnd2 2>$null } catch { }
 
 # --- 2. Tor Browser (provides the SOCKS proxy on 9150) ---------------------
-$TorExe = "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe"
+# GetFolderPath, not $env:USERPROFILE\Desktop: OneDrive Known Folder Move
+# relocates the Desktop on most Windows 11 installs, and the shortcut code at
+# the bottom of this script already gets that right.
+$TorExe = "$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe"
 if (-not (Test-Path $TorExe)) {
   Say "Installing Tor Browser"
   try {
@@ -43,8 +46,13 @@ function Tor-Up { foreach ($p in 9150,9050) {
     if (Get-NetTCPConnection -LocalPort $p -State Listen -EA SilentlyContinue) { return $true } }
   return $false }
 if (-not (Tor-Up)) {
-  foreach ($c in @($TorExe, "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
-                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+  foreach ($c in @($TorExe,
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
     if (Test-Path $c) { Say "Starting Tor Browser"; Start-Process $c; break }
   }
   foreach ($i in 1..40) { Start-Sleep 3; if (Tor-Up) { break } }
@@ -110,9 +118,39 @@ if (-not (Ollama-Up)) { throw "The local model engine did not start." }
 
 # --- 6. Weights ------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+
+# Huggingface publishes each LFS object's sha256 in X-Linked-ETag, so a 16GB
+# download can be checked against the digest the host itself serves - no hash
+# table to maintain here. Integrity only, not supply-chain pinning: it catches
+# the truncated or corrupted file that otherwise shows up much later as an
+# inscrutable model-load error. Set ONIONMIND_SKIP_VERIFY=1 to opt out.
+function Verify-Download($Path, $Url) {
+  if ($env:ONIONMIND_SKIP_VERIFY -eq '1') { return }
+  # curl.exe, not Invoke-WebRequest: the digest header is served by huggingface.co
+  # on the hop BEFORE the redirect to the CDN, and IWR only exposes the final
+  # response's headers. curl -I -L prints every hop. It is also the same tool the
+  # download itself uses, so the two agree on proxies and TLS.
+  $want = ''
+  try {
+    $hdrs = & curl.exe -fsSLI $Url 2>$null
+    $m = $hdrs | Select-String -Pattern '^X-Linked-ETag:\s*"?([0-9a-f]{64})"?' |
+         Select-Object -Last 1
+    if ($m) { $want = $m.Matches[0].Groups[1].Value }
+  } catch { return }                       # no digest published; nothing to check
+  if ([string]::IsNullOrWhiteSpace($want)) { return }
+  $got = (Get-FileHash $Path -Algorithm SHA256).Hash.ToLower()
+  if ($got -ne $want) {
+    Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    throw "$(Split-Path $Path -Leaf) downloaded corrupt (sha256 $got, expected $want) - deleted it; rerun to try again"
+  }
+  Say "verified $(Split-Path $Path -Leaf)"
+}
+
 Say "Downloading $file (resumable, ~10-16GB)"
 # ponytail: curl.exe -C - resumes a dropped download; no retry logic of our own
-curl.exe -L -C - --fail -o "$Dir\$file" "https://huggingface.co/$repo/resolve/main/$file"
+$weightsUrl = "https://huggingface.co/$repo/resolve/main/$file"
+curl.exe -L -C - --fail -o "$Dir\$file" $weightsUrl
+Verify-Download "$Dir\$file" $weightsUrl
 
 # --- 7. Model --------------------------------------------------------------
 # num_gpu 99 = all layers on GPU; ollama's auto-split is too conservative and silently
@@ -146,8 +184,9 @@ if ($Vision) {
 # against the 3.69bpw MTP model it is paired with here). Shares the base blob, so
 # it costs ~900MB on top, not another full model.
 $vis = "Qwen3.8-27B-Uncensored-vision-f16.gguf"
-curl.exe -L -C - --fail --noproxy '*' -o "$Dir\$vis" `
-  "https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$vis"
+$visUrl = "https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$vis"
+curl.exe -L -C - --fail --noproxy '*' -o "$Dir\$vis" $visUrl
+Verify-Download "$Dir\$vis" $visUrl
 (Get-Content "$Dir\Modelfile" -Raw).Replace("FROM $Dir\$file", "FROM $Dir\$file`nFROM $Dir\$vis") |
   Set-Content "$Dir\Modelfile.vision" -Encoding UTF8
 Say "Registering vision model"
@@ -231,8 +270,19 @@ def tor_check():
     sys.exit("No Tor proxy on 9150/9050. Open Tor Browser and leave it running.")
 
 
+def strip_tag(name):
+    """"inferno:latest" -> "inferno". ollama's /api/tags always reports a tag;
+    MODEL never carries one, so raw comparisons between the two never matched."""
+    return name[:-7] if name.endswith(":latest") else name
+
+
 def _clean(x):
-    return html.unescape(re.sub(r"<[^>]+>", "", x)).strip()
+    # Collapse ALL whitespace, newlines included. web_search emits three lines
+    # per result and dsh-onionmind-tor-search.js strides through them 3 at a
+    # time; one wrapped snippet used to shift every later result onto the wrong
+    # title - the same silent mis-citation parse_results exists to prevent,
+    # reintroduced at the serialisation boundary.
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", x))).strip()
 
 
 def parse_results(page, n=5):
@@ -337,14 +387,18 @@ def _ask_ollama_stream(messages, on_text, stop_event=None):
                 return {"role": "assistant", "content": "", "stopped": True}
             if not raw:
                 continue
-            chunk = json.loads(raw).get("message") or {}
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue          # a partial or non-JSON line must not kill the stream
+            chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
                 message["content"] += content
                 on_text(content)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
-            if json.loads(raw).get("done"):
+            if event.get("done"):
                 break
     finally:
         r.close()
@@ -625,7 +679,10 @@ def run_ui():
     stream_start = [None]
 
     def populate_models(models):
-        choices = list(dict.fromkeys(models or [MODEL]))
+        # ollama reports "inferno:latest"; MODEL is plain "inferno". Compared raw,
+        # an installed model never matched - the picker listed it twice and the
+        # vision auto-switch below decided the vision model was not installed.
+        choices = list(dict.fromkeys(strip_tag(m) for m in (models or [MODEL])))
         if MODEL not in choices:
             choices.insert(0, MODEL)
         model_box.configure(values=choices, state="readonly")
@@ -633,9 +690,13 @@ def run_ui():
         model_use.configure(state="normal" if BACKEND == "ollama" else "disabled")
         install_model_button.configure(state="normal" if BACKEND == "ollama" else "disabled")
 
-    def choose_model():
+    def choose_model(reset=True):
+        """reset=False keeps the conversation: used by the automatic switch to the
+        vision model, where discarding what the user was doing is not a choice
+        they made. An explicit model change still starts fresh - a new model
+        cannot make sense of another model's context."""
         global MODEL
-        selected = model_var.get().strip()
+        selected = strip_tag(model_var.get().strip())
         if not selected or selected == MODEL:
             return
         MODEL = selected
@@ -645,8 +706,11 @@ def run_ui():
                 preference.write(MODEL)
         except OSError:
             pass
-        history.clear()
-        append("onion", f"Now using {MODEL}. New conversation started.")
+        if reset:
+            history.clear()
+            append("onion", f"Now using {MODEL}. New conversation started.")
+        else:
+            append("onion", f"Switched to {MODEL} to read the image.")
         set_status(f"ready · {MODEL}", "#9ef0b0")
 
     def install_model():
@@ -682,14 +746,16 @@ def run_ui():
         image_path[0] = path
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
-        choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
-        if vision in choices and vision != MODEL:
-            model_var.set(vision)
-            choose_model()
-        elif vision not in choices:
-            append("onion", "Install the Inferno vision model to ask questions about images.")
+        choices = [strip_tag(c) for c in model_box["values"]]
+        # Prefer THIS model's vision build if there is one, else the 27B's.
+        wanted = [MODEL] if MODEL.endswith("-vision") else [MODEL + "-vision", "inferno-vision"]
+        vision = next((v for v in wanted if v in choices or v == MODEL), None)
+        if vision is None:
+            append("onion", "Install a vision model to ask questions about images.")
             clear_image()
+        elif vision != MODEL:
+            model_var.set(vision)
+            choose_model(reset=False)      # keep the conversation the image belongs to
 
     def attach_image():
         path = filedialog.askopenfilename(
@@ -864,6 +930,8 @@ if __name__ == "__main__":
         history.append({"role": "user", "content": " ".join(sys.argv[1:])})
         print("\n" + turn(history))
     else:
+        # AI Act Art. 50(1): the interface itself must say it is an AI.
+        print("You are talking to an AI. It can be wrong; you are responsible for what you do with the output.")
         print("Chat - it searches over Tor when it needs to. /save <file> exports the")
         print("conversation. Ctrl-C to quit.\n")
         while True:
@@ -1554,9 +1622,17 @@ $Host.UI.RawUI.WindowTitle = 'Onionmind'
 $tor = Get-Process firefox -ErrorAction SilentlyContinue |
        Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
 if (-not $tor) {
-  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+  # GetFolderPath('Desktop') first: OneDrive Known Folder Move relocates the
+  # Desktop on most Windows 11 setups, so $env:USERPROFILE\Desktop is simply
+  # wrong there and Tor Browser was never found. The rest are winget's and the
+  # installer's real destinations.
+  foreach ($c in @("$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
                    "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
-                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
     if (Test-Path $c) { Start-Process $c; break }
   }
 }
@@ -1587,9 +1663,17 @@ $Model = '@ONIONMIND_MODEL@'
 $tor = Get-Process firefox -ErrorAction SilentlyContinue |
        Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
 if (-not $tor) {
-  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+  # GetFolderPath('Desktop') first: OneDrive Known Folder Move relocates the
+  # Desktop on most Windows 11 setups, so $env:USERPROFILE\Desktop is simply
+  # wrong there and Tor Browser was never found. The rest are winget's and the
+  # installer's real destinations.
+  foreach ($c in @("$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
                    "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
-                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
     if (Test-Path $c) { Start-Process $c; break }
   }
 }

@@ -4,11 +4,10 @@
 
 # Onionmind
 
-**An uncensored AI that lives on your machine — and searches the web through Tor.**
+**An AI that runs entirely on your machine — and searches the web through Tor.**
 
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/data_sent_to_the_cloud-0-black)
-![uncensored](https://img.shields.io/badge/uncensored-no%20built--in%20filters-9146F0)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
 ![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
 ![project](https://img.shields.io/badge/free%20%26%20open%20source-non--commercial-9146F0)
@@ -16,7 +15,7 @@
 [![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
 [![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
 [![Download for Android](https://img.shields.io/badge/Android-Onionmind--1.3.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.3/Onionmind-1.3.apk)
-[![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-usb-stick-that-forgets)
+[![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-amnesic-usb-stick)
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
 
@@ -140,11 +139,11 @@ works too, for raw chat without search.
 
 ---
 
-## Matchstick — the USB stick that forgets
+## Matchstick — the amnesic USB stick
 
 A **whole private operating system on a USB stick**. Boot *any* PC from it: use that
 machine's GPU and memory, touch nothing on its disk — and when you power off,
-everything you did ceases to exist. Like Tails, but it runs a 27B AI.
+nothing of what you did persists. Like Tails, but it runs a 27B AI.
 
 > Strike it anywhere. Burns bright. Leaves only ash.
 
