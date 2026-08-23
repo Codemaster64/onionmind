@@ -66,12 +66,17 @@ if ($prebuilt) {
       & curl.exe -L -C - --fail -o (Join-Path $partsDir 'SHA256SUMS') "$base/SHA256SUMS"
     }
     Say "Rejoining parts"
+    # Stream, don't ReadAllBytes: each part is ~1.65GB and was being pulled into
+    # a single byte[] first, so rejoining a 6.6GB ISO briefly needed gigabytes of
+    # RAM for no reason (and .NET caps a single array at 2GB, so a larger edition
+    # would simply have thrown).
     $out = [IO.File]::Create($iso)
-    foreach ($p in 'part00','part01','part02','part03') {
-      $bytes = [IO.File]::ReadAllBytes((Join-Path $partsDir "onionmind-matchstick-4b-amd64.iso.$p"))
-      $out.Write($bytes, 0, $bytes.Length)
-    }
-    $out.Close()
+    try {
+      foreach ($p in 'part00','part01','part02','part03') {
+        $in = [IO.File]::OpenRead((Join-Path $partsDir "onionmind-matchstick-4b-amd64.iso.$p"))
+        try { $in.CopyTo($out, 1MB) } finally { $in.Dispose() }
+      }
+    } finally { $out.Dispose() }
     Say "Verifying checksum"
     $want = (Select-String -Path (Join-Path $partsDir 'SHA256SUMS') -Pattern '^([0-9a-f]{64})\s+\*?onionmind-matchstick-4b-amd64\.iso$').Matches[0].Groups[1].Value
     $got = (Get-FileHash $iso -Algorithm SHA256).Hash.ToLower()

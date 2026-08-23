@@ -27,9 +27,17 @@ $Host.UI.RawUI.WindowTitle = 'Onionmind'
 $tor = Get-Process firefox -ErrorAction SilentlyContinue |
        Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
 if (-not $tor) {
-  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+  # GetFolderPath('Desktop') first: OneDrive Known Folder Move relocates the
+  # Desktop on most Windows 11 setups, so $env:USERPROFILE\Desktop is simply
+  # wrong there and Tor Browser was never found. The rest are winget's and the
+  # installer's real destinations.
+  foreach ($c in @("$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
                    "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
-                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
     if (Test-Path $c) { Start-Process $c; break }
   }
 }
@@ -72,9 +80,17 @@ $Model = '@ONIONMIND_MODEL@'
 $tor = Get-Process firefox -ErrorAction SilentlyContinue |
        Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
 if (-not $tor) {
-  foreach ($c in @("$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+  # GetFolderPath('Desktop') first: OneDrive Known Folder Move relocates the
+  # Desktop on most Windows 11 setups, so $env:USERPROFILE\Desktop is simply
+  # wrong there and Tor Browser was never found. The rest are winget's and the
+  # installer's real destinations.
+  foreach ($c in @("$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
                    "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
-                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe")) {
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
     if (Test-Path $c) { Start-Process $c; break }
   }
 }
