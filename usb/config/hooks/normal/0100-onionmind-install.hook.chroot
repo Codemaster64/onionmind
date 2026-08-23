@@ -15,11 +15,17 @@ rm -rf /usr/lib/onionmind/payload
 chmod 755 /usr/bin/ollama
 
 # Units and scripts are already in place via includes.chroot.
+# cups, cups-browsed and ipp-usb are deliberately NOT enabled. Printing is
+# already opt-in at the boot menu, and onionmind-print starts these three
+# itself when it is actually used - so on a stick that never prints (nearly all
+# of them) the daemons never run at all. cups-browsed in particular listens for
+# network printer announcements and has a long CVE history; on an appliance
+# built around a fail-closed firewall, having it idle in the background
+# contradicts the design.
 systemctl enable onionmind-firewall.service onionmind-prepare-models.service \
                 onionmind-ollama.service onionmind-clock.service \
                 onionmind-mac-check.service onionmind-ramscrub.service \
-                tor@default.service NetworkManager.service \
-                cups.service cups-browsed.service ipp-usb.service gpm.service
+                tor@default.service NetworkManager.service gpm.service
 
 # live-config creates the console user at boot; this is static and certain.
 chmod 440 /etc/sudoers.d/onion

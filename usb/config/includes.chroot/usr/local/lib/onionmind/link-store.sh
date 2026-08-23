@@ -10,5 +10,7 @@ rm -rf "$DST"
 mkdir -p "$DST/blobs" "$DST/manifests"
 cp -a "$SRC/manifests/." "$DST/manifests/"
 for b in "$SRC"/blobs/*; do
+  [ -e "$b" ] || continue    # an unmatched glob is the literal pattern, and
+                             # without this ln -s happily creates a link named '*'
   ln -s "$b" "$DST/blobs/$(basename "$b")"
 done

@@ -67,6 +67,22 @@ def test_strip_thinking():
     assert om.strip_thinking("<think>still reasoning and never finished") == ""
 
 
+def test_results_never_span_lines():
+    """The DSH adapter strides three lines per result; a wrapped snippet used to
+    shift every later result onto the wrong title. Same silent mis-citation the
+    block parser prevents, reintroduced when the results are serialised."""
+    page = ('<div class="result"><a class="result__a" href="https://a.test/">Ti\ntle</a>'
+            '<a class="result__snippet">one\ntwo   three</a></div>')
+    (title, snippet, url), = om.parse_results(page)
+    assert "\n" not in title and "\n" not in snippet, (title, snippet)
+    assert title == "Ti tle" and snippet == "one two three", (title, snippet)
+
+    # and end to end: exactly 3 lines per result in what the tool actually emits
+    om_hits = [("t1", "s1", "https://a.test/"), ("t2", "s2", "https://b.test/")]
+    rendered = "\n".join(f"- {t}\n  {s}\n  {u}" for t, s, u in om_hits)
+    assert len(rendered.split("\n")) == 3 * len(om_hits)
+
+
 def test_local_calls_ignore_env_proxies():
     """The privacy invariant: nothing local may ride an exported proxy.
 

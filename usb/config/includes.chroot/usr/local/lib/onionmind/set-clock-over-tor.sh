@@ -37,7 +37,7 @@ for i in $(seq 1 60); do
   fi
   sleep 5
 done
-echo "[clock] no Tor circuit in 5min - if the clock is far off, Tor cannot even" >&2
+echo "[clock] gave up waiting for a Tor circuit - if the clock is far off, Tor cannot even" >&2
 echo "bootstrap. Set it roughly right by hand, then restart Tor:" >&2
 echo "  sudo timedatectl set-time 'YYYY-MM-DD HH:MM'   # UTC, minute-accurate is plenty" >&2
 echo "  sudo systemctl restart tor@default" >&2

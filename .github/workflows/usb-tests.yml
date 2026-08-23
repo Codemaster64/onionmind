@@ -42,6 +42,14 @@ jobs:
           python tests/test_parser.py
           python tests/test_backends.py
 
+      - name: kotlin core tests (offline)
+        # The android/ logic is a port of onionmind.py and had already drifted
+        # twice unnoticed, because the only Kotlin tests needed a live tor and
+        # were excluded by default. These run against the SAME fixture as the
+        # python suite. NetTest stays excluded - see core/build.gradle.kts.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo/android gradle:8-jdk17             gradle --no-daemon --console=plain :core:test
+
       - name: live-build flags + package names (trixie)
         run: docker run --rm -v "$PWD/usb/tests:/t" debian:trixie sh /t/validate-live-build.sh
 

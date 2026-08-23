@@ -67,15 +67,17 @@ object Agent {
     fun torCheck(ports: List<Int> = listOf(9050, 9150)): String? {
         for (port in ports) {
             socksPort = port
+            val http = client("probe", "x")
             try {
-                val r = client("probe", "x").newCall(
+                http.newCall(
                     Request.Builder().url("https://check.torproject.org/api/ip").build()
-                ).execute()
-                val body = r.body?.string() ?: continue
-                if (body.contains("\"IsTor\":true")) {
-                    return Regex("\"IP\":\"([^\"]+)\"").find(body)?.groupValues?.get(1) ?: "?"
+                ).execute().use { r ->
+                    val body = r.body?.string()
+                    if (body != null && body.contains("\"IsTor\":true"))
+                        return Regex("\"IP\":\"([^\"]+)\"").find(body)?.groupValues?.get(1) ?: "?"
                 }
             } catch (_: Exception) { /* try next port */ }
+            finally { retire(http) }
         }
         return null
     }
@@ -85,24 +87,42 @@ object Agent {
      * A 200 with zero parseable results is treated as a failure and retried,
      * same as onionmind.py.
      */
+    /** Shut a per-circuit client down for good.
+     *
+     *  Each search needs its OWN connection pool - sharing one would let a
+     *  later search reuse an earlier circuit's socket, which is exactly the
+     *  linkability this whole class exists to prevent. The cost is that every
+     *  client leaks a pool (with its 5-minute cleanup thread) and a dispatcher
+     *  unless it is explicitly retired, so retire it. */
+    private fun retire(c: OkHttpClient) {
+        try {
+            c.dispatcher.executorService.shutdown()
+            c.connectionPool.evictAll()
+            c.cache?.close()
+        } catch (_: Exception) { /* teardown must never fail a search */ }
+    }
+
     fun webSearch(query: String, n: Int = 5): String {
         var err: String? = null
         for (url in ENDPOINTS) {
             repeat(2) {
+                val (u, p) = Socks5Socket.randomCreds()
+                val http = client(u, p)
                 try {
-                    val (u, p) = Socks5Socket.randomCreds()
-                    val resp: Response = client(u, p).newCall(
+                    http.newCall(
                         Request.Builder().url(url)
                             .header("User-Agent", UA)
                             .post(FormBody.Builder().add("q", query).build())
                             .build()
-                    ).execute()
-                    if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
-                    val hits = parseResults(resp.body?.string() ?: "", n)
-                    if (hits.isEmpty()) { err = "empty result page"; return@repeat }
-                    System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
-                    return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
+                    ).execute().use { resp ->              // .use: close on every path
+                        if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
+                        val hits = parseResults(resp.body?.string() ?: "", n)
+                        if (hits.isEmpty()) { err = "empty result page"; return@repeat }
+                        System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
+                        return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
+                    }
                 } catch (e: Exception) { err = e.message }
+                finally { retire(http) }
             }
         }
         return "(search failed after trying both endpoints on fresh circuits: $err)"
@@ -118,10 +138,10 @@ object Agent {
         for (b in blocks) {
             val m = Regex("result__a[^>]* href=\"([^\"]+)\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
                 .find(b) ?: continue
-            var url = java.net.URLDecoder.decode(m.groupValues[1], "UTF-8")
+            var url = pctDecode(m.groupValues[1])
             if (url.contains("uddg=")) {          // DDG wraps results in a redirector
                 val q = Regex("uddg=([^&]+)").find(url)?.groupValues?.get(1)
-                if (q != null) url = java.net.URLDecoder.decode(q, "UTF-8")
+                if (q != null) url = pctDecode(q)
             }
             if (!url.startsWith("http") || !seen.add(url)) continue
             val ms = Regex("result__snippet[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL).find(b)
@@ -131,9 +151,46 @@ object Agent {
         return out
     }
 
-    private fun clean(x: String): String =
-        Regex("<[^>]+>").replace(x, "").replace("&amp;", "&").replace("&lt;", "<")
-            .replace("&gt;", ">").replace("&quot;", "\"").replace("&#x27;", "'").trim()
+    /** URLDecoder is WRONG for URLs: it is the form-encoding decoder, so it turns
+     *  every '+' into a space and corrupts any result URL containing one. Python's
+     *  urllib.parse.unquote - which this is a port of - leaves '+' alone. */
+    private fun pctDecode(s: String): String {
+        if (!s.contains('%')) return s
+        val out = java.io.ByteArrayOutputStream(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            val hex = if (c == '%' && i + 2 < s.length) s.substring(i + 1, i + 3) else null
+            val b = hex?.toIntOrNull(16)
+            if (b != null) { out.write(b); i += 3 } else { out.write(c.code); i++ }
+        }
+        return out.toString("UTF-8")
+    }
+
+    /** Mirrors Python's html.unescape closely enough for result text: the named
+     *  entities DDG actually emits, plus numeric ones. The old hand-rolled list
+     *  missed &#39; and every numeric entity, so they reached the model raw. */
+    private fun clean(x: String): String {
+        val noTags = Regex("<[^>]+>").replace(x, "")
+        val unescaped = Regex("&(#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);").replace(noTags) { m ->
+            val e = m.groupValues[1]
+            when {
+                e.startsWith("#x") || e.startsWith("#X") ->
+                    e.drop(2).toIntOrNull(16)?.let { String(Character.toChars(it)) } ?: m.value
+                e.startsWith("#") ->
+                    e.drop(1).toIntOrNull()?.let { String(Character.toChars(it)) } ?: m.value
+                else -> NAMED[e] ?: m.value
+            }
+        }
+        // Collapse newlines: web_search emits three lines per result and the DSH
+        // adapter strides through them 3 at a time. Kept in step with _clean.
+        return Regex("\\s+").replace(unescaped, " ").trim()
+    }
+
+    private val NAMED = mapOf(
+        "amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\"", "apos" to "'",
+        "nbsp" to " ", "hellip" to "\u2026", "mdash" to "\u2014", "ndash" to "\u2013",
+        "rsquo" to "\u2019", "lsquo" to "\u2018", "ldquo" to "\u201c", "rdquo" to "\u201d")
 
     /** Ported from strip_thinking: a truncated monologue is not an answer. */
     fun stripThinking(text: String): String {
@@ -142,11 +199,18 @@ object Agent {
         return text.trim()
     }
 
+    /** llama-server is on loopback, so there is no circuit to isolate and one
+     *  shared client is correct - a new one per turn leaked a pool and a
+     *  dispatcher on every message. Contrast webSearch, which must NOT share. */
+    private val localHttp: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(1800, TimeUnit.SECONDS).build()
+    }
+
     /** One full user turn against llama-server: chat, tool calls, search, repeat. */
     fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
              search: (String) -> String = { q -> webSearch(q) }): String {
-        val http = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(1800, TimeUnit.SECONDS).build()
+        val http = localHttp
         for (round in 0 until 6) {
             val body = buildJsonObject {
                 put("messages", JsonArray(messages))
@@ -154,17 +218,22 @@ object Agent {
                 put("stream", false)
                 put("max_tokens", NUM_PREDICT)
             }
-            val r = http.newCall(
-                Request.Builder().url("$llamaUrl/v1/chat/completions")
-                    .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-            ).execute()
-            if (!r.isSuccessful) return "(llama-server returned HTTP ${r.code})"
-            val wire = try {
-                json.parseToJsonElement(r.body?.string().orEmpty()).jsonObject
+            val r = try {
+                http.newCall(
+                    Request.Builder().url("$llamaUrl/v1/chat/completions")
+                        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build()
+                ).execute()
             } catch (e: Exception) {
-                return "(llama-server returned invalid JSON: ${e.message ?: "parse error"})"
+                return "(local model request failed: ${e.message ?: e.javaClass.simpleName})"
             }
+            r.use { response ->
+                if (!response.isSuccessful) return "(llama-server returned HTTP ${response.code})"
+                val wire = try {
+                    json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
+                } catch (e: Exception) {
+                    return "(llama-server returned invalid JSON: ${e.message ?: "parse error"})"
+                }
             val msg = try {
                 wire["choices"]!!.jsonArray[0].jsonObject["message"]!!.jsonObject
             } catch (e: Exception) {
@@ -216,6 +285,7 @@ object Agent {
                     put("tool_call_id", c.jsonObject["id"]!!.jsonPrimitive.content)
                     put("content", result)
                 })
+            }
             }
         }
         return "(gave up after 6 tool rounds)"

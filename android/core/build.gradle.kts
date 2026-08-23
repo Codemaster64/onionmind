@@ -17,4 +17,8 @@ tasks.test {
     if (!project.hasProperty("onionmind.net.tests")) {
         exclude("**/*NetTest*")
     }
+    // The Kotlin parser is a port of onionmind.py's; point it at the SAME
+    // fixture the python suite uses so the two cannot drift apart unnoticed.
+    systemProperty("onionmind.fixtures", rootProject.projectDir.parentFile.resolve("tests").absolutePath)
+    testLogging { showStandardStreams = true }
 }

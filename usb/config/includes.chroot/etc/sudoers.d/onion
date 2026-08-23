@@ -1,1 +1,26 @@
-onion ALL=(ALL) NOPASSWD: ALL
+# What the console user may do as root, and nothing else.
+#
+# This was `onion ALL=(ALL) NOPASSWD: ALL`. On an appliance whose whole design
+# is a fail-closed firewall, that meant anything running as `onion` - including
+# the model server and the chat process that handles untrusted web content -
+# could flush the ruleset and reach the network directly. The live user has no
+# password, so a password prompt is not an option; an explicit list is.
+#
+# Every entry below is something the console banner or the docs actually tell
+# the user to run. To go back to unrestricted root, replace the whole file with:
+#     onion ALL=(ALL) NOPASSWD: ALL
+# It lives in RAM like everything else here, so the change dies at power-off.
+
+Cmnd_Alias ONIONMIND = /usr/local/sbin/onionmind-panic, \
+                       /usr/local/sbin/onionmind-bridges, \
+                       /usr/local/sbin/onionmind-print, \
+                       /usr/local/sbin/onionmind-status, \
+                       /usr/local/sbin/onionmind-firewall
+
+# Wi-Fi, the clock the boot-time Tor sync could not fix, and tor/service control.
+Cmnd_Alias ONIONMIND_SYS = /usr/bin/nmtui, /usr/bin/nmcli, \
+                           /usr/bin/timedatectl, \
+                           /usr/bin/systemctl, /bin/systemctl, \
+                           /usr/sbin/nft, /usr/sbin/poweroff, /usr/sbin/reboot
+
+onion ALL=(root) NOPASSWD: ONIONMIND, ONIONMIND_SYS

@@ -75,10 +75,29 @@ esac
 say "Tier $TIER: $FILE (vision: $([ "$VISION" = 1 ] && echo yes || echo no))"
 
 # --- 2. artifacts (cached, resumable) ----------------------------------------
+# Huggingface publishes every LFS object's sha256 in X-Linked-ETag (the same
+# value as the API's lfs.oid), so a downloaded weight can be checked against the
+# digest the host itself serves - no hash table to hand-maintain. This is an
+# INTEGRITY check, not supply-chain pinning: it catches the truncated or corrupt
+# 16GB download that otherwise surfaces as a baffling model-load failure hours
+# later. ONIONMIND_SKIP_VERIFY=1 skips it for mirrors that publish no digest.
+verify() {  # file url
+  [ "${ONIONMIND_SKIP_VERIFY:-0}" = 1 ] && return 0
+  want=$(curl -fsSLI "$2" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "x-linked-etag:" {gsub(/"/, "", $2); print $2}' | tail -1)
+  case "$want" in
+    *[!0-9a-f]* | "") warn "no published digest for $(basename "$1") - not verified"; return 0 ;;
+  esac
+  got=$(sha256sum "$1" | cut -d' ' -f1)
+  [ "$got" = "$want" ] ||
+    die "$(basename "$1") is corrupt: sha256 $got, published $want - delete it and rerun"
+  say "verified $(basename "$1")"
+}
+
 fetch() {  # url dest
-  [ -s "$2" ] && { say "cached: $(basename "$2")"; return; }
+  [ -s "$2" ] && { say "cached: $(basename "$2")"; verify "$2" "$1"; return; }
   say "downloading $(basename "$2") (resumable)"
   curl -L -C - --fail --noproxy '*' -o "$2" "$1"
+  verify "$2" "$1"
 }
 fetch "$OLLAMA_URL"                                              "$CACHE/ollama-linux-amd64.tar.zst"
 [ "$ROCM" = 1 ] && fetch "$ROCM_URL"                             "$CACHE/ollama-linux-amd64-rocm.tar.zst"
@@ -113,7 +132,14 @@ cp "$CACHE/$FILE"                       "$INC/usr/lib/onionmind/weights/"
 
 mkdir -p "$INC/usr/local/lib/onionmind"
 cp "$ROOT/onionmind.py" "$INC/usr/local/lib/onionmind/onionmind.py"
-sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$INC/usr/local/lib/onionmind/onionmind.py"
+# Guarded, because this sed is keyed to onionmind.py's exact two-space spelling
+# of `MODEL  = ...`. Reformat that one line and the substitution silently
+# no-ops, shipping a stick whose default model does not exist on it. build.py
+# hard-fails on the same class of miss; so does this now.
+OM_PY="$INC/usr/local/lib/onionmind/onionmind.py"
+grep -q '^MODEL  = ' "$OM_PY" || die "onionmind.py has no 'MODEL  = ' line to patch - did its formatting change?"
+sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$OM_PY"
+grep -q "^MODEL  = \"$MODEL_NAME\"\$" "$OM_PY" || die "failed to set MODEL to '$MODEL_NAME' in onionmind.py"
 
 cat > "$INC/usr/local/lib/onionmind/env" <<ENV
 MODEL_NAME="$MODEL_NAME"

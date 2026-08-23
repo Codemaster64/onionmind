@@ -16,8 +16,12 @@ if ! grep -qw onionmind.print /proc/cmdline && ! ls /dev/usb/lp* >/dev/null 2>&1
   exit 1
 fi
 
-systemctl is-active --quiet cups        || systemctl start cups
-systemctl is-active --quiet cups-browsed || systemctl start cups-browsed
+# These are not enabled at boot (see the install hook) - printing is rare and
+# cups-browsed listening all session is surface this appliance does not want.
+# Starting them here is the whole opt-in: no print, no print daemons.
+systemctl is-active --quiet cups          || systemctl start cups
+systemctl is-active --quiet cups-browsed  || systemctl start cups-browsed
+systemctl is-active --quiet ipp-usb       || systemctl start ipp-usb 2>/dev/null || true
 echo "waiting for discovered queues..."
 sleep 5
 lpstat -e 2>/dev/null || true

@@ -5,13 +5,37 @@
 set -e
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
 [ $# -ge 1 ] || { echo "usage: onionmind-bridges <obfs4-bridge-line> [more...]" >&2; exit 2; }
-f=/etc/tor/torrc.d/onionmind.conf
+
+# Own a SEPARATE file and rewrite it in full every run. Appending to
+# onionmind.conf meant bridges could only ever be ADDED: a typo'd or dead bridge
+# stayed in the config for the rest of the session with tor still dialling it,
+# and there was no way to replace the set short of editing the file by hand.
+# (Tor itself tolerates the duplicate ClientTransportPlugin and the empty
+# "Bridge" line that a trailing ';' produced - verified with --verify-config -
+# so this is a usability fix, not a crash fix.)
+f=/etc/tor/torrc.d/onionmind-bridges.conf
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp"' EXIT
 {
-  echo ""
-  echo "# added at the console"
+  echo "# Written by onionmind-bridges. Rewritten in full on every run."
   echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"
   echo "UseBridges 1"
-  for b in "$@"; do echo "Bridge $b"; done
-} >> "$f"
+} > "$tmp"
+n=0
+for b in "$@"; do
+  b=$(printf '%s' "$b" | sed -e 's/^[Bb]ridge[[:space:]]*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$b" ] || continue          # a stray ';' must not emit a bare "Bridge "
+  echo "Bridge $b" >> "$tmp"
+  n=$((n + 1))
+done
+[ "$n" -gt 0 ] || { echo "no usable bridge lines given - nothing changed" >&2; exit 2; }
+
+# Bridges baked in at build time live in onionmind.conf; leaving them there
+# would declare the same transport twice across two files.
+sed -i -e '/^ClientTransportPlugin obfs4/d' -e '/^UseBridges /d' -e '/^Bridge /d' \
+    /etc/tor/torrc.d/onionmind.conf 2>/dev/null || true
+
+cat "$tmp" > "$f"
+chmod 644 "$f"
+echo "tor restarting with $n bridge(s). Bootstrap: journalctl -u tor@default -f"
 systemctl restart tor@default.service
-echo "tor restarting with bridges. Bootstrap: journalctl -u tor@default -f"
