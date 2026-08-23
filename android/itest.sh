@@ -5,6 +5,14 @@
 # real before anything is packaged.
 set -e
 cd "$(dirname "$0")"
+
+# Offline logic tests first - no tor needed, and a failure here is cheaper to
+# read than the same bug surfacing as a TLS error three layers up. NetTest is
+# excluded from a plain `test` run by core/build.gradle.kts.
+gradle :core:test --console=plain 2>&1 | grep -E "e: |FAILED|Exception|BUILD" | head -20
+test ${PIPESTATUS[0]} -eq 0 || exit 1
+echo "CORE_UNIT_OK"
+
 mkdir -p /run/tor-test
 tor --SocksPort 9050 --DataDirectory /tmp/tor-data \
     --Log "notice file /tmp/tor.log" >/dev/null 2>&1 &

@@ -108,10 +108,34 @@ onionmind "who won the last election?"
 Or just double-click the icon. Type `/save notes.txt` in the chat to export the
 conversation — print it from there if you want it on paper.
 
-The models are named for the burn — Matchstick lights them, and the name
-encodes the size: **spark** (4B) < **ember** (9B) <
-**inferno-27b** (27B, with **inferno-27b-vision** reading images). Smaller installs use
-**ember-9b** or **spark-4b**.
+The models are named for the burn, from least heavy to heaviest:
+**SPARK < EMBER < BLAZE < INFERNO < CINDER < WILDFIRE < FLASHPOINT < PHOENIX < NOVA < PYRE**.
+The models currently shipped map to **SPARK** (2.6B), **EMBER** (4B),
+**BLAZE** (9B), and **INFERNO** (27B, with vision support). The remaining names
+are reserved for progressively heavier models. **CINDER** is reserved for a
+low-and-slow, small embedding model optimized for high recall, search, RAG,
+and vector databases.
+**INFERNO** is the target high-throughput tier: **30–70B MoE**, optimized for
+fast API responses, real-time apps, and customer support agents. **“Full
+flame.”** · **Frontier**
+**WILDFIRE** is reserved for the next frontier tier: **100B+ MoE**, with
+multimodal input, deep reasoning, and long context for research, complex
+agents, and enterprise AI. Multi-agent orchestration, heavy tool use, and
+autonomous workflows, autonomous ops, and deep automation. **Agentic / Swarm** ·
+**“Burn it down.”**
+**FLASHPOINT** is reserved as the next tier: **Experimental**, for limited
+preview models and new capabilities before full release, for beta testers and
+labs. Tagline:
+**“Uncontainable.”**
+**NOVA** is reserved as **Ultra / Premium**, targeting top benchmarks with
+high-cost, specialized training for high-stakes enterprise and scientific
+modeling. Tagline: **“One spark away.”**
+**PHOENIX** is reserved as **Fine-tune / Recovery**, with the tagline
+**“Cosmic burn.”** Distillation, safety tuning, red-teaming, model reset,
+custom models, and safety alignment.
+**PYRE** is reserved as **Legacy / Collector** for archived or
+special-edition models and older versions, for retro access and research
+archives, with the tagline **“Rise.”**
 works too, for raw chat without search.
 
 ---
@@ -131,8 +155,8 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 
    | Option | What it does | Choose this if… |
    | --- | --- | --- |
-   | **Download** | Gets the ready-made **pocket/spark** stick with the **Qwen3.5 4B** model (~6.6GB total), verifies it, and writes it to USB. No Docker or build time. | You want the fastest, simplest route and a model that runs on almost any PC. |
-   | **Build** | Creates a stick from source and lets you choose **Qwen3.5 4B (`spark`)**, **Qwen3.5 9B (`ember`)**, or **Qwen3.8 27B (`inferno`)** with vision support. Requires Docker and about an hour. | You want a larger or vision-capable model, or a customized, reproducible build. |
+   | **Download** | Gets the ready-made **pocket/EMBER** stick with the **Qwen3.5 4B** model (~6.6GB total), verifies it, and writes it to USB. No Docker or build time. | You want the fastest, simplest route and a model that runs on almost any PC. |
+   | **Build** | Creates a stick from source and lets you choose **Qwen3.5 4B (`EMBER`)**, **Qwen3.5 9B (`BLAZE`)**, or **Qwen3.8 27B (`INFERNO`)** with vision support. Requires Docker and about an hour. | You want a larger or vision-capable model, or a customized, reproducible build. |
 
    Plug a
    USB stick when asked, confirm the erase — the script writes the stick for
@@ -140,7 +164,7 @@ everything you did ceases to exist. Like Tails, but it runs a 27B AI.
 2. **Boot any PC** from it (Secure Boot off). You land straight in the chat —
    `sudo onionmind-status` shows every protection verifying itself live.
 
-The pre-built stick is the **pocket** edition (spark model — runs on any PC,
+The pre-built stick is the **pocket** edition (EMBER model — runs on any PC,
 GPU optional). Heavier editions (up to the flagship) are one menu choice away
 via Build. *The DIY route* (manual docker commands, Rufus, every knob) is
 still there: **[usb/README.md](usb/README.md)**.

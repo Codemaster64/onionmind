@@ -129,16 +129,17 @@ if [ "$WANT" = 27b ]; then
     REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
   fi
   [ "$VRAM" -lt 8000 ] && warn "${VRAM} MiB VRAM: the 27B will run mostly on CPU (~1-2 tok/s)."
-  MODEL_NAME=inferno-27b
-  say "Model: Qwen3.8-27B (uncensored)"
+  MODEL_NAME=inferno
+  say "Model: INFERNO (27B)"
 else
   if [ "$VRAM" -ge 6000 ]; then
     REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF; FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf; SZ=9B
   else
     REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF; FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf; SZ=4B
   fi
-  [ "$SZ" = 4B ] && MODEL_NAME=spark-4b || MODEL_NAME=ember-9b
-  say "Model: Qwen3.5-$SZ (uncensored) - fits entirely in VRAM"
+  [ "$SZ" = 4B ] && MODEL_NAME=ember || MODEL_NAME=blaze
+  [ "$SZ" = 4B ] && LABEL=EMBER || LABEL=BLAZE
+  say "Model: $LABEL (Qwen3.5-$SZ) - fits entirely in VRAM"
   [ "$VRAM" -lt 8000 ] && warn "No small Qwen3.8 exists, so this is one generation back but far faster."
   warn "Vision skipped (27B-only). Set ONIONMIND_MODEL=27b for Qwen3.8-27B instead."
 fi
@@ -231,8 +232,11 @@ OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "inferno-27b"
-NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
+MODEL  = "inferno"
+# ollama is local - never via Tor. "all" is not padding: requests fills a MISSING
+# key from $ALL_PROXY via setdefault, so listing it as None is what actually stops
+# the whole conversation being routed to whatever proxy the user has exported.
+NOPROXY = {"http": None, "https": None, "all": None}
 PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
 UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
@@ -448,8 +452,8 @@ def user_error(exc):
     """Keep implementation names out of the product-facing desktop UI."""
     return (str(exc).replace("Ollama", "model service")
             .replace("ollama", "model service")
-            .replace("Qwen3.8", "Inferno")
-            .replace("Qwen3.5", "Ember"))
+            .replace("Qwen3.8", "INFERNO")
+            .replace("Qwen3.5", "MODEL"))
 
 
 def _to_openai(messages):
@@ -726,7 +730,7 @@ def run_ui():
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
         choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-27b-vision"
+        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
         if vision in choices and vision != MODEL:
             model_var.set(vision)
             choose_model()
@@ -981,10 +985,17 @@ sudo curl -fsSL https://raw.githubusercontent.com/Codemaster64/onionmind/main/ds
 sudo sed -i "s|@ONIONMIND_DSH_PLUGIN@|$DIR/dsh-onionmind-tor-search.js|" "$DIR/dsh-onionmind-tor.patch.yml"
 sudo tee /usr/local/bin/onionmind-code >/dev/null <<'AGENT'
 #!/bin/sh
-export ONIONMIND_PY="$DIR/onionmind.py"
+# @DIR@ / @MODEL@ are substituted at install time. The heredoc above stays
+# QUOTED so "$@" reaches the agent - which is exactly why these are placeholders
+# and not $DIR/$MODEL_NAME: a quoted heredoc never expands them, and this file
+# used to ship with them empty, launching `ollama launch dsh --model ""`.
+export ONIONMIND_PY="@DIR@/onionmind.py"
 export ONIONMIND_PYTHON=python3
-exec ollama launch dsh --model "$MODEL_NAME" -- --patch "$DIR/dsh-onionmind-tor.patch.yml" "$@"
+exec ollama launch dsh --model "@MODEL@" -- --patch "@DIR@/dsh-onionmind-tor.patch.yml" "$@"
 AGENT
+sudo sed -i -e "s|@DIR@|$DIR|g" -e "s|@MODEL@|$MODEL_NAME|g" /usr/local/bin/onionmind-code
+grep -q '@DIR@\|@MODEL@' /usr/local/bin/onionmind-code &&
+  die "onionmind-code still has unsubstituted placeholders"
 sudo chmod 755 /usr/local/bin/onionmind-code
 
 sudo tee /usr/local/bin/onionmind-update >/dev/null <<'UPDATE'

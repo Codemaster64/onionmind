@@ -31,7 +31,7 @@ Write-Host ""
 Write-Host "   Onionmind Matchstick - build + burn, the easy way" -ForegroundColor Magenta
 Write-Host "   The USB stick that forgets. It will be ERASED." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "   [D] DOWNLOAD: ready-made pocket/spark with Qwen3.5 4B, ~6.6GB total"
+Write-Host "   [D] DOWNLOAD: ready-made pocket/EMBER with Qwen3.5 4B, ~6.6GB total"
 Write-Host "       Fastest and simplest; runs on almost any PC"
 Write-Host "   [B] BUILD: choose Qwen3.5 4B, 9B, or 27B (+ vision), ~1 hour"
 Write-Host "       Needs Docker; for larger or vision-capable models"
@@ -41,7 +41,7 @@ $prebuilt = if ($mode -eq 'B') { $false } else { $true }
 
 if ($prebuilt) {
   $edition = '4b'; $needGB = 16
-  Say "Pre-built pocket stick (spark edition)"
+  Say "Pre-built pocket stick (EMBER edition)"
   $iso = Join-Path $Repo "usb\out\onionmind-matchstick-4b-amd64.iso"
   if (-not (Test-Path $iso)) {
     if ($Dry) { Say "DRY: would download 4 parts + SHA256SUMS and rejoin into $iso"; exit }

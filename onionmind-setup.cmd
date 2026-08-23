@@ -79,12 +79,12 @@ if ($want -eq '27b') {
                              $file='qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf' }
   else                     { $repo='hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF'; $file='Qwen3.8-27B-abliterated-IQ2_M.gguf' }
   if ($vram -lt 8000) { Write-Host "    ${vram} MiB VRAM: the 27B will run mostly on CPU (~1-2 tok/s)." -ForegroundColor Yellow }
-  $name = "inferno-27b"
-  Say "Model: Inferno (27B)"
+  $name = "inferno"
+  Say "Model: INFERNO (27B)"
 } else {
   $repo='Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF'; $file='LFM2.5-2.6B-heretic-Q4_K_M.gguf'; $sz='2.6B'
-  $name = 'lfm-2.6b'
-  Say "Model: LFM ($sz) - mobile/fast profile"
+  $name = 'spark'
+  Say "Model: SPARK ($sz) - mobile/fast profile"
   if ($vram -lt 8000) {
     Write-Host "    Using LFM2.5 for much faster local responses." -ForegroundColor Yellow
   }
@@ -185,8 +185,11 @@ OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "inferno-27b"
-NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
+MODEL  = "inferno"
+# ollama is local - never via Tor. "all" is not padding: requests fills a MISSING
+# key from $ALL_PROXY via setdefault, so listing it as None is what actually stops
+# the whole conversation being routed to whatever proxy the user has exported.
+NOPROXY = {"http": None, "https": None, "all": None}
 PORTS  = (9150, 9050)                            # 9150 = Tor Browser, 9050 = tor daemon
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
 UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
@@ -402,8 +405,8 @@ def user_error(exc):
     """Keep implementation names out of the product-facing desktop UI."""
     return (str(exc).replace("Ollama", "model service")
             .replace("ollama", "model service")
-            .replace("Qwen3.8", "Inferno")
-            .replace("Qwen3.5", "Ember"))
+            .replace("Qwen3.8", "INFERNO")
+            .replace("Qwen3.5", "MODEL"))
 
 
 def _to_openai(messages):
@@ -680,7 +683,7 @@ def run_ui():
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
         choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-27b-vision"
+        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
         if vision in choices and vision != MODEL:
             model_var.set(vision)
             choose_model()
@@ -886,7 +889,7 @@ if __name__ == "__main__":
 # named inferno, and the embedded default would reference a model that does
 # not exist. Plain .Replace(), not a regex: this file has CRLF endings and a $
 # anchor cannot match before the carriage return. The shell installer uses sed.
-$search = $search.Replace('MODEL  = "inferno-27b"', 'MODEL  = "' + $name + '"')
+$search = $search.Replace('MODEL  = "inferno"', 'MODEL  = "' + $name + '"')
 # Set-Content -Encoding UTF8 writes a BOM on Windows PowerShell 5.1, and a BOM ahead
 # of the shebang breaks ./onionmind.py on Linux. WriteAllText with $false does not.
 [System.IO.File]::WriteAllText("$Dir\onionmind.py", $search, (New-Object System.Text.UTF8Encoding($false)))

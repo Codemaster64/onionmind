@@ -3,7 +3,8 @@
 No framework on purpose - this needs to run on a fresh box where pytest isn't
 installed, which is exactly the box the installer just built.
 """
-import re, sys, pathlib
+import os, re, sys, pathlib
+import requests
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import onionmind as om
@@ -64,6 +65,25 @@ def test_strip_thinking():
     assert om.strip_thinking("plain answer") == "plain answer"
     # unterminated <think> means the budget ran out - must NOT return the monologue
     assert om.strip_thinking("<think>still reasoning and never finished") == ""
+
+
+def test_local_calls_ignore_env_proxies():
+    """The privacy invariant: nothing local may ride an exported proxy.
+
+    requests fills a MISSING proxy key from the environment with setdefault, so
+    {"http": None, "https": None} alone lets $ALL_PROXY through and every prompt,
+    image and answer goes to that proxy. Listing "all" as None is the fix.
+    """
+    saved = {k: os.environ.get(k) for k in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")}
+    os.environ["ALL_PROXY"] = "socks5h://127.0.0.1:9"
+    os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+    try:
+        merged = requests.Session().merge_environment_settings(
+            om.OLLAMA, dict(om.NOPROXY), False, True, None)["proxies"]
+        assert not merged, f"local ollama call would be proxied via {dict(merged)}"
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
 if __name__ == "__main__":

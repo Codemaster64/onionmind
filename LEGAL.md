@@ -15,11 +15,11 @@ Hugging Face repository metadata, August 2026):
 
 | Use | Repository | License |
 |:--|:--|:--|
-| spark (4B) | [`mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF) | Apache-2.0 |
-| ember (9B) | [`mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) | Apache-2.0 |
-| inferno (27B, 12GB build) | [`soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf`](https://huggingface.co/soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf) | Apache-2.0 |
-| inferno (27B, other builds) | [`hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF`](https://huggingface.co/hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF) | Apache-2.0 |
-| inferno-vision (mmproj) | [`JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF) | Apache-2.0 |
+| EMBER (4B) | [`mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF) | Apache-2.0 |
+| BLAZE (9B) | [`mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) | Apache-2.0 |
+| INFERNO (27B, 12GB build) | [`soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf`](https://huggingface.co/soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf) | Apache-2.0 |
+| INFERNO (27B, other builds) | [`hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF`](https://huggingface.co/hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF) | Apache-2.0 |
+| INFERNO-VISION (mmproj) | [`JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`](https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF) | Apache-2.0 |
 
 Apache-2.0 permits redistribution of the weights, including inside the
 Matchstick images and the pre-built stick release, provided the license text

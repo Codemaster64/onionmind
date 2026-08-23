@@ -22,11 +22,35 @@ doesn't. Override with `ONIONMIND_MODEL`:
 | `fast` | always the small model — 116 tok/s (9B) or 166 tok/s (4B) |
 | `27b` | always Qwen3.8-27B, even if that means 1–2 tok/s on CPU |
 
-The models are named for the burn — Matchstick lights them, and the ladder
-encodes the size: `spark` (4B) < `ember` (9B) < `inferno`
-(27B, with `inferno-vision` reading images). Lineage, exact quants and the
-size mapping are in the tables below; switching installs never silently
-replaces a model you already have.
+The models are named for the burn, in increasing weight:
+`SPARK < EMBER < BLAZE < INFERNO < CINDER < WILDFIRE < FLASHPOINT < PHOENIX < NOVA < PYRE`.
+The currently shipped sizes are `SPARK` (2.6B), `EMBER` (4B), `BLAZE` (9B),
+and `INFERNO` (27B, with vision). The remaining names are reserved for future
+larger models; `CINDER` is reserved for a low-and-slow embedding/retrieval
+small embedding model optimized for high recall, search, RAG, and vector
+databases. Lineage, exact quants and the size mapping are in the tables
+below; switching installs never silently replaces a model you already have.
+The target profile for **INFERNO** is **30–70B MoE**, optimized for high
+throughput, fast API responses, real-time apps, and customer support agents.
+Positioning: **Frontier** · tagline: **“Full flame.”**
+The reserved **WILDFIRE** profile is **100B+ MoE**, multimodal, deep-reasoning,
+and long-context, for research, complex agents, and enterprise AI. Tagline:
+Multi-agent orchestration, heavy tool use, autonomous workflows, autonomous ops,
+and deep automation.
+**Agentic / Swarm** · tagline: **“Burn it down.”**
+The reserved **FLASHPOINT** tier is **Experimental**, for limited preview
+models and new capabilities before full release, for beta testers and labs,
+with the tagline
+**“Uncontainable.”**
+The reserved **NOVA** tier is **Ultra / Premium**, targeting top benchmarks
+with high-cost, specialized training for high-stakes enterprise and scientific
+modeling. Tagline: **“One spark away.”**
+The reserved **PHOENIX** tier is **Fine-tune / Recovery**, with the tagline
+**“Cosmic burn.”** Distillation, safety tuning, red-teaming, model reset,
+custom models, and safety alignment.
+The reserved **PYRE** tier is **Legacy / Collector**, for archived or
+special-edition models and older versions, for retro access and research
+archives, with the tagline **“Rise.”**
 
 The installer is re-runnable and resumes partial downloads, so a dropped connection just
 means running it again.

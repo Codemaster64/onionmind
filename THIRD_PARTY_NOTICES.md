@@ -8,18 +8,18 @@ permits redistribution; attribution and license texts travel with this file.
 Distributed under the Apache License, Version 2.0 — full text:
 https://www.apache.org/licenses/LICENSE-2.0
 
-- `mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF` (spark) — quantization of
+- `mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF` (EMBER) — quantization of
   `huihui-ai/Huihui-Qwen3.5-4B-abliterated`, itself an abliteration of the
   Qwen3.5-4B base model (Alibaba, Apache-2.0).
-- `mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF` (ember) — as above, 9B.
-- `soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf` (inferno, 12GB
+- `mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF` (BLAZE) — as above, 9B.
+- `soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf` (INFERNO, 12GB
   build) — 3.69bpw mixed-precision build of the Qwen3.8-27B abliteration.
-- `hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF` (inferno, Q4_K_M / IQ2_M builds).
-- `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF` (inferno-vision mmproj).
+- `hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF` (INFERNO, Q4_K_M / IQ2_M builds).
+- `JonathanColetti/Qwen3.8-27B-Uncensored-GGUF` (INFERNO-VISION mmproj).
 
 ## Model weights (LFM1.0)
 
-- `Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF` (lfm-2.6b, mobile profile) —
+- `Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF` (SPARK, mobile profile) —
   Q4_K_M quantization of Liquid AI's LFM2.5-2.6B with reduced refusal behavior.
 
 License: https://huggingface.co/LiquidAI/LFM2.5-2.6B/blob/main/LICENSE

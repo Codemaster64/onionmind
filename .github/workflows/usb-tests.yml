@@ -15,12 +15,32 @@ jobs:
 
       - name: syntax (shell + python)
         run: |
-          bash -n usb/build.sh
-          find usb/config usb/tests -type f \( -name '*.sh' \
-            -o -name '*.hook.chroot' -o -name '*.hook.binary' \
-            -o -name 'onionmind*' -o -name 'link-store.sh' \) \
-            -exec sh -n {} \;
+          bash -n usb/build.sh matchstick.sh install-onionmind.sh \
+                  install-onionmind-android.sh update-onionmind.sh android/itest.sh
+          # The validators carry no shebang; CI runs all but the clock one with sh.
+          bash -n usb/tests/validate-clock.sh
+          for t in usb/tests/validate-*.sh; do
+            [ "$t" = usb/tests/validate-clock.sh ] || sh -n "$t"
+          done
+          # Select by SHEBANG and pipe through xargs. Two reasons the old
+          # `-name 'onionmind*' ... -exec sh -n {} \;` form could never fail:
+          # it also matched the systemd .service units, and find reports its
+          # OWN status, not the status of -exec. It was reporting those units
+          # as syntax errors and exiting 0 anyway.
+          find usb/config -type f -exec grep -lZ -m1 -e '^#!.*sh' {} + \
+            | xargs -0 -r -n1 sh -n
           python -m py_compile onionmind.py build.py
+
+      - name: installers carry onionmind.py verbatim
+        # build.py is the whole defence against onionmind.py drifting between the
+        # repo copy and its three embedded copies. Unenforced, it defends nothing.
+        run: python build.py --check
+
+      - name: python tests
+        run: |
+          pip install --quiet requests
+          python tests/test_parser.py
+          python tests/test_backends.py
 
       - name: live-build flags + package names (trixie)
         run: docker run --rm -v "$PWD/usb/tests:/t" debian:trixie sh /t/validate-live-build.sh

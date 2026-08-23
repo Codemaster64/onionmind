@@ -63,13 +63,13 @@ case "$TIER" in
         MODEL_NAME=inferno; VISION=1 ;;
   daily|9b) TIER=9b; REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=ember; VISION=0 ;;
+        MODEL_NAME=blaze; VISION=0 ;;
   pocket|4b) TIER=4b; REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF
         FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf
-        MODEL_NAME=spark; VISION=0 ;;
+        MODEL_NAME=ember; VISION=0 ;;
   mobile|lfm) TIER=lfm; REPO=Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF
         FILE=LFM2.5-2.6B-heretic-Q4_K_M.gguf
-        MODEL_NAME=lfm-2.6b; VISION=0 ;;
+        MODEL_NAME=spark; VISION=0 ;;
   *) die "tier must be max/17gb, flagship/12gb, standard/8gb, daily/9b, pocket/4b or mobile/lfm (got '$TIER')" ;;
 esac
 say "Tier $TIER: $FILE (vision: $([ "$VISION" = 1 ] && echo yes || echo no))"

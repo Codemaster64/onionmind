@@ -17,8 +17,11 @@ OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
-MODEL  = "inferno-27b"
-NOPROXY = {"http": None, "https": None}          # ollama is local - never via Tor
+MODEL  = "inferno"
+# ollama is local - never via Tor. "all" is not padding: requests fills a MISSING
+# key from $ALL_PROXY via setdefault, so listing it as None is what actually stops
+# the whole conversation being routed to whatever proxy the user has exported.
+NOPROXY = {"http": None, "https": None, "all": None}
 PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
 UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
@@ -234,8 +237,8 @@ def user_error(exc):
     """Keep implementation names out of the product-facing desktop UI."""
     return (str(exc).replace("Ollama", "model service")
             .replace("ollama", "model service")
-            .replace("Qwen3.8", "Inferno")
-            .replace("Qwen3.5", "Ember"))
+            .replace("Qwen3.8", "INFERNO")
+            .replace("Qwen3.5", "MODEL"))
 
 
 def _to_openai(messages):
@@ -512,7 +515,7 @@ def run_ui():
         image_label.configure(text=os.path.basename(path))
         remove_image.configure(state="normal")
         choices = list(model_box["values"])
-        vision = MODEL if MODEL.endswith("-vision") else "inferno-27b-vision"
+        vision = MODEL if MODEL.endswith("-vision") else "inferno-vision"
         if vision in choices and vision != MODEL:
             model_var.set(vision)
             choose_model()

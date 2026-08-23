@@ -14,6 +14,8 @@
   header svg { flex: none; }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
+  #manage { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
+  #tor-toggle { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
   .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -45,6 +47,12 @@
   .bar i { display: block; height: 100%; background: var(--purple); width: 0%; transition: width .5s; }
   #busy { text-align: center; color: var(--dim); font-size: 13px; padding: 6px; display: none; }
   .row { display: flex; gap: 10px; justify-content: center; }
+  #manager { position: fixed; inset: 0; z-index: 2; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
+  #manager h2 { font-size: 20px; margin-bottom: 4px; } #manager > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
+  #manager input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
+  .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
+  .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }
+  .danger { background: #5b2634; } .muted { background: transparent; border: 1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -56,10 +64,27 @@
     <circle cx="64" cy="64" r="5" fill="#7D4698" stroke="none"/>
   </svg>
   <h1>Onionmind</h1>
+  <button id="tor-toggle" onclick="toggleTor()">Tor on</button>
+  <button id="manage" onclick="openManager()">Models</button>
   <div id="dots">
     <span class="dot" id="d-tor">tor</span><span class="dot" id="d-model">model</span>
   </div>
 </header>
+
+<section id="manager" hidden>
+  <div class="manage-head"><h2>Models on this phone</h2><button class="muted" onclick="closeManager()">Done</button></div>
+  <p>Download several models and switch between them any time. Models are stored locally.</p>
+  <div id="installed-list"></div>
+  <div class="model-card" style="margin-top:16px">
+    <strong>Add another GGUF model</strong>
+    <p class="model-meta">Use a direct HTTPS download URL. Hugging Face “resolve/main” links work well.</p>
+    <input id="custom-name" placeholder="Name (for example, Gemma 3 4B)">
+    <input id="custom-url" placeholder="https://…/model.gguf">
+    <input id="custom-file" placeholder="Filename, for example model.gguf">
+    <input id="custom-bytes" type="number" inputmode="numeric" placeholder="Size in bytes (optional)">
+    <button onclick="addCustom()">Download custom model</button>
+  </div>
+</section>
 
 <div id="setup" hidden>
   <div class="ring">
@@ -85,12 +110,22 @@
 </form>
 
 <script>
-let history = [], status = {model:'none'}, ready = false;
+// Android does not isolate loopback between apps: any installed app can reach
+// 127.0.0.1:8081. This token is generated per process and pasted in when the
+// page is served, so a request without it is not from this page.
+const TOKEN = '__ONIONMIND_TOKEN__';
+const api = (path, init) => fetch(path, {...init,
+  headers: {...(init && init.headers), 'X-Onionmind-Token': TOKEN}});
+const form = body => ({method:'POST',
+  headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
+let history = [], status = {model:'none', models:[]}, ready = false;
 const $ = id => document.getElementById(id);
 
 async function poll() {
-  try { status = await (await fetch('/api/status')).json(); } catch {}
+  try { status = await (await api('/api/status')).json(); } catch {}
   $('d-tor').classList.toggle('on', !!status.tor);
+  $('tor-toggle').textContent = status.torEnabled === false ? 'Tor off' : 'Tor on';
+  $('tor-toggle').title = status.torEnabled === false ? 'Turn Tor on to enable web search' : 'Turn Tor off to disable web search';
   $('d-model').classList.toggle('on', status.model !== 'none' && !status.downloading);
   const setup = $('setup'), chat = $('chat'), form = $('form');
   if (status.model === 'none' && !status.downloading) {
@@ -107,14 +142,19 @@ async function poll() {
     const total = Number(status.downloadTotal || 0);
     const speed = Number(status.downloadSpeedBps || 0);
     $('device-note').textContent = downloadDetails(done, total, speed);
-    $('model-list').innerHTML = '';
+    $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">You can leave the app open while it resumes.</div></div>';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
-    if (!ready) { add('bot', 'Ready. Tor ' + (status.tor ? 'is up' : 'is still building circuits — ' +
-      'searches wait for it, chat does not') + '. Ask anything.'); ready = true; }
+    if (!ready) { add('bot', 'Ready. ' + (status.torEnabled === false ? 'Tor is off — web search is disabled, but local chat still works.' : (status.tor ? 'Tor is up.' : 'Tor is still building circuits — searches wait for it, chat does not.')) + ' Ask anything.'); ready = true; }
   }
 }
 setInterval(poll, 2000); poll();
+
+async function toggleTor() {
+  const enabled = status.torEnabled === false;
+  await api('/api/tor', form('enabled=' + enabled));
+  await poll();
+}
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -147,30 +187,37 @@ function renderModelPicker() {
     ? ('Detected: ' + Math.round(ram / 1024 * 10) / 10 + ' GB RAM · ' +
        Math.round(storage / 102.4) / 10 + ' GB free storage. Recommended: ' + rec.toUpperCase())
     : 'Scanning this phone for the best match…';
-  const models = [
-    {tier:'lfm', name:'LFM2.5 Heretic', params:'2.6B parameters', size:'~1.7 GB download', specs:'Recommended: 4 GB RAM · 3 GB free storage', note:'Fastest; best for small phones, tools and quick chat'},
-    {tier:'4b', name:'Qwen3.5 Heretic', params:'4B parameters', size:'~2.7 GB download', specs:'Recommended: 8 GB RAM · 4 GB free storage', note:'Balanced quality and speed'},
-    {tier:'9b', name:'Qwen3.5 Heretic', params:'9B parameters', size:'~5.6 GB download', specs:'Recommended: 12 GB RAM · 7 GB free storage', note:'Best answers; slower and heavier'}
-  ];
+  const models = status.models || [];
   $('model-list').innerHTML = models.map(m =>
-    '<div class="model-card ' + (m.tier === rec ? 'recommended' : '') + '">' +
-      '<div class="model-head"><strong>' + m.name + '</strong>' +
-      (m.tier === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
-      '<div class="model-meta">' + m.params + ' · ' + m.size + '<br>' + m.specs + '<br>' + m.note + '</div>' +
-      '<button onclick="install(\'' + m.tier + '\')">Download ' + m.tier.toUpperCase() + '</button>' +
+    '<div class="model-card ' + (m.id === rec ? 'recommended' : '') + '">' +
+      '<div class="model-head"><strong>' + m.name + '</strong>' + (m.id === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
+      '<div class="model-meta">' + (m.description ? m.description + '<br>' : '') + (m.bytes ? (Math.round(m.bytes/107374182.4)/10 + ' GB') : 'size detected during download') + '</div>' +
+      '<button onclick="install(\'' + m.id + '\')">Download</button>' +
     '</div>'
   ).join('');
 }
 
-async function install(tier) {
+async function install(id) {
   try {
-    const r = await fetch('/api/install', {method:'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body:'tier='+encodeURIComponent(tier)});
+    const r = await api('/api/install', form('id='+encodeURIComponent(id)));
     if (!r.ok) throw new Error('HTTP ' + r.status);
   } catch (err) {
     $('setup-text').textContent = 'Could not start the download. Please try again.';
   }
+}
+
+function openManager() { $('manager').hidden = false; renderManager(); }
+function closeManager() { $('manager').hidden = true; }
+function renderManager() {
+  $('installed-list').innerHTML = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + m.name + '</strong>' + (m.id === status.model ? '<span>ACTIVE</span>' : '') + '</div><div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + '</div><div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
+}
+async function selectModel(id) { await api('/api/select', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
+async function removeModel(id) { if (!confirm('Remove this model from the phone?')) return; await api('/api/remove', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
+async function addCustom() {
+  const name=$('custom-name').value.trim(), url=$('custom-url').value.trim(), file=$('custom-file').value.trim(), bytes=$('custom-bytes').value;
+  if (!name || !url || !file) return;
+  const r=await api('/api/install', form(new URLSearchParams({name,url,file,bytes})));
+  if (!r.ok) alert((await r.json()).error || 'Could not add model'); else { $('custom-name').value=$('custom-url').value=$('custom-file').value=$('custom-bytes').value=''; await poll(); renderManager(); }
 }
 
 function add(cls, text) {
@@ -194,10 +241,11 @@ $('form').onsubmit = async e => {
   const q = $('q').value.trim(); if (!q) return;
   $('q').value = ''; add('you', q);
   history.push({role:'user', content:q});
+  $('busy').textContent = status.torEnabled === false ? 'thinking locally…' : 'thinking + searching over tor…';
   $('busy').style.display = 'block';
   try {
-    const response = await fetch('/api/chat', {method:'POST',
-      body: 'messages=' + encodeURIComponent(JSON.stringify(history))});
+    const response = await api('/api/chat',
+      form('messages=' + encodeURIComponent(JSON.stringify(history))));
     const raw = await response.text();
     let r;
     try { r = JSON.parse(raw); }

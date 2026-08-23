@@ -6,7 +6,7 @@ $new = $new.Replace('PORTS  = (9050, 9150)                            # 9050 = t
 $new = $new.Replace('Needs a tor daemon on 9050 (systemctl start tor) or Tor Browser on 9150.', 'Needs Tor Browser open (it owns SOCKS on 9150) or a tor daemon on 9050.')
 $new = $new.Replace('sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")', 'sys.exit("No Tor proxy on 9150/9050. Open Tor Browser and leave it running.")')
 $old = Join-Path $InstallDir 'onionmind.py'
-$model = 'inferno-27b'
+$model = 'inferno'
 if (Test-Path $old) {
   $match = Select-String -Path $old -Pattern '^MODEL\s*=\s*"([^"]+)"' | Select-Object -First 1
   if ($match) { $model = $match.Matches[0].Groups[1].Value }

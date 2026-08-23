@@ -12,8 +12,11 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 DRY="${MATCHSTICK_DRY:-0}"
 PREBUILT_BASE="https://github.com/Codemaster64/onionmind/releases/download/matchstick-pocket"
 
+# Everything the human reads goes to stderr: this runs inside $(...), so anything
+# on stdout is captured as the answer. It used to print the menu INTO the variable,
+# leaving the user staring at a silent prompt and then dying on the whole menu text.
 edition_menu() {
-  cat <<'MENU'
+  cat >&2 <<'MENU'
 
    1) pocket     - 4B,  runs on anything            (16GB stick)
    2) daily      - 9B,  fast small-GPU daily driver  (16GB stick)
@@ -22,7 +25,7 @@ edition_menu() {
    5) max        - full fat 27B, 17GB+ GPUs          (32GB stick)
 
 MENU
-  printf '   Which edition? [1-5, Enter = 4] '
+  printf '   Which edition? [1-5, Enter = 4] ' >&2
   read -r pick
   case "${pick:-4}" in
     1|pocket)   echo 4b ;;
@@ -64,7 +67,7 @@ download_prebuilt() {
   say "Checksum OK"
 }
 
-printf '\n   [D] DOWNLOAD: ready-made pocket/spark with Qwen3.5 4B, ~6.6GB total\n'
+printf '\n   [D] DOWNLOAD: ready-made pocket/EMBER with Qwen3.5 4B, ~6.6GB total\n'
 printf '       Fastest and simplest; runs on almost any PC\n'
 printf '   [B] BUILD: choose Qwen3.5 4B, 9B, or 27B (+ vision), ~1 hour\n'
 printf '       Needs Docker; for larger or vision-capable models\n\n'
@@ -104,14 +107,21 @@ fi
 say "ISO: $ISO ($(du -h "$ISO" | cut -f1))"
 
 # --- pick a stick ----------------------------------------------------------------
-mapfile -t sticks < <(lsblk -dnbo NAME,SIZE,MODEL,TRAN | awk '$4=="usb" {print $1, $2, $3}')
+# TRAN before MODEL on purpose: MODEL is often multi-word ("SanDisk Ultra Fit")
+# or empty, so with MODEL first the transport is never in a fixed awk field and
+# the list came up empty for most real sticks. MODEL stays last, spaces and all.
+mapfile -t sticks < <(lsblk -dnbo NAME,SIZE,TRAN,MODEL | awk '$3=="usb" {$3=""; print}')
 [ ${#sticks[@]} -ge 1 ] || { warn "No USB stick found - plug one in and rerun."; exit 1; }
 echo
 i=1
 for s in "${sticks[@]}"; do echo "   [$i] /dev/$s"; i=$((i+1)); done
 printf '   Which one? [number] '
 read -r n
-DEV="/dev/$(echo "${sticks[$((n-1))]:-}" | awk '{print $1}')"
+# Bash resolves ${sticks[-1]} to the LAST element, so a blank or non-numeric
+# answer used to silently select a different disk than the one on screen.
+case "$n" in ''|*[!0-9]*) die "pick a number from the list" ;; esac
+[ "$n" -ge 1 ] && [ "$n" -le "${#sticks[@]}" ] || die "no stick numbered $n"
+DEV="/dev/$(echo "${sticks[$((n-1))]}" | awk '{print $1}')"
 [ -b "$DEV" ] || die "no such stick"
 SIZE_GB=$(( $(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0) / 1073741824 ))
 if [ "$SIZE_GB" -lt "$NEED" ] 2>/dev/null; then

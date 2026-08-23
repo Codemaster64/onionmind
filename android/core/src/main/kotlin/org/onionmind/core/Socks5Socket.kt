@@ -69,13 +69,17 @@ class Socks5Socket(
         send(req)
         val h = recv(4)
         require(h[1] == 0.toByte()) { "socks CONNECT failed: ${h[1]}" }
-        val extra = when (h[3]) {            // skip the bound address
-            1.toByte() -> 6                  // ipv4: 4 addr + 2 port
-            3.toByte() -> recv(1)[0].toInt() and 0xff + 2
-            4.toByte() -> 18                 // ipv6
+        // Drain the bound address - whatever its type. Leaving even one byte here
+        // desynchronises the stream and the TLS handshake fails somewhere else.
+        // The parens around `and` are load-bearing: Kotlin's infix operators bind
+        // LOOSER than +, so `x and 0xff + 2` means `x and 0x101`.
+        val extra = when (h[3]) {
+            1.toByte() -> 6                          // ipv4: 4 addr + 2 port
+            3.toByte() -> (recv(1)[0].toInt() and 0xff) + 2   // len + host + 2 port
+            4.toByte() -> 18                         // ipv6: 16 addr + 2 port
             else -> error("bad socks reply")
         }
-        if (h[3] != 3.toByte()) recv(extra)
+        recv(extra)
     }
 
     companion object {
