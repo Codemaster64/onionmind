@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import random
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -20,146 +19,71 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(desktop is None, "PySide6 is not installed in this test environment")
 class ThinkingStreamFilterTests(unittest.TestCase):
-    def test_plain_answer_streams_on_the_first_chunk(self) -> None:
+    def test_plain_answer_stays_buffered_until_finish(self) -> None:
         stream_filter = desktop.ThinkingStreamFilter()
+        self.assertEqual(stream_filter.feed("  Plain"), "")
+        self.assertEqual(stream_filter.feed(" answer  "), "")
 
-        self.assertEqual(stream_filter.feed("  Plain"), "  Plain")
-        self.assertEqual(stream_filter.feed(" answer"), " answer")
-
-    def test_opening_and_closing_tags_can_split_at_every_boundary(self) -> None:
-        opening = "<think>"
-        closing = "</think>"
-        for opening_cut in range(len(opening) + 1):
-            for closing_cut in range(len(closing) + 1):
-                with self.subTest(opening_cut=opening_cut, closing_cut=closing_cut):
-                    stream_filter = desktop.ThinkingStreamFilter()
-                    chunks = (
-                        " \n" + opening[:opening_cut],
-                        opening[opening_cut:] + "private reasoning" + closing[:closing_cut],
-                        closing[closing_cut:] + "Answer",
-                    )
-                    visible = "".join(stream_filter.feed(chunk) for chunk in chunks)
-                    stream_filter.finish()
-                    self.assertEqual(visible, "Answer")
-
-    def test_character_sized_chunks_never_expose_reasoning_markup(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-        payload = "<think>private reasoning</think>Visible answer"
-
-        emitted = [stream_filter.feed(character) for character in payload]
-
-        self.assertEqual("".join(emitted), "Visible answer")
-        self.assertTrue(all("<" not in chunk and ">" not in chunk for chunk in emitted))
+        self.assertEqual(stream_filter.finish(), "Plain answer")
+        self.assertEqual(stream_filter.finish(), "")
+        self.assertEqual(stream_filter.feed("must not appear"), "")
+        self.assertEqual(stream_filter._chunks, [])
+        self.assertEqual(stream_filter._characters, 0)
 
     def test_variant_tags_survive_every_three_chunk_boundary(self) -> None:
-        payload = "< THINK data-mode='private' >SECRET</ tHiNk\t>Answer"
-        for first_cut in range(len(payload) + 1):
-            for second_cut in range(first_cut, len(payload) + 1):
-                with self.subTest(first_cut=first_cut, second_cut=second_cut):
-                    stream_filter = desktop.ThinkingStreamFilter()
-                    chunks = (
-                        payload[:first_cut],
-                        payload[first_cut:second_cut],
-                        payload[second_cut:],
-                    )
-                    visible = "".join(stream_filter.feed(chunk) for chunk in chunks)
-                    stream_filter.finish()
-                    self.assertEqual(visible, "Answer")
-                    self.assertNotIn("SECRET", visible)
-
-    def test_false_opening_prefix_is_released_as_ordinary_text(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-
-        self.assertEqual(stream_filter.feed("\n<thi"), "")
-        self.assertEqual(stream_filter.feed("s is ordinary"), "\n<this is ordinary")
-
-        stream_filter = desktop.ThinkingStreamFilter()
-        self.assertEqual(stream_filter.feed("Visible "), "Visible ")
-        self.assertEqual(stream_filter.feed("<thi"), "")
-        self.assertEqual(stream_filter.feed("s is still ordinary"), "<this is still ordinary")
-
-    def test_new_reasoning_block_is_hidden_after_visible_pre_tool_text(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-
-        self.assertEqual(stream_filter.feed("I will search."), "I will search.")
-        self.assertEqual(stream_filter.feed("<thi"), "")
-        self.assertEqual(stream_filter.feed("nk>SECRET</think>Final"), "Final")
-
-    def test_later_reasoning_block_survives_adversarial_chunk_boundaries(self) -> None:
-        payload = "Visible before tool.<think>private reasoning</think>Final answer"
-        expected = "Visible before tool.Final answer"
-
-        for first_cut in range(len(payload) + 1):
-            for second_cut in range(first_cut, len(payload) + 1):
-                with self.subTest(first_cut=first_cut, second_cut=second_cut):
-                    stream_filter = desktop.ThinkingStreamFilter()
-                    chunks = (
-                        payload[:first_cut],
-                        payload[first_cut:second_cut],
-                        payload[second_cut:],
-                    )
-                    visible = "".join(stream_filter.feed(chunk) for chunk in chunks)
-                    stream_filter.finish()
-                    self.assertEqual(visible, expected)
-
-        generator = random.Random(1729)
-        for case in range(100):
-            with self.subTest(random_case=case):
-                stream_filter = desktop.ThinkingStreamFilter()
-                cursor = 0
-                visible_parts: list[str] = []
-                while cursor < len(payload):
-                    chunk_size = generator.randint(1, 9)
-                    visible_parts.append(stream_filter.feed(payload[cursor:cursor + chunk_size]))
-                    cursor += chunk_size
-                stream_filter.finish()
-                self.assertEqual("".join(visible_parts), expected)
-
-    def test_multiple_visible_and_reasoning_rounds_share_one_filter(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-        chunks = (
-            "Round one. <thi",
-            "nk>first secret</think>",
-            "Round two. <think>second secret",
-            "</thi",
-            "nk>Final answer",
-        )
-
-        visible = "".join(stream_filter.feed(chunk) for chunk in chunks)
-
-        self.assertEqual(visible, "Round one. Round two. Final answer")
-        self.assertNotIn("secret", visible)
-
-    def test_multiple_variant_blocks_and_nested_blocks_remain_private(self) -> None:
         payload = (
-            "Round one.< THINK source=first>SECRET ONE</ THINK >"
-            "Round two.<think>< THINK nested=yes>SECRET TWO</ THINK ></think>Answer"
+            "< THINK data-mode='private' ><think>SECRET</think></ tHiNk\t>Answer"
+        )
+        for first_cut in range(len(payload) + 1):
+            for second_cut in range(first_cut, len(payload) + 1):
+                with self.subTest(first_cut=first_cut, second_cut=second_cut):
+                    stream_filter = desktop.ThinkingStreamFilter()
+                    for chunk in (
+                        payload[:first_cut],
+                        payload[first_cut:second_cut],
+                        payload[second_cut:],
+                    ):
+                        self.assertEqual(stream_filter.feed(chunk), "")
+                    self.assertEqual(stream_filter.finish(), "Answer")
+
+    def test_omitted_opening_closer_never_emits_at_any_boundary(self) -> None:
+        payload = "SECRET REASONING</ THINK data-model=x>Final answer"
+        for first_cut in range(len(payload) + 1):
+            for second_cut in range(first_cut, len(payload) + 1):
+                with self.subTest(first_cut=first_cut, second_cut=second_cut):
+                    stream_filter = desktop.ThinkingStreamFilter()
+                    for chunk in (
+                        payload[:first_cut],
+                        payload[first_cut:second_cut],
+                        payload[second_cut:],
+                    ):
+                        self.assertEqual(stream_filter.feed(chunk), "")
+                    self.assertEqual(stream_filter.finish(), "Final answer")
+
+    def test_partial_closer_fails_closed_for_every_split(self) -> None:
+        for payload in ("SECRET</thi", "SECRET</ THI", "SECRET</ THINK data=x"):
+            for cut in range(len(payload) + 1):
+                with self.subTest(payload=payload, cut=cut):
+                    stream_filter = desktop.ThinkingStreamFilter()
+                    self.assertEqual(stream_filter.feed(payload[:cut]), "")
+                    self.assertEqual(stream_filter.feed(payload[cut:]), "")
+                    self.assertEqual(stream_filter.finish(), "")
+
+    def test_multiple_tool_rounds_and_ordinary_less_than_text_are_sanitized_once(self) -> None:
+        payload = (
+            "I will search. 2 < 3."
+            "< THINK source=first>SECRET ONE</ THINK >"
+            "Tool complete.<think>< THINK nested=yes>SECRET TWO</ THINK ></think>"
+            "Final answer with <this ordinary text."
         )
         stream_filter = desktop.ThinkingStreamFilter()
-        visible = "".join(stream_filter.feed(character) for character in payload)
-        stream_filter.finish()
+        for character in payload:
+            self.assertEqual(stream_filter.feed(character), "")
 
-        self.assertEqual(visible, "Round one.Round two.Answer")
-        self.assertNotIn("SECRET", visible)
-
-    def test_variant_truncation_is_dropped_but_ordinary_less_than_text_streams(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-        self.assertEqual(stream_filter.feed("Visible< THI"), "Visible")
-        stream_filter.finish()
-        self.assertEqual(stream_filter.feed("NK mode=x>SECRET"), "")
-
-        stream_filter = desktop.ThinkingStreamFilter()
-        visible = "".join(stream_filter.feed(character) for character in "2 < 3 and <this is ordinary")
-        stream_filter.finish()
-        self.assertEqual(visible, "2 < 3 and <this is ordinary")
-
-    def test_completion_drops_an_undecided_opening_prefix(self) -> None:
-        stream_filter = desktop.ThinkingStreamFilter()
-        self.assertEqual(stream_filter.feed("<thi"), "")
-
-        stream_filter.finish()
-
-        self.assertEqual(stream_filter.feed("nk>private"), "")
+        self.assertEqual(
+            stream_filter.finish(),
+            "I will search. 2 < 3.Tool complete.Final answer with <this ordinary text.",
+        )
 
     def test_abort_drops_an_unterminated_reasoning_block(self) -> None:
         stream_filter = desktop.ThinkingStreamFilter()
@@ -168,6 +92,18 @@ class ThinkingStreamFilterTests(unittest.TestCase):
         stream_filter.abort()
 
         self.assertEqual(stream_filter.feed("nk>must not appear"), "")
+        self.assertEqual(stream_filter.finish(), "")
+        self.assertEqual(stream_filter._chunks, [])
+
+    def test_privacy_buffer_has_a_hard_limit_and_clears_on_overflow(self) -> None:
+        stream_filter = desktop.ThinkingStreamFilter(max_characters=8)
+        self.assertEqual(stream_filter.feed("12345678"), "")
+        with self.assertRaisesRegex(RuntimeError, "privacy buffer limit"):
+            stream_filter.feed("9")
+
+        self.assertEqual(stream_filter.finish(), "")
+        self.assertEqual(stream_filter._chunks, [])
+        self.assertEqual(stream_filter._characters, 0)
 
     def test_completion_sanitizes_every_assistant_tool_round_before_save(self) -> None:
         saved: list[list[dict]] = []
@@ -250,7 +186,7 @@ class ThinkingIndicatorTests(unittest.TestCase):
         self.assertFalse(indicator.timer.isActive())
         indicator.close()
 
-    def test_first_streamed_text_replaces_the_indicator_in_the_same_block(self) -> None:
+    def test_completed_sanitized_text_replaces_the_indicator_in_the_same_block(self) -> None:
         block = desktop.MessageBlock("assistant", "")
         block.show()
         block.start_thinking()
@@ -259,10 +195,27 @@ class ThinkingIndicatorTests(unittest.TestCase):
         self.assertTrue(block.body.isHidden())
 
         host = SimpleNamespace(
+            core=SimpleNamespace(tor_proxy_port=lambda: None),
             stream_block=block,
-            transcript=SimpleNamespace(_scroll_later=lambda: None),
+            chat_messages=[],
+            _show_local_tor_state=lambda port: None,
+            set_status=lambda text: None,
+            inspector=SimpleNamespace(append_activity=lambda text: None),
+            _set_active=lambda value: None,
+            save_current_session=lambda: True,
         )
-        desktop.OnionmindWindow._append_stream(host, "Ready")
+        desktop.OnionmindWindow._chat_complete(
+            host,
+            {
+                "answer": "PRIVATE REASONING</ THINK >Ready",
+                "history": [
+                    {
+                        "role": "assistant",
+                        "content": "PRIVATE REASONING</ THINK >Ready",
+                    }
+                ],
+            },
+        )
         self.app.processEvents()
 
         self.assertTrue(block.thinking.isHidden())
@@ -270,6 +223,70 @@ class ThinkingIndicatorTests(unittest.TestCase):
         self.assertEqual(block.text, "Ready")
         self.assertEqual(block.body.text(), "Ready")
         self.assertEqual(block.accessibleName(), "Onionmind message")
+        block.close()
+
+    def test_plain_chunks_stay_behind_the_same_indicator_until_completion(self) -> None:
+        block = desktop.MessageBlock("assistant", "")
+        block.show()
+        payloads: list[dict] = []
+
+        class Signal:
+            def emit(self, value) -> None:
+                del value
+
+            def connect(self, callback) -> None:
+                del callback
+
+        signals = SimpleNamespace(event=Signal(), result=Signal(), error=Signal())
+
+        def turn_stream(history, on_text, **kwargs):
+            del history, kwargs
+            on_text("Plain ")
+            on_text("answer")
+            return "Plain answer"
+
+        def start_worker(job):
+            payloads.append(job(signals))
+            return SimpleNamespace(signals=signals)
+
+        host = SimpleNamespace(
+            stop_event=None,
+            current_model_id=lambda: "model",
+            chat_messages=[],
+            transcript=SimpleNamespace(add_message=lambda role, text: block),
+            stream_block=None,
+            set_status=lambda text: None,
+            _describe_model=lambda model: model,
+            inspector=SimpleNamespace(append_activity=lambda text: None),
+            core=SimpleNamespace(
+                BACKEND="ollama",
+                turn_stream=turn_stream,
+                tor_proxy_port=lambda: None,
+            ),
+            _start_worker=start_worker,
+            _chat_event=lambda event: None,
+            _chat_complete=lambda payload: None,
+            _chat_failed=lambda message: None,
+            _show_local_tor_state=lambda port: None,
+            _set_active=lambda value: None,
+            save_current_session=lambda: True,
+        )
+
+        desktop.OnionmindWindow._start_chat(host)
+        self.app.processEvents()
+
+        self.assertEqual(payloads[0]["answer"], "Plain answer")
+        self.assertIs(host.stream_block, block)
+        self.assertFalse(block.thinking.isHidden())
+        self.assertTrue(block.body.isHidden())
+        self.assertEqual(block.text, "")
+
+        desktop.OnionmindWindow._chat_complete(host, payloads[0])
+        self.app.processEvents()
+
+        self.assertTrue(block.thinking.isHidden())
+        self.assertFalse(block.body.isHidden())
+        self.assertEqual(block.text, "Plain answer")
         block.close()
 
     def test_pending_label_tracks_real_work_without_losing_thinking_state(self) -> None:
@@ -280,22 +297,22 @@ class ThinkingIndicatorTests(unittest.TestCase):
         self.assertEqual(block.accessibleName(), "Onionmind is thinking")
         block.stop_thinking()
 
-    def test_chat_stream_hides_later_thinking_tags_split_across_chunks(self) -> None:
-        emitted: list[str] = []
+    def test_chat_job_buffers_all_chunks_and_prefers_the_sanitized_return(self) -> None:
+        payloads: list[dict] = []
 
         class Signal:
-            def __init__(self, sink: list | None = None) -> None:
-                self.sink = sink
+            def __init__(self) -> None:
+                self.emitted: list = []
+                self.connected: list = []
 
             def emit(self, value) -> None:
-                if self.sink is not None:
-                    self.sink.append(value)
+                self.emitted.append(value)
 
             def connect(self, callback) -> None:
-                del callback
+                self.connected.append(callback)
 
         signals = SimpleNamespace(
-            text=Signal(emitted),
+            text=Signal(),
             event=Signal(),
             result=Signal(),
             error=Signal(),
@@ -304,17 +321,20 @@ class ThinkingIndicatorTests(unittest.TestCase):
         def turn_stream(history, on_text, **kwargs):
             del history, kwargs
             for chunk in (
-                "I will search.",
-                "<thi",
-                "nk>private",
-                " reasoning</thi",
-                "nk>Answer",
+                "STREAM SECRET",
+                "</ THI",
+                "NK >Buffered answer",
             ):
                 on_text(chunk)
-            return "Answer"
+            return "RETURN SECRET</ THINK data-source=return>Returned answer"
 
         core = SimpleNamespace(BACKEND="ollama", turn_stream=turn_stream)
         block = SimpleNamespace(start_thinking=lambda text: None)
+
+        def start_worker(job):
+            payloads.append(job(signals))
+            return SimpleNamespace(signals=signals)
+
         host = SimpleNamespace(
             stop_event=None,
             current_model_id=lambda: "model",
@@ -325,11 +345,7 @@ class ThinkingIndicatorTests(unittest.TestCase):
             _describe_model=lambda model: model,
             inspector=SimpleNamespace(append_activity=lambda text: None),
             core=core,
-            _start_worker=lambda job: SimpleNamespace(
-                signals=signals,
-                payload=job(signals),
-            ),
-            _append_stream=lambda text: None,
+            _start_worker=start_worker,
             _chat_event=lambda event: None,
             _chat_complete=lambda payload: None,
             _chat_failed=lambda message: None,
@@ -337,7 +353,53 @@ class ThinkingIndicatorTests(unittest.TestCase):
 
         desktop.OnionmindWindow._start_chat(host)
 
-        self.assertEqual(emitted, ["I will search.", "Answer"])
+        self.assertEqual(signals.text.emitted, [])
+        self.assertEqual(signals.text.connected, [])
+        self.assertEqual(payloads[0]["answer"], "Returned answer")
+
+    def test_chat_job_uses_only_sanitized_buffer_when_returned_answer_is_empty(self) -> None:
+        payloads: list[dict] = []
+
+        class Signal:
+            def emit(self, value) -> None:
+                del value
+
+            def connect(self, callback) -> None:
+                del callback
+
+        signals = SimpleNamespace(event=Signal(), result=Signal(), error=Signal())
+
+        def turn_stream(history, on_text, **kwargs):
+            del history, kwargs
+            on_text("BUFFER SECRET</think>Buffered answer")
+            return "<think>returned reasoning only</think>"
+
+        core = SimpleNamespace(BACKEND="ollama", turn_stream=turn_stream)
+        block = SimpleNamespace(start_thinking=lambda text: None)
+
+        def start_worker(job):
+            payloads.append(job(signals))
+            return SimpleNamespace(signals=signals)
+
+        host = SimpleNamespace(
+            stop_event=None,
+            current_model_id=lambda: "model",
+            chat_messages=[],
+            transcript=SimpleNamespace(add_message=lambda role, text: block),
+            stream_block=None,
+            set_status=lambda text: None,
+            _describe_model=lambda model: model,
+            inspector=SimpleNamespace(append_activity=lambda text: None),
+            core=core,
+            _start_worker=start_worker,
+            _chat_event=lambda event: None,
+            _chat_complete=lambda payload: None,
+            _chat_failed=lambda message: None,
+        )
+
+        desktop.OnionmindWindow._start_chat(host)
+
+        self.assertEqual(payloads[0]["answer"], "Buffered answer")
 
 
 if __name__ == "__main__":

@@ -36,11 +36,13 @@ MIT-licensed; model weights retain the upstream licenses documented in
 
 On desktop, Onionmind is a standalone PySide6 application—not a browser shell,
 WebView, or localhost website. Its three-pane workbench combines project and
-session navigation, a streaming conversation, integrated terminal, Git changes,
+session navigation, a privacy-filtered conversation, integrated terminal, Git changes,
 context inspection, model management, and a one-shot DeepSeek Harness agent mode.
 Each Chat turn immediately opens a textual **Thinking** state in the pending
-Onionmind reply. Its restrained motion stops on the first visible streamed token,
-on failure, or when the turn ends; reduced-motion mode keeps the same state static.
+Onionmind reply. Model output stays behind that state until the completed response
+has been sanitized for private reasoning markup, then appears in the same reply.
+Its restrained motion stops on completion or failure; reduced-motion mode keeps
+the same state static.
 The interaction model is informed by the public Claude Code and Codex workflows,
 while the product identity, model tiers, storage, and implementation remain
 Onionmind's own. The project uses published documentation and open-source
@@ -147,7 +149,7 @@ export a conversation; the classic CLI still supports `/save notes.txt`.
 ### The native workbench
 
 - Open a repository and move between local project sessions without leaving the app.
-- Stream model output, stop generation, inspect tool activity, and attach images to vision-capable models.
+- Buffer model output behind the Thinking state until privacy filtering completes, stop generation, inspect tool activity, and attach images to vision-capable models.
 - Run a real shell in the selected project with command history and cancel support.
 - Inspect the bounded project tree, Git status and diff, and recent activity beside the conversation.
 - Discover installed Ollama models, see their Onionmind tier names, switch models, and confirm a direct-network pull for another model.

@@ -145,8 +145,11 @@ Chat creates its assistant transcript block before worker startup and shows an
 accessible textual thinking indicator there. A single 280 ms Qt timer advances
 three small dots while the application is active; Windows' client-animation
 setting and `ONIONMIND_REDUCE_MOTION=1` disable the motion without hiding the
-state. The same block becomes the streamed answer on the first visible token, so
-hidden reasoning and Tor startup never leave a blank response row.
+state. The block remains pending throughout generation. Transport chunks stay in
+a bounded one-million-character memory buffer, and no model text reaches the
+widget until the completed response passes the shared reasoning sanitizer. The
+sanitized answer then replaces the indicator in the same block. Overflow, stop,
+and failure erase the raw buffer and fail closed.
 
 Ollama remains the model seam: discovery and inference use its public local API.
 A pull is sent to that loopback API only after Onionmind explains that Ollama
