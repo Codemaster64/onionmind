@@ -124,6 +124,10 @@ const api = (path, init) => fetch(path, {...init,
 const form = body => ({method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
 const errorText = err => err instanceof Error ? (err.message || String(err)) : String(err);
+// A cold first message spends ~30s loading the weights before a token appears.
+// Saying "thinking" for that is indistinguishable from a hang.
+const busyText = () => status.llama === false ? 'loading the model into memory…'
+  : (status.torEnabled === false ? 'thinking locally…' : 'thinking + searching over tor…');
 let history = [], status = {model:'none', models:[]}, ready = false;
 const $ = id => document.getElementById(id);
 
@@ -142,15 +146,16 @@ async function poll() {
   } else if (status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
     $('setup-text').textContent = 'Downloading the ' + status.model.toUpperCase() +
-      ' model — resumable, leave the app open.';
+      ' model — resumable, and it keeps going if you switch apps.';
     $('prog').style.width = Math.round(status.progress * 100) + '%';
     const done = Number(status.downloadBytes || 0);
     const total = Number(status.downloadTotal || 0);
     const speed = Number(status.downloadSpeedBps || 0);
     $('device-note').textContent = downloadDetails(done, total, speed);
-    $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">You can leave the app open while it resumes.</div></div>';
+    $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">Runs in the background — you can switch apps.</div></div>';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
+    if ($('busy').style.display === 'block') $('busy').textContent = busyText();
     if (!ready) { add('bot', 'Ready. ' + (status.torEnabled === false ? 'Tor is off — web search is disabled, but local chat still works.' : (status.tor ? 'Tor is up.' : 'Tor is still building circuits — searches wait for it, chat does not.')) + ' Ask anything.'); ready = true; }
   }
 }
@@ -247,7 +252,7 @@ $('form').onsubmit = async e => {
   const q = $('q').value.trim(); if (!q) return;
   $('q').value = ''; add('you', q);
   history.push({role:'user', content:q});
-  $('busy').textContent = status.torEnabled === false ? 'thinking locally…' : 'thinking + searching over tor…';
+  $('busy').textContent = busyText();
   $('busy').style.display = 'block';
   try {
     const response = await api('/api/chat',

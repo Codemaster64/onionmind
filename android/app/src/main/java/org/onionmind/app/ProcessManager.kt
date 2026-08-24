@@ -236,7 +236,7 @@ object ProcessManager {
     }
 
     fun ensureLlama(ctx: Context) {
-        if (llamaAlive()) return
+        if (llamaAlive()) { awaitLlama(); return }
         val m = installedModel(ctx) ?: return
         val bin = File(ctx.applicationInfo.nativeLibraryDir, "libllamaserver.so")
         val log = File(ctx.filesDir, "llama-server.log").outputStream()
@@ -244,12 +244,41 @@ object ProcessManager {
             .apply { redirectErrorStream(true); environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir }
             .start().also { it.outputStream.use { } }
         Thread { try { llama!!.inputStream.copyTo(log) } catch (_: Exception) {} }.start()
+        awaitLlama()
     }
+
+    /** Block until llama-server can actually answer, or give up.
+     *  Starting the process is not the same as being able to serve: the port
+     *  opens at once but every request 503s until the weights are in memory,
+     *  which is ~a minute for a 1.7GB model on flash. Returning early made the
+     *  first chat after launch fail twice - once on connect, once on 503 -
+     *  before the third try worked. */
+    private fun awaitLlama(timeoutMs: Long = 240_000) {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (llamaHealthy()) return
+            // The process died (bad model, OOM); waiting out the timeout would
+            // just delay the error the caller is going to report anyway.
+            if (llama?.isAlive == false) return
+            try { Thread.sleep(500) } catch (_: InterruptedException) { return }
+        }
+    }
+
+    private fun llamaHealthy(): Boolean = try {
+        (URL("http://127.0.0.1:8080/health").openConnection() as HttpURLConnection).run {
+            connectTimeout = 1_000; readTimeout = 2_000
+            try { responseCode == 200 } finally { disconnect() }
+        }
+    } catch (_: Exception) { false }
 
     fun ensureTor(ctx: Context) {
         if (!torEnabled(ctx)) return
         if (torAlive()) return
         val dir = File(ctx.filesDir, "tor").apply { mkdirs() }
+        // Fresh log per run: tor APPENDS, and torReady() reads this file for the
+        // bootstrap line. Without this, a restart would report "ready" instantly
+        // on the previous run's line while the new process still has no circuit.
+        File(dir, "log").delete()
         File(dir, "torrc").writeText("SocksPort 9050\nDataDirectory ${File(dir, "data").apply { mkdirs() }.absolutePath}\nCookieAuthentication 0\nAvoidDiskWrites 1\nLog notice file ${File(dir, "log").absolutePath}")
         tor = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libtor.so").absolutePath, "-f", File(dir, "torrc").absolutePath).redirectErrorStream(true).start()
         Thread { try { tor!!.inputStream.readBytes() } catch (_: Exception) {} }.start()
@@ -258,16 +287,44 @@ object ProcessManager {
     fun torEnabled(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("torEnabled", true)
     fun setTorEnabled(ctx: Context, enabled: Boolean) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("torEnabled", enabled).apply()
+        torBootstrapped = false
         if (enabled) Thread { ensureTor(ctx) }.start() else { tor?.destroy(); tor = null }
     }
 
     private fun stopLlama() { llama?.destroy(); llama = null }
     private fun llamaAlive() = portOpen(8080)
     private fun torAlive() = portOpen(9050)
-    fun llamaReady() = portOpen(8080)
-    fun torReady() = portOpen(9050)
+    // portOpen is the right test for "is a server already running" (do not spawn
+    // a second one); it is the WRONG test for "can it answer" - hence health.
+    fun llamaReady() = llamaHealthy()
+    @Volatile private var torBootstrapped = false
+
+    /** True only once tor can actually carry traffic.
+     *  The SOCKS port binds immediately, long before the first circuit exists,
+     *  so portOpen() reported "Tor is up" while every search still failed.
+     *  ponytail: tail tor's own notice log rather than open a ControlPort -
+     *  no new port, no auth, no protocol. Upgrade path: ControlPort +
+     *  `GETINFO status/bootstrap-phase` if per-phase progress is ever wanted. */
+    fun torReady(ctx: Context): Boolean {
+        if (torBootstrapped) return true
+        if (!portOpen(9050)) return false
+        val log = File(File(ctx.filesDir, "tor"), "log")
+        if (!log.exists()) return false
+        torBootstrapped = try {
+            RandomAccessFile(log, "r").use { f ->
+                // The HEAD, not the tail: ensureTor wipes this file per run, so
+                // bootstrap is always in the first few KB - and a tail read would
+                // lose it once the log outgrew the window, latching "Tor down"
+                // forever on a process that was working fine.
+                val buf = ByteArray(minOf(f.length(), 16384L).toInt())
+                f.readFully(buf)
+                String(buf).contains("Bootstrapped 100%")
+            }
+        } catch (_: Exception) { false }
+        return torBootstrapped
+    }
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
-    fun stopAll() { stopLlama(); tor?.destroy() }
+    fun stopAll() { stopLlama(); tor?.destroy(); torBootstrapped = false }
 
     private fun readCustom(ctx: Context): List<Model> = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(CUSTOM, "")!!.lineSequence().mapNotNull {
         // Re-validate on the way OUT too: whatever sits in the store, only a
