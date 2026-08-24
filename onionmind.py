@@ -29,6 +29,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
 # DuckDuckGo's onion service keeps every query inside the Tor network, so no
 # exit node sees it and a failed onion request can never become a direct request.
 ENDPOINT = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/"
+_THINK_TAG_PATTERN = r"<\s*(/?)\s*think(?:\s[^>]*)?>"
+_THINK_TAG = re.compile(_THINK_TAG_PATTERN, re.IGNORECASE)
 # Reasoning models spend the budget thinking BEFORE answering. Some local models
 # can consume the former 8192-token ceiling without reaching their visible answer.
 # Keep the request context at least as large as the generation budget.
@@ -241,17 +243,85 @@ def web_search(query, n=5):
     return f"(search failed on the onion service after fresh-circuit retries: {err})"
 
 
-def strip_thinking(text):
-    """Return the answer, or '' if the model never finished thinking.
+def _think_tag_candidate(candidate):
+    """Classify text beginning with ``<`` against prefixes of _THINK_TAG."""
+    if not candidate.startswith("<"):
+        return "invalid", False
+    index, size = 1, len(candidate)
+    while index < size and candidate[index].isspace():
+        index += 1
+    if index == size:
+        return "prefix", False
 
-    Splitting on '</think>' alone silently returns the raw monologue when the tag
-    is missing, so a truncated reply looks like a real answer.
-    """
-    if "</think>" in text:
-        return text.split("</think>")[-1].strip()
-    if "<think>" in text:
-        return ""                                # ran out of budget mid-thought
-    return text.strip()
+    closing = candidate[index] == "/"
+    if closing:
+        index += 1
+        while index < size and candidate[index].isspace():
+            index += 1
+        if index == size:
+            return "prefix", True
+
+    for expected in "think":
+        if index == size:
+            return "prefix", closing
+        if re.fullmatch(expected, candidate[index], re.IGNORECASE) is None:
+            return "invalid", closing
+        index += 1
+    if index == size:
+        return "prefix", closing
+    if candidate[index] == ">":
+        match = _THINK_TAG.fullmatch(candidate[:index + 1])
+        return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+    if not candidate[index].isspace():
+        return "invalid", closing
+    index += 1
+    while index < size:
+        if candidate[index] == ">":
+            match = _THINK_TAG.fullmatch(candidate[:index + 1])
+            return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+        index += 1
+    return "prefix", closing
+
+
+def _partial_think_tag(text):
+    """Return the first unfinished reasoning tag and whether it is closing."""
+    start = text.find("<")
+    while start >= 0:
+        state, closing = _think_tag_candidate(text[start:])
+        if state == "prefix":
+            return start, closing
+        start = text.find("<", start + 1)
+    return None
+
+
+def strip_thinking(text):
+    """Remove every complete or truncated reasoning block, failing closed."""
+    visible, cursor, depth = [], 0, 0
+    for tag in _THINK_TAG.finditer(text):
+        closing = bool(tag.group(1))
+        if closing:
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    cursor = tag.end()
+            else:
+                visible.clear()                 # implicit leading reasoning block
+                cursor = tag.end()
+            continue
+        if depth == 0:
+            visible.append(text[cursor:tag.start()])
+        depth += 1
+
+    if depth == 0:
+        tail = text[cursor:]
+        partial = _partial_think_tag(tail)
+        if partial is None:
+            visible.append(tail)
+        elif partial[1]:
+            visible.clear()                     # truncated implicit closing tag
+        else:
+            visible.append(tail[:partial[0]])
+    return "".join(visible).strip()
 
 
 TOOLS = [{"type": "function", "function": {

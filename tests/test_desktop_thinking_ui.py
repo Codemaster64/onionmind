@@ -51,6 +51,22 @@ class ThinkingStreamFilterTests(unittest.TestCase):
         self.assertEqual("".join(emitted), "Visible answer")
         self.assertTrue(all("<" not in chunk and ">" not in chunk for chunk in emitted))
 
+    def test_variant_tags_survive_every_three_chunk_boundary(self) -> None:
+        payload = "< THINK data-mode='private' >SECRET</ tHiNk\t>Answer"
+        for first_cut in range(len(payload) + 1):
+            for second_cut in range(first_cut, len(payload) + 1):
+                with self.subTest(first_cut=first_cut, second_cut=second_cut):
+                    stream_filter = desktop.ThinkingStreamFilter()
+                    chunks = (
+                        payload[:first_cut],
+                        payload[first_cut:second_cut],
+                        payload[second_cut:],
+                    )
+                    visible = "".join(stream_filter.feed(chunk) for chunk in chunks)
+                    stream_filter.finish()
+                    self.assertEqual(visible, "Answer")
+                    self.assertNotIn("SECRET", visible)
+
     def test_false_opening_prefix_is_released_as_ordinary_text(self) -> None:
         stream_filter = desktop.ThinkingStreamFilter()
 
@@ -113,6 +129,29 @@ class ThinkingStreamFilterTests(unittest.TestCase):
 
         self.assertEqual(visible, "Round one. Round two. Final answer")
         self.assertNotIn("secret", visible)
+
+    def test_multiple_variant_blocks_and_nested_blocks_remain_private(self) -> None:
+        payload = (
+            "Round one.< THINK source=first>SECRET ONE</ THINK >"
+            "Round two.<think>< THINK nested=yes>SECRET TWO</ THINK ></think>Answer"
+        )
+        stream_filter = desktop.ThinkingStreamFilter()
+        visible = "".join(stream_filter.feed(character) for character in payload)
+        stream_filter.finish()
+
+        self.assertEqual(visible, "Round one.Round two.Answer")
+        self.assertNotIn("SECRET", visible)
+
+    def test_variant_truncation_is_dropped_but_ordinary_less_than_text_streams(self) -> None:
+        stream_filter = desktop.ThinkingStreamFilter()
+        self.assertEqual(stream_filter.feed("Visible< THI"), "Visible")
+        stream_filter.finish()
+        self.assertEqual(stream_filter.feed("NK mode=x>SECRET"), "")
+
+        stream_filter = desktop.ThinkingStreamFilter()
+        visible = "".join(stream_filter.feed(character) for character in "2 < 3 and <this is ordinary")
+        stream_filter.finish()
+        self.assertEqual(visible, "2 < 3 and <this is ordinary")
 
     def test_completion_drops_an_undecided_opening_prefix(self) -> None:
         stream_filter = desktop.ThinkingStreamFilter()
@@ -181,14 +220,17 @@ class ThinkingStreamFilterTests(unittest.TestCase):
                 {"role": "user", "content": "Question"},
                 {
                     "role": "assistant",
-                    "content": "Before<think>EXPORT SECRET</think> after",
+                    "content": (
+                        "Before< THINK data-origin=legacy>EXPORT SECRET</ THINK >"
+                        " after< THI"
+                    ),
                 },
             ],
         )
 
         self.assertIn("Before after", markdown)
         self.assertNotIn("EXPORT SECRET", markdown)
-        self.assertNotIn("<think>", markdown)
+        self.assertNotIn("< THINK", markdown)
 
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed in this test environment")

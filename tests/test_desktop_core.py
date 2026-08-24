@@ -119,6 +119,24 @@ class SessionStoreTests(unittest.TestCase):
             "Before middle",
         )
 
+    def test_variant_and_truncated_reasoning_never_reaches_persistence(self) -> None:
+        content = (
+            "Before< THINK data-origin=legacy>SECRET</ THINK > after< THI"
+        )
+        self.assertEqual(core.strip_thinking(content), "Before after")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sessions"
+            store = core.SessionStore(root)
+            session = store.create(
+                messages=[{"role": "assistant", "content": content}]
+            )
+            saved = (root / f"{session.id}.json").read_text(encoding="utf-8")
+
+        self.assertEqual(session.messages[0]["content"], "Before after")
+        self.assertNotIn("SECRET", saved)
+        self.assertNotIn("< THI", saved)
+
     def test_reasoning_is_removed_at_every_session_store_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "sessions"
