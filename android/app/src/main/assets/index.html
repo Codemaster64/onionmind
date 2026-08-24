@@ -49,7 +49,7 @@
   .row { display: flex; gap: 10px; justify-content: center; }
   #manager { position: fixed; inset: 0; z-index: 2; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
   #manager h2 { font-size: 20px; margin-bottom: 4px; } #manager > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
-  #manager input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
+  #manager input, #setup input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
   .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
   .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }
   .danger { background: #5b2634; } .muted { background: transparent; border: 1px solid var(--line); }
@@ -82,11 +82,9 @@
   <div id="installed-list"></div>
   <div class="model-card" style="margin-top:16px">
     <strong>Add another GGUF model</strong>
-    <p class="model-meta">Use a direct HTTPS download URL. Hugging Face “resolve/main” links work well.</p>
-    <input id="custom-name" placeholder="Name (for example, Gemma 3 4B)">
+    <p class="model-meta">Paste a direct HTTPS link to a .gguf file. Hugging Face “resolve/main” links work well. The name and size are read from the link.</p>
     <input id="custom-url" placeholder="https://…/model.gguf">
-    <input id="custom-file" placeholder="Filename, for example model.gguf">
-    <input id="custom-bytes" type="number" inputmode="numeric" placeholder="Size in bytes (optional)">
+    <input id="custom-name" placeholder="Name (optional)">
     <button onclick="addCustom()">Download custom model</button>
   </div>
 </section>
@@ -105,6 +103,12 @@
   <div id="device-note"></div>
   <div class="bar"><i id="prog"></i></div>
   <div id="model-list"></div>
+  <div id="setup-custom" class="model-card" style="margin-top:16px" hidden>
+    <strong>Or bring your own</strong>
+    <p class="model-meta">Paste a direct HTTPS link to a .gguf file.</p>
+    <input id="setup-url" placeholder="https://…/model.gguf">
+    <button onclick="addCustom('setup-url')">Download it</button>
+  </div>
 </div>
 
 <div id="chat"></div>
@@ -143,7 +147,9 @@ async function poll() {
     $('setup-text').textContent = 'Download the model? Everything stays on this phone.';
     $('prog').style.width = '0%';
     renderModelPicker();
+    $('setup-custom').hidden = false;
   } else if (status.downloading) {
+    $('setup-custom').hidden = true;
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
     $('setup-text').textContent = 'Downloading the ' + status.model.toUpperCase() +
       ' model — resumable, and it keeps going if you switch apps.';
@@ -224,11 +230,19 @@ function renderManager() {
 }
 async function selectModel(id) { await api('/api/select', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
 async function removeModel(id) { if (!confirm('Remove this model from the phone?')) return; await api('/api/remove', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
-async function addCustom() {
-  const name=$('custom-name').value.trim(), url=$('custom-url').value.trim(), file=$('custom-file').value.trim(), bytes=$('custom-bytes').value;
-  if (!name || !url || !file) return;
-  const r=await api('/api/install', form(new URLSearchParams({name,url,file,bytes})));
-  if (!r.ok) alert((await r.json()).error || 'Could not add model'); else { $('custom-name').value=$('custom-url').value=$('custom-file').value=$('custom-bytes').value=''; await poll(); renderManager(); }
+// urlField lets first-run reuse this: same endpoint, same validation, one box.
+async function addCustom(urlField) {
+  const box = $(urlField || 'custom-url');
+  const url = box.value.trim();
+  const name = urlField ? '' : $('custom-name').value.trim();
+  if (!url) return;
+  // file and bytes are derived server-side from the URL and the download itself.
+  const r = await api('/api/install', form(new URLSearchParams({name, url})));
+  if (!r.ok) { alert(((await r.json().catch(() => ({}))).error) || 'Could not add model'); return; }
+  box.value = '';
+  if (!urlField) $('custom-name').value = '';
+  await poll();
+  if (!urlField) renderManager();
 }
 
 function add(cls, text) {
