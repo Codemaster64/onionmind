@@ -3,6 +3,7 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.onionmind.core.OwnedLoopbackProcess
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -17,7 +18,8 @@ import java.util.UUID
 
 /** Owns the downloadable model catalog and the llama/tor child processes. */
 object ProcessManager {
-    private var llama: Process? = null
+    private const val LLAMA_PORT = 8080
+    private val llama = OwnedLoopbackProcess(listenerOpen = { portOpen(LLAMA_PORT) })
     private var tor: Process? = null
     private const val PREFS = "models"
     private const val CUSTOM = "custom"
@@ -312,16 +314,46 @@ object ProcessManager {
         }
     }
 
-    fun ensureLlama(ctx: Context) {
-        if (llamaAlive()) return
-        val m = installedModel(ctx) ?: return
+    fun ensureLlama(ctx: Context): Boolean = llama.ensure {
+        val m = installedModel(ctx) ?: return@ensure null
         val bin = File(ctx.applicationInfo.nativeLibraryDir, "libllamaserver.so")
-        val log = File(ctx.filesDir, "llama-server.log").outputStream()
-        llama = ProcessBuilder(bin.absolutePath, "-m", File(modelDir(ctx), m.file).absolutePath, "--host", "127.0.0.1", "--port", "8080", "-c", "16384")
-            .apply { redirectErrorStream(true); environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir }
-            .start().also { it.outputStream.use { } }
-        Thread { try { llama!!.inputStream.copyTo(log) } catch (_: Exception) {} }.start()
+        val log = try {
+            File(ctx.filesDir, "llama-server.log").outputStream()
+        } catch (_: Exception) {
+            return@ensure null
+        }
+        val owned = try {
+            ProcessBuilder(
+                bin.absolutePath,
+                "-m", File(modelDir(ctx), m.file).absolutePath,
+                "--host", "127.0.0.1",
+                "--port", LLAMA_PORT.toString(),
+                "-c", "16384",
+            ).apply {
+                redirectErrorStream(true)
+                environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir
+            }.start()
+        } catch (_: Exception) {
+            try { log.close() } catch (_: Exception) { }
+            return@ensure null
+        }
+        try {
+            owned.outputStream.close()
+        } catch (_: Exception) {
+            // llama-server does not read stdin; an already-closed pipe is fine.
+        }
+        Thread {
+            try {
+                owned.inputStream.use { input -> log.use { output -> input.copyTo(output) } }
+            } catch (_: Exception) {
+                try { log.close() } catch (_: Exception) { }
+            }
+        }.start()
+        owned
     }
+
+    fun awaitLlamaReady(timeoutMillis: Long = 90_000): Boolean =
+        llama.awaitReady(timeoutMillis)
 
     fun ensureTor(ctx: Context): Boolean {
         if (tor?.isAlive == true) return true
@@ -347,9 +379,8 @@ object ProcessManager {
         return torReady()
     }
 
-    private fun stopLlama() { llama?.destroy(); llama = null }
-    private fun llamaAlive() = portOpen(8080)
-    fun llamaReady() = portOpen(8080)
+    private fun stopLlama() = llama.stop()
+    fun llamaReady(): Boolean = llama.ready()
     fun torReady() = tor?.isAlive == true && portOpen(9050)
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }
