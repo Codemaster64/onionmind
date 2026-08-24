@@ -34,14 +34,7 @@ AUXILIARY_SOURCES = [
 
 # The only intentional per-platform differences. Everything else is identical by
 # construction. Keep this list short - each entry is a place drift can hide.
-WINDOWS_SUBS = [
-    ("PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser",
-     "PORTS  = (9150, 9050)                            # 9150 = Tor Browser, 9050 = tor daemon"),
-    ('Needs a tor daemon on 9050 (systemctl start tor) or Tor Browser on 9150.',
-     'Needs Tor Browser open (it owns SOCKS on 9150) or a tor daemon on 9050.'),
-    ('sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")',
-     'sys.exit("No Tor proxy on 9150/9050. Open Tor Browser and leave it running.")'),
-]
+WINDOWS_SUBS = []
 
 TARGETS = [
     # path,                     opening delimiter,        closing delimiter,  newline, subs

@@ -10,7 +10,11 @@ hardware, and every claim says how it was checked.
 
 ## Quick start
 
-**Windows** — run `onionmind-setup.cmd` or paste `install-onionmind.ps1` into PowerShell.
+**Windows** — extract the manually published `Onionmind-Windows-x64.zip`. It
+contains `Onionmind.exe`, `onionmind-bootstrap.cmd`, and
+`onionmind-bootstrap.ps1`. Run the bootstrap to inventory the machine offline,
+review the proposed component and network plan, and explicitly apply only the
+missing or out-of-policy items you want.
 **Linux** — `bash install-onionmind.sh` (Arch or Ubuntu/Debian; run as your normal user, it calls `sudo` where needed).
 
 The desktop entry point opens a native PySide6 workbench. For development:
@@ -23,6 +27,28 @@ python -m venv .venv
 
 There is no embedded browser, WebView, or local HTTP frontend in the desktop
 program. `tools/build-desktop.ps1` produces the standalone Windows artifact.
+Opening the desktop application makes no external request, starts no service,
+and performs no release or update check.
+
+There is no cloud CI or automatic release process. Tests and builds are explicit
+local commands:
+
+```text
+python build.py --check
+python tests/test_parser.py
+python tests/test_backends.py
+python tests/test_desktop_core.py
+python tests/test_installer_contracts.py
+.\tools\build-desktop.ps1 -Check -PythonExecutable python
+.\tools\build-desktop.ps1 -PythonExecutable python
+```
+
+A maintainer packages the resulting standalone bundle with both bootstrap files
+as `Onionmind-Windows-x64.zip`, verifies it locally, and manually attaches it to
+a release. The builder first audits its isolated dependency versions offline;
+it skips pip entirely when they satisfy `requirements-desktop.txt` and requires
+`-AllowDirectNetwork` before repairing anything. This repository is private, so
+its GitHub releases require sign-in and are not an anonymous distribution channel.
 
 By default you get **Qwen3.8-27B** where it fits in VRAM, and the fast small model where it
 doesn't. Override with `ONIONMIND_MODEL`:
@@ -63,24 +89,28 @@ The reserved **PYRE** tier is **Legacy / Collector**, for archived or
 special-edition models and older versions, for retro access and research
 archives, with the tagline **“Rise.”**
 
-The installer is re-runnable and resumes partial downloads, so a dropped connection just
-means running it again.
+The Windows bootstrap is re-runnable. Its default phase is an offline inventory:
+it compares installed versions against support ranges bundled in the bootstrap,
+without contacting a vendor to discover the latest version. It then shows which
+components are supported, missing, or out of policy. Downloads and service starts
+begin only after the user confirms the displayed apply plan.
 
-## What it installs
+## What the bootstrap manages
 
 | | |
 |---|---|
-| Ollama | via winget, plus a background server on `127.0.0.1:11434` |
-| Tor Browser | via winget, then **started automatically** — it owns the SOCKS proxy on 9150 |
-| Model weights | 10–16GB GGUF, picked to fit your GPU |
+| Offline inventory | local Onionmind, Ollama, Tor, Python/runtime, Node.js, and model state; no network request |
+| Ollama | offered when missing or outside the bundled supported range; the app only observes its loopback API until the user starts it |
+| Tor | optional for search and never started merely by opening Onionmind |
+| Model weights | 10–16GB GGUF, picked to fit the GPU and downloaded only after direct-network confirmation |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | local chat/search engine and compatibility CLI, written next to the weights |
 | `onionmind_desktop.py` | native PySide6 presentation and process orchestration |
 | `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Harness command construction |
 | `onionmind` + desktop icon | native project/session workbench |
 | `onionmind-chat` | compatibility alias for the same native workbench |
-| `onionmind-code "task"` | one-shot DeepSeek Harness headless task through Ollama |
-| `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
+| `onionmind-code "task"` | one-shot DeepSeek Harness headless task through Ollama after direct-network confirmation |
+| `onionmind-update` | explicitly invoked source/launcher updater; never scheduled or called at application startup and leaves model weights untouched |
 | Isolated desktop runtime | `requests`, `PySocks`, and `PySide6-Essentials` in `desktop-env` |
 
 Agent mode additionally requires a Node.js version accepted by the current DSH
@@ -92,8 +122,8 @@ check this before claiming Harness is ready.
 The desktop rewrite keeps three deliberately narrow seams:
 
 - `onionmind.py` owns Ollama/llama.cpp inference, streaming, image messages,
-  tool calls, and fail-closed Tor search. Existing CLI, Android, and Matchstick
-  paths continue to use this core.
+  tool calls, per-turn search permission, and fail-closed Tor search. Existing
+  CLI, Android, and Matchstick paths continue to use this core.
 - `onionmind_desktop_core.py` has no Qt dependency. It owns atomic JSON settings
   and sessions, Onionmind tier/display names, bounded workspace and Git snapshots,
   terminal parsing, and the exact DeepSeek Harness command. This layer is covered
@@ -101,6 +131,9 @@ The desktop rewrite keeps three deliberately narrow seams:
 - `onionmind_desktop.py` owns the Qt widget tree and asynchronous workers. Model
   generation, terminal commands, Git refreshes, model pulls, and Harness tasks
   stay off the UI thread; cancel actions terminate the corresponding operation.
+  Startup checks only local files, executable versions, and loopback services.
+  Tor search is opt-in per turn, while model pulls and Harness tasks require
+  separate direct-network confirmations.
 
 The application window is a native, resizable three-pane workbench: projects and
 sessions on the left; conversation, terminal, and composer in the centre; context,
@@ -108,8 +141,17 @@ changes, and activity on the right. Narrow windows collapse inspectors before th
 conversation. Keyboard focus, tooltips, visible selection, and standard controls
 remain available without a mouse.
 
-Ollama remains the model seam: discovery and pulls use its public local API and
-inference continues through `onionmind.py`. Harness remains the agent seam:
+Chat creates its assistant transcript block before worker startup and shows an
+accessible textual thinking indicator there. A single 280 ms Qt timer advances
+three small dots while the application is active; Windows' client-animation
+setting and `ONIONMIND_REDUCE_MOTION=1` disable the motion without hiding the
+state. The same block becomes the streamed answer on the first visible token, so
+hidden reasoning and Tor startup never leave a blank response row.
+
+Ollama remains the model seam: discovery and inference use its public local API.
+A pull is sent to that loopback API only after Onionmind explains that Ollama
+will download from its registry over the direct network and the user confirms.
+Harness remains the agent seam:
 
 ```text
 ollama launch dsh --model <raw-ollama-name> -- --profile headless "<task>"
@@ -120,6 +162,7 @@ SPARK, EMBER, BLAZE, and INFERNO are presentation metadata only. Harness output
 is streamed into the native transcript, and its working directory is the active
 project rather than the user's home directory.
 
+Onionmind requires a direct-network confirmation before starting that command.
 The stock DSH headless profile has no interactive approval answerer, so approval
 requests fail closed. Custom DSH profiles can alter that composition. Stop
 terminates the shell or Harness launcher managed by Onionmind; deliberately
@@ -179,13 +222,18 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 
 ## Web search over Tor
 
-The installer starts Tor Browser and waits for a circuit, so it is already up after a fresh
-install. Just **leave it open** — it owns the SOCKS proxy on port 9150. A standalone `tor`
-daemon on 9050 also works; the script tries both.
+Onionmind never opens Tor Browser. On Windows, after the user grants one-turn
+search permission, it can launch Tor Browser's bundled `tor.exe` directly with
+`CREATE_NO_WINDOW`; no Firefox or console window is created. The toolbar reports
+**Off**, **Starting**, or **Running · 9150**. An existing local proxy on 9150 or
+9050 is reused but never adopted or stopped. Onionmind stops only the hidden Tor
+process it started when the app closes. Ordinary app startup reports local proxy
+availability and makes no external readiness request or service start.
 
-The model decides when to search. Ask it something it already knows and it answers directly;
-ask for something current and it issues its own queries, reads the snippets, and cites them.
-In interactive chat, `/save notes.txt` exports the conversation so far.
+Search is off by default for every turn. After the user enables Tor search for a
+turn, the model may decide whether to issue queries, read snippets, and cite
+them. Without that opt-in, the search tool is unavailable and the turn remains
+local. In interactive chat, `/save notes.txt` exports the conversation so far.
 
 ### What protects you
 
@@ -196,22 +244,32 @@ In interactive chat, `/save notes.txt` exports the conversation so far.
   separate circuit. Without this every search shares one exit and they're trivially linkable.
 - **`socks5h://`** — DNS resolves through Tor. Plain `socks5` leaks every hostname to your
   ISP's resolver while appearing to work.
-- **Fails closed** — verified against `check.torproject.org`. If it isn't Tor, it exits rather
-  than searching in the clear.
+- **Fails closed** — a missing or unusable SOCKS proxy stops the search rather
+  than falling back to a direct request. No request to `check.torproject.org` is
+  made at startup; verification happens through the proxy only after one-turn
+  permission and an actual search tool call.
 - **Tor Browser's User-Agent** — blends into that crowd instead of being a unique fingerprint.
 
 ### The privacy boundary, precisely
 
-**In Chat mode, only searches leave your machine after installation.** Prompts,
-model reasoning, answers, project snapshots, and session files remain local.
-Search queries go to DuckDuckGo through Tor. Model pulls and application updates
-also require direct downloads when explicitly requested.
+**Opening Onionmind is quiet.** It makes no external request, starts no Tor or
+model service, and performs no release or update check. Prompts, model reasoning,
+answers, project snapshots, session files, and ordinary local inference remain
+on the machine.
+
+**In Chat mode, search requires per-turn opt-in.** When enabled on Windows, Tor
+starts as a background-only process if no local proxy is already listening, and
+search queries go to DuckDuckGo through it. A model pull is a separate confirmed action: the
+desktop talks to Ollama on loopback, then Ollama downloads weights directly from
+its registry. A manually invoked source update contacts GitHub and the package
+index directly. Hidden Tor is the only background network process Onionmind can
+start, and only after that explicit one-turn permission.
 
 **Agent mode has a different boundary.** DeepSeek Harness can execute repository
 tools and network-capable commands. Ollama's current DSH launcher does not accept
-Onionmind's custom Tor-provider patch, so Harness network traffic is direct. The
-desktop and CLI label this boundary instead of implying that arbitrary agent
-traffic is anonymized.
+Onionmind's custom Tor-provider patch, so Harness network traffic is direct.
+Onionmind shows this boundary and requires confirmation before each run instead
+of implying that arbitrary agent traffic is anonymized.
 
 ## GPU support on the live USB
 
@@ -319,7 +377,7 @@ machine is untouched. Extending anonymity means changing **the host**, not this 
 
 | Adversary | What actually helps |
 |---|---|
-| Ad networks, data brokers | Already handled — searches go over Tor, nothing else leaves |
+| Ad networks, data brokers | Local work stays local; user-enabled searches go over Tor. Confirmed downloads and Harness runs have separate direct-network boundaries. |
 | Your ISP / network admin | They see *that* you use Tor, not what you search. Bridges hide even that. |
 | The search engine | Handled — onion service, fresh circuit per query, no account |
 | Someone with your disk | Full-disk encryption, encrypted swap. Tor is irrelevant here. |
@@ -380,8 +438,10 @@ gateway makes leaks architectural rather than a matter of configuring things cor
   is visible to your ISP as Tor traffic even though contents aren't.
 - **VPN → Tor** — hides Tor use from your ISP, moves that trust to the VPN. **Tor → VPN** is
   usually a mistake: it gives the VPN a stable identity for your exit traffic.
-- **Per-app vs system-wide** — this tool proxies itself. Everything else on the box still goes
-  out directly, including OS telemetry, updaters, and your normal browser.
+- **Per-app vs system-wide** — only a user-enabled Onionmind search is proxied.
+  Confirmed model downloads and Harness traffic are direct, and everything else
+  on the box—including OS telemetry, third-party updaters, and the normal
+  browser—retains its own network path.
 
 ### Disk layer
 
@@ -406,8 +466,8 @@ gateway makes leaks architectural rather than a matter of configuring things cor
 |---|---|---|
 | `ONIONMIND_DIR` | env var | Where weights live. **Keep it on an NVMe.** |
 | `num_gpu` | Modelfile | `99` = all layers on GPU. Lower it if speed swings. |
-| `num_ctx` | Modelfile | `8192`. Each doubling costs ~1.5GB of KV cache. |
-| `num_predict` | `onionmind.py` | `8192`. **Do not lower.** See *empty response* below. |
+| `num_ctx` | Modelfile / request | `16384`. Each doubling costs ~1.5GB of KV cache on the reference model. |
+| `num_predict` | `onionmind.py` | `16384`. Keep it no larger than `num_ctx`. See *empty response* below. |
 | `MODEL` | `onionmind.py` | Which Ollama model the search agent talks to. |
 | `OLLAMA_MODELS` | env var | Blob store location. NVMe matters here too. |
 
@@ -454,8 +514,10 @@ Measured on the 9B with the same prompt:
 | 4096 | empty |
 | **-1 (unlimited)** | **full answer, 5514 tokens, `done_reason: stop`** |
 
-It needed 5514 tokens to reach its first word of answer. The tools ship `8192` for this
-reason. If you see empty responses, raise it — don't assume the model refused.
+It needed 5514 tokens to reach its first word of answer, and later models exhausted
+the former 8192-token ceiling. The tools now send `num_predict=16384` together with
+`num_ctx=16384`. If you still see an empty response, raise both together — don't
+assume the model refused.
 
 ### The model echoes your prompt, or leaks "You are a helpful assistant!"
 
@@ -486,11 +548,12 @@ DuckDuckGo blocks Tor exit nodes on its clearnet endpoint. The script prefers th
 service specifically to avoid this, and retries on a fresh circuit. If both fail, the exit is
 rate-limited — retry for a new circuit.
 
-### `No Tor proxy on 9150/9050`
+### `No verified Tor proxy is available`
 
-Tor Browser isn't running, or is still on its connect screen. Open it, wait for the circuit,
-retry. This message means the tool **refused to search** rather than leaking — working as
-intended.
+The installed Tor component could not start, connect, or pass the Tor check.
+Retry the one-turn search permission, or start a trusted local Tor service on
+9050/9150. This message means the tool **refused to search** rather than falling
+back to a direct request.
 
 ### Linux: `ollama create` fails with "no such file" on a path in your home directory
 
@@ -522,7 +585,9 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 
 | File | |
 |---|---|
-| `install-onionmind.ps1` | One-paste installer. Everything below is produced by it. |
+| `onionmind-bootstrap.cmd` | Double-click entry point for the Windows offline inventory and explicit apply flow. |
+| `onionmind-bootstrap.ps1` | Windows component/version inventory, plan, consent, and selective installation logic. |
+| `install-onionmind.ps1` | Deprecated compatibility installer; not the Windows release bootstrap. |
 | `onionmind.py` | Local inference/search core, compatibility CLI, and legacy-UI fallback. |
 | `onionmind_desktop.py` | Native PySide6 workbench and asynchronous process/UI adapters. |
 | `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
@@ -531,13 +596,17 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `android/` | The standalone APK: Kotlin app + pure-Kotlin port of the search agent (`:core`), Docker build from source. |
 | `build.py` | Single-sources all three desktop Python modules + icon payloads into the installers; `--check` flags drift. |
 | `pyproject.toml` / `requirements-desktop.txt` | Constrained native runtime and standalone-build dependencies. |
-| `tools/build-desktop.ps1` | PowerShell 5.1-compatible Nuitka standalone build and validation entry point. |
+| `tools/build-desktop.ps1` | PowerShell 5.1-compatible local Nuitka standalone build and validation entry point. No cloud workflow invokes it. |
 | `Modelfile` | Generated. Template, stop tokens, `num_gpu`, `num_ctx`. |
 | `logo.svg` / `logo-small.svg` | The mark. Small variant for favicons — the full one turns to mush below ~24px. |
 | `onionmind.ico` | The mark as Windows icon (16–256px), rendered from `logo.svg`. Regenerate: `rsvg-convert` each size + `convert` them into an ico (see `build.py`), then run `python build.py` to re-inject into the installers. |
 | `usb/` | **Matchstick** — the live-USB build kit: Tails-style amnesia + the host machine's GPU. See `usb/README.md`. |
 
 ## What has been verified
+
+All verification is run explicitly on a local development machine. The
+repository contains no GitHub Actions workflows, scheduled release job, or
+automatic update check.
 
 | | Windows | Linux |
 |---|---|---|
@@ -571,7 +640,8 @@ actual phone yet.
   binds to any Qwen3.8-27B build. It shares the base blob, costing ~900MB rather than a second
   full model. Verified reading shapes, colours and text from a test image.
 - **Function calling** works; that's what the search agent is built on.
-- **Context** is 8192 here against a native 262144. That's a RAM ceiling, not a config one.
+- **Context** is 16384 here against a native 262144. That remains a deliberate RAM ceiling;
+  raise response and context budgets together when a reasoning model still truncates.
 - **Quantization honesty**: the 12GB build reports as `IQ2_S`. Mixed-precision builds report
   their lowest tier, so the 3.69bpw average is plausible — but quality loss is real, and it can
   be loose with numbers. The Q4_K_M build is steadier when precision matters.

@@ -9,6 +9,8 @@ import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
 import java.net.URLDecoder
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
@@ -21,50 +23,66 @@ object Server {
     private val chatLock = Executors.newSingleThreadExecutor()
     private lateinit var ctx: Context
 
-    // Android shares loopback across apps: every other installed app can reach
-    // 127.0.0.1:8081. Without this, any of them could read the conversation,
-    // queue downloads, or turn Tor off. Generated once per process and pasted
-    // into the page at serve time, so only our own WebView can present it.
-    private val token: String = java.math.BigInteger(
-        130, java.security.SecureRandom()).toString(32)
+    private val random = SecureRandom()
+    private fun secret(): String = ByteArray(32).also { random.nextBytes(it) }.let {
+        Base64.getUrlEncoder().withoutPadding().encodeToString(it)
+    }
+
+    // Android shares loopback across apps: every installed app can connect to
+    // 127.0.0.1. The high-entropy page capability gates disclosure of a
+    // separate header token, keeping the API token out of the URL; neither is
+    // persisted.
+    private val apiToken = secret()
+    private val pageCapability = secret()
+    private val pagePath = "/app/$pageCapability"
+
+    /** The capability stays inside this process and is handed only to our WebView. */
+    fun pageUrl(): String = "http://127.0.0.1:$PORT$pagePath"
 
     fun start(context: Context) {
         if (http != null) return
         ctx = context.applicationContext
         http = object : NanoHTTPD("127.0.0.1", PORT) {
             override fun serve(session: IHTTPSession): Response {
-                return try {
-                    if (session.uri.startsWith("/api/") &&
-                        session.headers["x-onionmind-token"] != token)
-                        return error(Response.Status.FORBIDDEN, "bad or missing token")
-                    when (session.uri) {
-                        "/" -> page()
-                        "/api/status" -> status()
-                        "/api/install" -> install(session)
-                        "/api/select" -> select(session)
-                        "/api/remove" -> remove(session)
-                        "/api/tor" -> tor(session)
-                        "/api/chat" -> chat(session)
-                        else -> NanoHTTPD.newFixedLengthResponse(
-                            Response.Status.NOT_FOUND, "text/plain", "?")
+                val response = try {
+                    when {
+                        session.uri == pagePath -> page()
+                        session.uri == "/" -> notFound()
+                        session.uri in API_PATHS &&
+                            session.headers["x-onionmind-token"] != apiToken ->
+                            error(Response.Status.FORBIDDEN, "bad or missing token")
+                        session.uri == "/api/status" -> status()
+                        session.uri == "/api/install" -> install(session)
+                        session.uri == "/api/select" -> select(session)
+                        session.uri == "/api/remove" -> remove(session)
+                        session.uri == "/api/chat" -> chat(session)
+                        else -> notFound()
                     }
                 } catch (e: Exception) {
                     error(Response.Status.INTERNAL_ERROR, rootMessage(e))
                 }
+                return noStore(response)
             }
         }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, true) }
     }
 
     private fun page(): Response {
         val html = ctx.assets.open("index.html").readBytes()
-            .toString(Charsets.UTF_8).replace("__ONIONMIND_TOKEN__", token)
+            .toString(Charsets.UTF_8).replace("__ONIONMIND_TOKEN__", apiToken)
             .toByteArray(Charsets.UTF_8)
-        // no-store matters: the token changes every process start, and a WebView
-        // serving a cached page would present a stale one and 403 on every call.
         return NanoHTTPD.newFixedLengthResponse(
             Response.Status.OK, "text/html", html.inputStream(), html.size.toLong())
-            .apply { addHeader("Cache-Control", "no-store") }
     }
+
+    private fun noStore(response: Response): Response = response.apply {
+        // Both capabilities change at process start. Cached content could leak
+        // the old API token or make the WebView repeatedly fail authentication.
+        addHeader("Cache-Control", "no-store")
+        addHeader("Pragma", "no-cache")
+    }
+
+    private fun notFound(): Response = NanoHTTPD.newFixedLengthResponse(
+        Response.Status.NOT_FOUND, "text/plain", "")
 
     private fun json(body: String): Response =
         NanoHTTPD.newFixedLengthResponse(Response.Status.OK, "application/json", body)
@@ -81,8 +99,7 @@ object Server {
             .getMemoryInfo(memory)
         val storage = StatFs(ctx.filesDir.path).availableBytes / (1024 * 1024)
         return json(buildJsonObject {
-            put("torEnabled", ProcessManager.torEnabled(ctx))
-            put("tor", ProcessManager.torEnabled(ctx) && ProcessManager.torReady())
+            put("tor", ProcessManager.torReady())
             put("llama", ProcessManager.llamaReady())
             put("model", model?.id
                 ?: (if (ProcessManager.downloadProgress >= 0.0) ProcessManager.downloadId else "none"))
@@ -135,18 +152,8 @@ object Server {
         else error(Response.Status.BAD_REQUEST, "unknown model")
     }
 
-    private fun tor(session: IHTTPSession): Response {
-        val files = HashMap<String, String>(); session.parseBody(files)
-        val raw = session.parms["enabled"] ?: formValue(files["postData"] ?: files["content"], "enabled")
-        if (raw.isNullOrBlank()) return error(Response.Status.BAD_REQUEST, "enabled?")
-        val enabled = raw.equals("true", ignoreCase = true)
-        ProcessManager.setTorEnabled(ctx, enabled)
-        return json(buildJsonObject { put("ok", true); put("enabled", enabled) }.toString())
-    }
-
-    /** null means ABSENT. It used to return "", which made every `?: return
-     *  error(...)` guard dead code - most seriously in tor(), where a request
-     *  with no `enabled` field read as `false` and silently switched Tor OFF. */
+    /** null means ABSENT so callers can distinguish a missing field from an
+     *  explicitly empty field. */
     private fun formValue(body: String?, name: String): String? =
         body.orEmpty().split('&').asSequence()
             .map { it.split('=', limit = 2) }
@@ -161,15 +168,23 @@ object Server {
         // form fields into parms - it drops the whole body into postData. Reading
         // files["messages"] alone always came back null, i.e. the model was asked
         // an EMPTY conversation and answered something unrelated to the question.
-        val raw = session.parms["messages"]
-            ?: formValue(files["postData"] ?: files["content"], "messages")
+        val body = files["postData"] ?: files["content"]
+        val raw = session.parms["messages"] ?: formValue(body, "messages")
+        // Permission belongs to this request only. Missing, malformed, and all
+        // non-true values fail closed; nothing is saved in preferences.
+        val allowSearch = (session.parms["allowSearch"]
+            ?: formValue(body, "allowSearch")).equals("true", ignoreCase = true)
         val messages = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
             .map { it.jsonObject }.toMutableList()
         // the UI sends plain {role, content} turns; the agent extends the list
         ProcessManager.ensureLlama(ctx)
         val answer = try {
-            chatLock.submit<String> { Agent.turn(LLAMA, messages) { query ->
-                if (!ProcessManager.torEnabled(ctx)) "(web search is disabled because Tor is off)"
+            chatLock.submit<String> { Agent.turn(LLAMA, messages, allowSearch) { query ->
+                // Starting Tor is lazy: checking the one-turn box merely makes
+                // the tool available. No Tor process or network is touched
+                // unless the model actually asks to search during this turn.
+                if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady())
+                    "(Tor could not start safely; web search was not performed)"
                 else Agent.webSearch(query)
             } }.get()
         } catch (e: ExecutionException) {
@@ -184,5 +199,11 @@ object Server {
     private fun rootMessage(error: Throwable): String =
         generateSequence(error) { it.cause }
             .lastOrNull()?.let { it.message?.takeIf(String::isNotBlank) ?: it.toString() }
+            ?.replace(apiToken, "[redacted]")
+            ?.replace(pageCapability, "[redacted]")
             ?: "unknown server error"
+
+    private val API_PATHS = setOf(
+        "/api/status", "/api/install", "/api/select", "/api/remove", "/api/chat"
+    )
 }

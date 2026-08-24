@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "onionmind-desktop"
-version = "1.0.0"
+version = "1.4.0"
 description = "A private, local-first coding workbench powered by Ollama and DeepSeek Harness."
 readme = "README.md"
 requires-python = ">=3.10"

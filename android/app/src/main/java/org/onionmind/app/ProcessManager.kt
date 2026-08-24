@@ -133,32 +133,40 @@ object ProcessManager {
         val m = installedModel(ctx) ?: return
         val bin = File(ctx.applicationInfo.nativeLibraryDir, "libllamaserver.so")
         val log = File(ctx.filesDir, "llama-server.log").outputStream()
-        llama = ProcessBuilder(bin.absolutePath, "-m", File(modelDir(ctx), m.file).absolutePath, "--host", "127.0.0.1", "--port", "8080", "-c", "8192")
+        llama = ProcessBuilder(bin.absolutePath, "-m", File(modelDir(ctx), m.file).absolutePath, "--host", "127.0.0.1", "--port", "8080", "-c", "16384")
             .apply { redirectErrorStream(true); environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir }
             .start().also { it.outputStream.use { } }
         Thread { try { llama!!.inputStream.copyTo(log) } catch (_: Exception) {} }.start()
     }
 
-    fun ensureTor(ctx: Context) {
-        if (!torEnabled(ctx)) return
-        if (torAlive()) return
+    fun ensureTor(ctx: Context): Boolean {
+        if (tor?.isAlive == true) return true
+        tor = null
+        // Never mistake an arbitrary app's loopback listener for our Tor. If
+        // 9050 is occupied, fail closed instead of sending a query through an
+        // unverified proxy or racing a second daemon for the same port.
+        if (portOpen(9050)) return false
         val dir = File(ctx.filesDir, "tor").apply { mkdirs() }
         File(dir, "torrc").writeText("SocksPort 9050\nDataDirectory ${File(dir, "data").apply { mkdirs() }.absolutePath}\nCookieAuthentication 0\nAvoidDiskWrites 1\nLog notice file ${File(dir, "log").absolutePath}")
         tor = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libtor.so").absolutePath, "-f", File(dir, "torrc").absolutePath).redirectErrorStream(true).start()
         Thread { try { tor!!.inputStream.readBytes() } catch (_: Exception) {} }.start()
+        return true
     }
 
-    fun torEnabled(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("torEnabled", true)
-    fun setTorEnabled(ctx: Context, enabled: Boolean) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("torEnabled", enabled).apply()
-        if (enabled) Thread { ensureTor(ctx) }.start() else { tor?.destroy(); tor = null }
+    fun awaitTorReady(timeoutMillis: Long = 90_000): Boolean {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (torReady()) return true
+            if (tor?.isAlive != true) return false
+            Thread.sleep(250)
+        }
+        return torReady()
     }
 
     private fun stopLlama() { llama?.destroy(); llama = null }
     private fun llamaAlive() = portOpen(8080)
-    private fun torAlive() = portOpen(9050)
     fun llamaReady() = portOpen(8080)
-    fun torReady() = portOpen(9050)
+    fun torReady() = tor?.isAlive == true && portOpen(9050)
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }
 
