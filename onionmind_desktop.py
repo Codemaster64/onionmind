@@ -57,6 +57,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -128,6 +129,7 @@ QLabel#attachmentLabel { color: #cdbbd5; background: #2c252e; border: 1px solid 
 QLabel#success { color: #84c08f; }
 QLabel#danger { color: #d88675; }
 QLabel#accent { color: #c3a1d3; }
+QLabel#thinkingLabel { color: #c9c1b7; }
 QPushButton, QToolButton, QComboBox, QLineEdit {
     background: #24221f;
     border: 1px solid #45413b;
@@ -235,6 +237,190 @@ def _brand_runtime_text(value: Any) -> str:
     for pattern, replacement in _BRAND_REPLACEMENTS:
         text = pattern.sub(replacement, text)
     return text
+
+
+_THINK_TAG = re.compile(r"<\s*(/?)\s*think(?:\s[^>]*)?>", re.IGNORECASE)
+_REASONING_FIELDS = frozenset(
+    {"analysis", "reasoning", "reasoning_content", "thinking"}
+)
+
+
+def _strip_thinking(text: Any) -> str:
+    """Fail closed when removing completed or truncated reasoning blocks."""
+
+    value = _as_text(text)
+    visible: list[str] = []
+    cursor = 0
+    depth = 0
+    for tag in _THINK_TAG.finditer(value):
+        closing = bool(tag.group(1))
+        if closing:
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    cursor = tag.end()
+            else:
+                visible.clear()
+                cursor = tag.end()
+            continue
+        if depth == 0:
+            visible.append(value[cursor:tag.start()])
+        depth += 1
+    if depth == 0:
+        tail = value[cursor:]
+        partial = tail.casefold().find("<think")
+        visible.append(tail[:partial] if partial >= 0 else tail)
+    return "".join(visible).strip()
+
+
+def _sanitize_assistant_messages(
+    messages: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy history while preserving tool protocol and dropping reasoning."""
+
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        item = copy.deepcopy(dict(message))
+        if item.get("role") == "assistant":
+            for key in list(item):
+                if isinstance(key, str) and key.casefold() in _REASONING_FIELDS:
+                    item.pop(key, None)
+            content = item.get("content")
+            item["content"] = _sanitize_assistant_content(content)
+        sanitized.append(item)
+    return sanitized
+
+
+def _sanitize_assistant_content(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_thinking(value)
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_assistant_content(item) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_assistant_content(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_assistant_content(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _conversation_markdown(
+    title: str,
+    model: str,
+    workspace: Optional[str],
+    messages: Iterable[dict[str, Any]],
+) -> str:
+    """Format a local export after defensively cleaning legacy history."""
+
+    lines = [f"# {title}", "", f"- Model: `{model}`"]
+    if workspace:
+        lines.append(f"- Workspace: `{workspace}`")
+    lines.extend(("", "---", ""))
+    for message in _sanitize_assistant_messages(messages):
+        role = _as_text(message.get("role", "message"))
+        heading = {"user": "Developer", "assistant": "Onionmind", "tool": "Local tool"}.get(
+            role, role.title()
+        )
+        content = message.get("content")
+        if not isinstance(content, str):
+            content = "[local image attachment]"
+        lines.extend((f"## {heading}", "", content, ""))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+class ThinkingStreamFilter:
+    """Hide ``<think>`` blocks without leaking split tag fragments.
+
+    The model transport is free to divide text at any byte boundary.  Keep only
+    the small amount of undecided tag text between calls; reasoning itself is
+    discarded instead of accumulated.  Tool use can cause several model
+    responses to share one callback, so opening tags remain detectable after
+    ordinary answer text has already streamed.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._state = "leading"
+        self._pending = ""
+        self._finished = False
+
+    @staticmethod
+    def _trailing_marker_prefix(text: str, marker: str) -> str:
+        maximum = min(len(text), len(marker) - 1)
+        for length in range(maximum, 0, -1):
+            if text.endswith(marker[:length]):
+                return text[-length:]
+        return ""
+
+    def feed(self, chunk: Any) -> str:
+        """Return only newly visible answer text from one transport chunk."""
+        if self._finished:
+            return ""
+        data = _as_text(chunk)
+        visible: list[str] = []
+
+        while data:
+            if self._state == "visible":
+                combined = self._pending + data
+                self._pending = ""
+                open_at = combined.find(self._OPEN)
+                if open_at < 0:
+                    suffix = self._trailing_marker_prefix(combined, self._OPEN)
+                    if suffix:
+                        visible.append(combined[:-len(suffix)])
+                        self._pending = suffix
+                    else:
+                        visible.append(combined)
+                    break
+                visible.append(combined[:open_at])
+                data = combined[open_at + len(self._OPEN):]
+                self._state = "thinking"
+                continue
+
+            if self._state == "leading":
+                self._pending += data
+                data = ""
+                content = self._pending.lstrip()
+                if not content:
+                    continue
+                if self._OPEN.startswith(content):
+                    if content == self._OPEN:
+                        self._pending = ""
+                        self._state = "thinking"
+                    continue
+                if content.startswith(self._OPEN):
+                    data = content[len(self._OPEN):]
+                    self._pending = ""
+                    self._state = "thinking"
+                    continue
+                data = self._pending
+                self._pending = ""
+                self._state = "visible"
+                continue
+
+            combined = self._pending + data
+            self._pending = ""
+            close_at = combined.find(self._CLOSE)
+            if close_at < 0:
+                self._pending = self._trailing_marker_prefix(combined, self._CLOSE)
+                break
+            data = combined[close_at + len(self._CLOSE):]
+            self._state = "visible"
+
+        return "".join(visible)
+
+    def finish(self) -> None:
+        """Close a completed stream without exposing an undecided tag prefix."""
+        self._pending = ""
+        self._state = "finished"
+        self._finished = True
+
+    def abort(self) -> None:
+        """Drop buffered model output after stop or failure."""
+        self.finish()
 
 
 def _friendly_error(core: Any, exc: BaseException) -> str:
@@ -485,6 +671,118 @@ class StatusPill(QFrame):
         self.setAccessibleName(f"{self.prefix} status: {text}")
 
 
+def _ui_animations_enabled() -> bool:
+    override = os.environ.get("ONIONMIND_REDUCE_MOTION", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        enabled = ctypes.c_int(1)
+        # SPI_GETCLIENTAREAANIMATION follows Windows' Animation effects setting.
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+            return bool(enabled.value)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
+class ThinkingDots(QWidget):
+    """A tiny, low-cost progress cue; adjacent text carries the meaning."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._frame = 0
+        self.setFixedSize(34, 16)
+        self.setAccessibleName("Thinking progress")
+
+    def advance(self) -> None:
+        self._frame = (self._frame + 1) % 3
+        self.update()
+
+    def reset(self) -> None:
+        self._frame = 0
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index, x in enumerate((6, 17, 28)):
+            active = index == self._frame
+            painter.setBrush(QColor("#b791c9" if active else "#625b63"))
+            radius = 3.0 if active else 2.5
+            painter.drawEllipse(QPointF(float(x), 8.0), radius, radius)
+
+
+class ThinkingIndicator(QWidget):
+    """Accessible pending state that becomes static when motion is reduced."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._running = False
+        self._motion_enabled = _ui_animations_enabled()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 1, 0, 2)
+        layout.setSpacing(6)
+        self.label = QLabel("Thinking")
+        self.label.setObjectName("thinkingLabel")
+        self.dots = ThinkingDots(self)
+        layout.addWidget(self.label)
+        layout.addWidget(self.dots)
+        layout.addStretch(1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(280)
+        self.timer.timeout.connect(self.dots.advance)
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._application_state_changed)
+        self.setAccessibleName("Onionmind is thinking")
+        self.setAccessibleDescription("A local response is pending")
+        self.hide()
+
+    def start(self, text: str = "Thinking") -> None:
+        self._running = True
+        self.set_label(text)
+        self.dots.reset()
+        self.show()
+        self._sync_timer()
+
+    def stop(self) -> None:
+        self._running = False
+        self.timer.stop()
+        self.hide()
+
+    def set_label(self, text: str) -> None:
+        label = text.strip() or "Thinking"
+        self.label.setText(label)
+        self.setAccessibleName(f"Onionmind is {label.lower()}")
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._sync_timer()
+
+    def hideEvent(self, event: Any) -> None:
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def _application_state_changed(self, state: Qt.ApplicationState) -> None:
+        del state
+        self._sync_timer()
+
+    def _sync_timer(self) -> None:
+        app = QApplication.instance()
+        active = app is None or app.applicationState() == Qt.ApplicationState.ApplicationActive
+        should_run = self._running and self._motion_enabled and self.isVisible() and active
+        if should_run:
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+
 class ComposerEdit(QTextEdit):
     sendRequested = Signal()
     filesDropped = Signal(list)
@@ -568,7 +866,10 @@ class MessageBlock(QWidget):
         self.body.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._target_body_width = max(520, self.body.fontMetrics().horizontalAdvance("0" * 74))
         self.set_reading_width(self._target_body_width)
-        self.body.setAccessibleName(f"{who.text()} message")
+        self._author_name = who.text()
+        self.body.setAccessibleName(f"{self._author_name} message")
+        self.thinking = ThinkingIndicator(self)
+        column.addWidget(self.thinking)
         column.addWidget(self.body)
         outer.addLayout(column, 1)
 
@@ -577,14 +878,37 @@ class MessageBlock(QWidget):
         return self._text
 
     def set_text(self, text: str) -> None:
+        self.stop_thinking()
         self._text = text
         self.body.setText(text)
         self._sync_body_height()
 
     def append_text(self, text: str) -> None:
+        if text:
+            self.stop_thinking()
         self._text += text
         self.body.setText(self._text)
         self._sync_body_height()
+
+    def start_thinking(self, text: str = "Thinking") -> None:
+        self._text = ""
+        self.body.clear()
+        self.body.hide()
+        self.thinking.start(text)
+        self.setAccessibleName(self.thinking.accessibleName())
+        self.updateGeometry()
+
+    def set_pending_label(self, text: str) -> None:
+        if self.thinking._running:
+            self.thinking.set_label(text)
+            self.setAccessibleName(self.thinking.accessibleName())
+
+    def stop_thinking(self) -> None:
+        if self.thinking._running or not self.thinking.isHidden():
+            self.thinking.stop()
+            self.body.show()
+            self.setAccessibleName(f"{self._author_name} message")
+            self._sync_body_height()
 
     def set_reading_width(self, available_width: int) -> None:
         body_width = max(240, min(self._target_body_width, available_width))
@@ -719,16 +1043,33 @@ class SessionBridge:
                 self.store = None
         self.fallback = QSettings(APP_NAME, APP_ID)
 
+    @staticmethod
+    def _clean_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _sanitize_assistant_messages(messages)
+
+    @classmethod
+    def _clean_session(cls, session: Any) -> Any:
+        messages = cls._clean_messages(_field(session, "messages", ()) or ())
+        if dataclasses.is_dataclass(session):
+            return dataclasses.replace(session, messages=messages)
+        if isinstance(session, dict):
+            cleaned = copy.deepcopy(session)
+            cleaned["messages"] = messages
+            return cleaned
+        setattr(session, "messages", messages)
+        return session
+
     def create(self, title: str, model: str, workspace: Optional[str], messages: Iterable[dict[str, Any]]) -> Any:
+        clean_messages = self._clean_messages(messages)
         if self.store is not None:
-            return self.store.create(title=title, model=model, workspace=workspace, messages=tuple(messages))
+            return self.store.create(title=title, model=model, workspace=workspace, messages=clean_messages)
         now = _now_iso()
         return {
             "id": uuid.uuid4().hex,
             "title": title,
             "model": model,
             "workspace": workspace,
-            "messages": list(messages),
+            "messages": clean_messages,
             "created_at": now,
             "updated_at": now,
         }
@@ -736,15 +1077,19 @@ class SessionBridge:
     def list(self) -> list[Any]:
         if self.store is not None:
             try:
-                return list(self.store.list())
+                return [self._clean_session(item) for item in self.store.list()]
             except Exception:
                 return []
         try:
-            return list(json.loads(self.fallback.value("sessions", "[]")))
+            return [
+                self._clean_session(item)
+                for item in json.loads(self.fallback.value("sessions", "[]"))
+            ]
         except (TypeError, ValueError):
             return []
 
     def save(self, session: Any, *, title: str, model: str, workspace: Optional[str], messages: list[dict[str, Any]]) -> Any:
+        clean_messages = self._clean_messages(messages)
         if self.store is not None:
             if dataclasses.is_dataclass(session):
                 session = dataclasses.replace(
@@ -752,14 +1097,14 @@ class SessionBridge:
                     title=title,
                     model=model,
                     workspace=workspace,
-                    messages=list(messages),
+                    messages=clean_messages,
                 )
             else:
                 for key, value in {
                     "title": title,
                     "model": model,
                     "workspace": workspace,
-                    "messages": tuple(messages),
+                    "messages": clean_messages,
                 }.items():
                     setattr(session, key, value)
             return self.store.save(session)
@@ -768,7 +1113,7 @@ class SessionBridge:
             title=title,
             model=model,
             workspace=workspace,
-            messages=list(messages),
+            messages=clean_messages,
             updated_at=_now_iso(),
         )
         sessions = [s for s in self.list() if _field(s, "id") != payload["id"]]
@@ -1544,7 +1889,10 @@ class ModelManagerDialog(QDialog):
         layout = QVBoxLayout(self)
         heading = QLabel("Onionmind models")
         heading.setObjectName("brand")
-        copy_label = QLabel("Choose from models installed on this machine, or add another Onionmind model locally.")
+        copy_label = QLabel(
+            "Installed model identifiers stay visible. Pulling asks the local model service "
+            "to download directly from its configured registry; that download is not Tor-routed."
+        )
         copy_label.setObjectName("meta")
         copy_label.setWordWrap(True)
         layout.addWidget(heading)
@@ -1600,6 +1948,18 @@ class ModelManagerDialog(QDialog):
         name = self.model_name.text().strip()
         if not name:
             self.progress.setFormat("Enter an Onionmind model name")
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Direct model download",
+            "The local model service will download this model directly from its "
+            "configured registry. This is not Tor-routed and exposes this machine's "
+            "network address. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.progress.setFormat("Download cancelled")
             return
         self.pull_button.setEnabled(False)
         self.model_name.setEnabled(False)
@@ -1704,6 +2064,8 @@ class OnionmindWindow(QMainWindow):
         self.harness_process: Optional[QProcess] = None
         self.harness_output = ""
         self.harness_generation = 0
+        self.tor_probe_generation = 0
+        self.tor_phase = "off"
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -1714,6 +2076,10 @@ class OnionmindWindow(QMainWindow):
         else:
             self._restore_state()
             self._probe_services()
+            self.tor_liveness_timer = QTimer(self)
+            self.tor_liveness_timer.setInterval(2500)
+            self.tor_liveness_timer.timeout.connect(self._poll_tor_liveness)
+            self.tor_liveness_timer.start()
 
     def _build_window(self) -> None:
         self.setWindowTitle("Onionmind — private local workbench")
@@ -1796,8 +2162,10 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.model_combo)
         self.model_status = StatusPill("Model", "Checking", "busy")
         toolbar_layout.addWidget(self.model_status)
-        self.tor_status = StatusPill("Tor", "Checking", "busy")
-        self.tor_status.setToolTip("Tor search state is separate from Onionmind inference")
+        self.tor_status = StatusPill("Tor", "Off", "idle")
+        self.tor_status.setToolTip(
+            "Local background Tor state. Onionmind starts it without a browser window only after you allow search for a turn."
+        )
         toolbar_layout.addWidget(self.tor_status)
 
         terminal_toggle = QToolButton()
@@ -1940,6 +2308,13 @@ class OnionmindWindow(QMainWindow):
             "Onionmind Agent protected actions stop safely"
         )
         controls.addWidget(self.approval_state)
+        self.search_consent = QCheckBox("Allow Tor search this turn")
+        self.search_consent.setChecked(False)
+        self.search_consent.setToolTip(
+            "One-turn permission. If needed, Onionmind starts Tor in the background without opening Tor Browser."
+        )
+        self.search_consent.setAccessibleName("Allow Tor web search for the next Chat turn only")
+        controls.addWidget(self.search_consent)
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
@@ -2002,22 +2377,25 @@ class OnionmindWindow(QMainWindow):
         worker.signals.result.connect(self._model_probe_complete)
         worker.signals.error.connect(lambda message: self._model_probe_failed(message))
 
-        checker = getattr(self.core, "tor_check", None)
+        checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
-            self.tor_status.set_status("Not checked", "idle")
+            self.tor_status.set_status("Off", "idle")
             return
+        self.tor_probe_generation += 1
+        generation = self.tor_probe_generation
+        self.tor_phase = "probing"
 
         def tor_probe(signals: WorkerSignals) -> Any:
             del signals
-            checker()
-            return getattr(self.core, "_port", None)
+            return checker()
 
         tor_worker = self._start_worker(tor_probe)
         tor_worker.signals.result.connect(
-            lambda port: self.tor_status.set_status(f"Ready · {port}" if port else "Ready", "good")
+            lambda port, value=generation: self._tor_probe_complete(port, value)
         )
-        tor_worker.signals.result.connect(lambda _: self.inspector.append_activity("Tor readiness verified separately"))
-        tor_worker.signals.error.connect(lambda message: self._tor_probe_failed(message))
+        tor_worker.signals.error.connect(
+            lambda message, value=generation: self._tor_probe_failed(message, value)
+        )
 
     def _start_worker(self, fn: Callable[[WorkerSignals], Any]) -> SafeWorker:
         worker = SafeWorker(fn, self.core)
@@ -2047,10 +2425,106 @@ class OnionmindWindow(QMainWindow):
         self.set_status(message)
         self.inspector.append_activity(f"Onionmind inference unavailable: {message}")
 
-    def _tor_probe_failed(self, message: str) -> None:
-        self.tor_status.set_status("Not ready", "bad")
-        self.tor_status.setToolTip(message + " Search fails closed and does not fall back to a direct request.")
-        self.inspector.append_activity("Tor not ready; Chat search will fail closed")
+    def _tor_probe_failed(self, message: str, generation: Optional[int] = None) -> None:
+        if generation is not None and (
+            generation != self.tor_probe_generation or self.tor_phase != "probing"
+        ):
+            return
+        self.tor_phase = "off"
+        self.tor_status.set_status("Off", "idle")
+        self.tor_status.setToolTip(
+            message + " Onionmind did not make an external request; search remains off."
+        )
+        self.inspector.append_activity("Background Tor is off; Chat remains local-only")
+
+    def _tor_probe_complete(self, port: Any, generation: Optional[int] = None) -> None:
+        if generation is not None and (
+            generation != self.tor_probe_generation or self.tor_phase != "probing"
+        ):
+            return
+        self._show_local_tor_state(port)
+
+    def _show_local_tor_state(self, port: Any) -> None:
+        managed = getattr(self.core, "_managed_tor_process", None)
+        try:
+            managed_running = managed is not None and managed.poll() is None
+        except Exception:
+            managed_running = False
+        if managed_running and not port:
+            stop = getattr(self.core, "stop_managed_tor", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception:
+                    pass
+            managed_running = False
+        verified = bool(port and getattr(self.core, "_port", None) == port)
+        if port and (managed_running or verified):
+            self.tor_phase = "running"
+            self.tor_status.set_status(f"Running · {port}", "good")
+            if managed_running:
+                self.tor_status.setToolTip(
+                    "Onionmind's Tor process is running in the background; no Tor Browser or console window is open."
+                )
+                self.inspector.append_activity(f"Onionmind-owned background Tor running on local port {port}")
+            else:
+                self.tor_status.setToolTip(
+                    "A pre-existing local proxy was verified as Tor. Onionmind did not start or adopt it."
+                )
+                self.inspector.append_activity(f"Pre-existing local Tor proxy verified on port {port}")
+        elif port:
+            self.tor_phase = "proxy"
+            self.tor_status.set_status(f"Proxy · {port}", "warn")
+            self.tor_status.setToolTip(
+                "A local SOCKS listener was detected but not externally verified. Search still fails closed."
+            )
+            self.inspector.append_activity(f"Unverified local SOCKS listener detected on port {port}")
+        else:
+            self.tor_phase = "off"
+            self.tor_status.set_status("Off", "idle")
+            self.tor_status.setToolTip(
+                "Tor is off. Onionmind starts it without a browser window only after one-turn search permission."
+            )
+            self.inspector.append_activity("Background Tor is off; Chat remains local-only")
+
+    def _poll_tor_liveness(self) -> None:
+        """Keep the only Tor indicator honest using local process/socket state."""
+        if self.tor_phase not in ("running", "proxy"):
+            return
+        managed = getattr(self.core, "_managed_tor_process", None)
+        managed_exited = False
+        if managed is not None:
+            try:
+                managed_exited = managed.poll() is not None
+            except Exception:
+                managed_exited = True
+            if managed_exited:
+                stop = getattr(self.core, "stop_managed_tor", None)
+                if callable(stop):
+                    try:
+                        stop()
+                    except Exception:
+                        pass
+        probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = probe() if callable(probe) else None
+        except Exception:
+            port = None
+        if managed_exited:
+            self._show_local_tor_state(port)
+            return
+        if not port:
+            try:
+                setattr(self.core, "_port", None)
+            except Exception:
+                pass
+            self._show_local_tor_state(None)
+        elif getattr(self.core, "_port", None) not in (None, port):
+            try:
+                setattr(self.core, "_port", None)
+            except Exception:
+                pass
+            self._show_local_tor_state(port)
 
     def _describe_model(self, raw_id: str) -> str:
         helper = getattr(self.desktop_core, "describe_model", None) if self.desktop_core else None
@@ -2112,10 +2586,13 @@ class OnionmindWindow(QMainWindow):
         self.mode = mode
         if mode == "chat":
             self.approval_state.hide()
-            self.disclosure.setText("Private on-device chat · search is the only Tor-routed exception")
+            self.search_consent.show()
+            self.disclosure.setText("Private local chat · Tor search needs one-turn permission")
             self.composer.setPlaceholderText("Ask Onionmind anything…")
         else:
             self.approval_state.show()
+            self.search_consent.setChecked(False)
+            self.search_consent.hide()
             self.disclosure.setText("Early access · Agent network access is separate from Tor search")
             self.composer.setPlaceholderText("Describe what you want Onionmind Agent to change…")
         self.settings_data["mode"] = mode
@@ -2301,6 +2778,10 @@ class OnionmindWindow(QMainWindow):
         if not self.chat_messages:
             return True
         try:
+            # This is the final persistence boundary. A live tool round keeps
+            # its raw structure in the worker's private history until it has
+            # completed; only the copy owned by the UI is cleaned here.
+            self.chat_messages = _sanitize_assistant_messages(self.chat_messages)
             title = self._session_title()
             model = self.current_model_id()
             if self.current_session is None:
@@ -2376,19 +2857,14 @@ class OnionmindWindow(QMainWindow):
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(".md")
-        lines = [f"# {self._session_title()}", "", f"- Model: `{self._describe_model(self.current_model_id())}`"]
-        if self.workspace:
-            lines.append(f"- Workspace: `{self.workspace}`")
-        lines.extend(("", "---", ""))
-        for message in self.chat_messages:
-            role = _as_text(message.get("role", "message"))
-            heading = {"user": "Developer", "assistant": "Onionmind", "tool": "Local tool"}.get(role, role.title())
-            content = message.get("content")
-            if not isinstance(content, str):
-                content = "[local image attachment]"
-            lines.extend((f"## {heading}", "", content, ""))
+        document = _conversation_markdown(
+            self._session_title(),
+            self._describe_model(self.current_model_id()),
+            self.workspace,
+            self.chat_messages,
+        )
         try:
-            destination.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            destination.write_text(document, encoding="utf-8")
         except OSError as exc:
             self.set_status(f"Could not export conversation: {exc}")
             QMessageBox.warning(self, "Export failed", f"Could not write the export.\n\n{exc}")
@@ -2412,7 +2888,9 @@ class OnionmindWindow(QMainWindow):
             self.set_status("That saved session is no longer available.")
             return
         self.current_session = session
-        self.chat_messages = [dict(message) for message in (_field(session, "messages", ()) or ())]
+        self.chat_messages = _sanitize_assistant_messages(
+            _field(session, "messages", ()) or ()
+        )
         self.transcript.clear()
         for message in self.chat_messages:
             role = message.get("role")
@@ -2446,6 +2924,20 @@ class OnionmindWindow(QMainWindow):
             return
         if not task:
             task = "Review the attached local files."
+        if self.mode == "agent":
+            answer = QMessageBox.warning(
+                self,
+                "Run Onionmind Agent directly?",
+                "Onionmind Agent and commands it runs are not confined to Tor. They may "
+                "contact arbitrary hosts directly and expose this machine's network address. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.set_status("Agent run cancelled; no process was started.")
+                return
+        search_allowed = self.mode == "chat" and self.search_consent.isChecked()
+        self.search_consent.setChecked(False)
         attachment_names = [Path(path).name for path in self.attachments]
         visible_task = task + ("\n\nAttached locally: " + ", ".join(attachment_names) if attachment_names else "")
         message, agent_task = self._build_user_payload(task)
@@ -2460,7 +2952,10 @@ class OnionmindWindow(QMainWindow):
                 [("Not saved", "The run will continue; check local disk access")],
             )
         if self.mode == "chat":
-            self._start_chat()
+            if search_allowed:
+                self._start_chat(True)
+            else:
+                self._start_chat()
         else:
             self._start_harness(agent_task)
 
@@ -2602,6 +3097,9 @@ class OnionmindWindow(QMainWindow):
         self.chat_button.setEnabled(not running)
         self.agent_button.setEnabled(not running)
         self.model_combo.setEnabled(not running)
+        self.search_consent.setEnabled(not running)
+        if running:
+            self.search_consent.setChecked(False)
         self.left_rail.projects.setEnabled(not running)
         self.left_rail.sessions.setEnabled(not running)
         if not running:
@@ -2609,18 +3107,37 @@ class OnionmindWindow(QMainWindow):
             self.harness_process = None
         self._sync_action_states()
 
-    def _start_chat(self) -> None:
+    def _start_chat(self, allow_search: bool = False) -> None:
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
         history = copy.deepcopy(self.chat_messages)
         block = self.transcript.add_message("assistant", "")
+        block.start_thinking("Starting Tor" if allow_search else "Thinking")
         self.stream_block = block
-        self.set_status(f"Streaming from {self._describe_model(model)}…")
-        self.inspector.append_activity("Chat turn started on the local inference path")
+        if allow_search:
+            self.tor_probe_generation += 1
+            self.tor_phase = "starting"
+            self.tor_status.set_status("Starting", "busy")
+            self.set_status("Starting background Tor without opening a browser window…")
+            self.inspector.append_activity("One-turn Tor search permission granted")
+        else:
+            self.set_status(f"Thinking with {self._describe_model(model)}…")
+            self.inspector.append_activity("Chat turn started on the local-only inference path")
 
         def chat_job(signals: WorkerSignals) -> dict[str, Any]:
             setattr(self.core, "MODEL", model)
+            if allow_search:
+                starter = getattr(self.core, "start_tor_hidden", None)
+                if not callable(starter):
+                    raise RuntimeError("This Onionmind core cannot start background Tor.")
+                port = starter(stop_event=stop_event)
+                managed = getattr(self.core, "_managed_tor_process", None)
+                signals.event.emit({
+                    "kind": "tor_ready",
+                    "port": port,
+                    "managed": managed is not None,
+                })
             if not getattr(self.core, "BACKEND", None):
                 detector = getattr(self.core, "detect_backend", None)
                 if callable(detector):
@@ -2628,32 +3145,48 @@ class OnionmindWindow(QMainWindow):
             turn_stream = getattr(self.core, "turn_stream", None)
             if not callable(turn_stream):
                 raise RuntimeError("The Onionmind core does not expose streaming chat.")
-            raw = ""
-            visible = ""
+            stream_filter = ThinkingStreamFilter()
 
             def on_text(chunk: str) -> None:
-                nonlocal raw, visible
-                raw += _as_text(chunk)
-                if "<think>" in raw and "</think>" not in raw:
-                    candidate = ""
-                elif "</think>" in raw:
-                    candidate = raw.split("</think>")[-1]
-                else:
-                    candidate = raw
-                if len(candidate) > len(visible):
-                    delta = candidate[len(visible):]
-                    visible = candidate
+                if stop_event.is_set():
+                    stream_filter.abort()
+                    return
+                delta = stream_filter.feed(chunk)
+                if delta:
                     signals.text.emit(delta)
 
             def on_event(event: dict[str, Any]) -> None:
                 signals.event.emit(dict(event))
 
             try:
-                answer = turn_stream(history, on_text, stop_event=stop_event, on_event=on_event)
-            except TypeError as exc:
-                if "on_event" not in _as_text(exc):
-                    raise
-                answer = turn_stream(history, on_text, stop_event)
+                try:
+                    answer = turn_stream(
+                        history,
+                        on_text,
+                        stop_event=stop_event,
+                        on_event=on_event,
+                        allow_search=allow_search,
+                    )
+                except TypeError as exc:
+                    if "on_event" not in _as_text(exc):
+                        raise
+                    try:
+                        answer = turn_stream(
+                            history,
+                            on_text,
+                            stop_event=stop_event,
+                            allow_search=allow_search,
+                        )
+                    except TypeError as compatibility_error:
+                        if "allow_search" in _as_text(compatibility_error):
+                            raise RuntimeError(
+                                "The installed Onionmind core is too old to enforce per-turn search permission."
+                            ) from compatibility_error
+                        raise
+            except BaseException:
+                stream_filter.abort()
+                raise
+            stream_filter.finish()
             return {"answer": _as_text(answer), "history": history}
 
         worker = self._start_worker(chat_job)
@@ -2671,38 +3204,89 @@ class OnionmindWindow(QMainWindow):
         kind = _as_text(event.get("kind"))
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
-        if kind == "tool_started":
+        if kind == "tor_ready":
+            port = event.get("port")
+            if event.get("managed"):
+                self.tor_phase = "running"
+                self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+                self.tor_status.setToolTip(
+                    "Tor is running as a background process; no Tor Browser or console window was opened."
+                )
+            else:
+                self.tor_phase = "proxy"
+                self.tor_status.set_status(f"Proxy · {port}" if port else "Proxy", "warn")
+                self.tor_status.setToolTip(
+                    "An existing local SOCKS listener was reused and will be verified before a query is sent."
+                )
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Thinking")
+            self.set_status(f"Background Tor ready · thinking with {self._describe_model(self.current_model_id())}…")
+            self.inspector.append_activity("Background Tor ready; no browser window opened")
+        elif kind == "tor_verified":
+            port = event.get("port")
+            self.tor_phase = "running"
+            self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+            self.tor_status.setToolTip(
+                "The background SOCKS path was verified as Tor after explicit search permission."
+            )
+            self.inspector.append_activity("Background Tor path verified")
+        elif kind == "tool_started":
             arguments = event.get("arguments") or {}
             detail = _as_text(arguments.get("query")) if isinstance(arguments, dict) else ""
             state = "Running through Tor · fails closed" if name == "web_search" else "Running locally"
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Searching via Tor" if name == "web_search" else "Using local tool")
             self.transcript.add_tool_card(display_name, [(detail or "Tool request", state)])
             activity = "Tor search started" if name == "web_search" else f"Local tool started: {display_name}"
             self.inspector.append_activity(activity)
         elif kind == "tool_finished":
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Thinking")
             state = "Tor result returned" if name == "web_search" else "Finished"
             self.transcript.add_tool_card(display_name, [("Tool result", state)])
             activity = "Tor search finished" if name == "web_search" else f"Local tool finished: {display_name}"
             self.inspector.append_activity(activity)
+        elif kind == "tool_refused":
+            self.transcript.add_tool_card(display_name, [("Not run", "No one-turn search permission")])
+            self.inspector.append_activity("Tor search request refused; no network request was made")
 
     def _chat_complete(self, payload: dict[str, Any]) -> None:
-        answer = payload.get("answer") or "The local model returned no answer."
+        answer = _strip_thinking(payload.get("answer"))
+        if not answer:
+            answer = "The local model returned no answer."
         if self.stream_block is not None:
             self.stream_block.set_text(answer)
-        self.chat_messages = payload.get("history") or [*self.chat_messages, {"role": "assistant", "content": answer}]
+        raw_history = payload.get("history") or [
+            *self.chat_messages,
+            {"role": "assistant", "content": answer},
+        ]
+        self.chat_messages = _sanitize_assistant_messages(raw_history)
         if self.chat_messages and self.chat_messages[-1].get("role") == "assistant":
             self.chat_messages[-1]["content"] = answer
         if not self.chat_messages or self.chat_messages[-1].get("role") != "assistant":
             self.chat_messages.append({"role": "assistant", "content": answer})
+        local_probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = local_probe() if callable(local_probe) else None
+        except Exception:
+            port = None
+        self._show_local_tor_state(port)
         self.set_status("Chat turn complete")
         self.inspector.append_activity("Chat turn completed locally")
         self._set_active(None)
         self.save_current_session()
 
     def _chat_failed(self, message: str) -> None:
-        message = _brand_runtime_text(message)
+        message = _brand_runtime_text(_strip_thinking(message))
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
         self.chat_messages.append({"role": "assistant", "content": f"Local inference failed: {message}"})
+        local_probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = local_probe() if callable(local_probe) else None
+        except Exception:
+            port = None
+        self._show_local_tor_state(port)
         self.set_status(f"Local inference failed: {message}")
         self.inspector.append_activity(f"Chat turn failed: {message}")
         self._set_active(None)
@@ -2854,6 +3438,8 @@ class OnionmindWindow(QMainWindow):
             return
         if self.active_kind == "chat" and self.stop_event is not None:
             self.stop_event.set()
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Stopping")
             self.set_status("Stopping the local model after the current read…")
         elif self.active_kind == "agent":
             if self.harness_process is None:
@@ -2925,7 +3511,7 @@ class OnionmindWindow(QMainWindow):
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
         self.model_status.set_status("Local · Ready", "good")
-        self.tor_status.set_status("Connected", "good")
+        self.tor_status.set_status("Running · 9150", "good")
         self.workspace = str(Path.home() / "onion" / "leaflink")
         self.repo_label.setText("leaflink")
         self.repo_label.setToolTip(self.workspace)
@@ -3018,7 +3604,7 @@ class OnionmindWindow(QMainWindow):
         self.inspector.update_snapshot(demo_snapshot)
         self.inspector.append_activity("Observed Git state refreshed after Agent exit")
         self.inspector.append_activity("Agent finished with exit code 0")
-        self.inspector.append_activity("Onionmind inference and Tor readiness reported separately")
+        self.inspector.append_activity("Background Tor state and local model readiness reported separately")
         self.set_mode("agent")
         self.set_status("Ready · 4 observed changes · all inference local")
         self._sync_action_states()
@@ -3026,11 +3612,20 @@ class OnionmindWindow(QMainWindow):
 
     def closeEvent(self, event: Any) -> None:
         self.save_current_session()
+        timer = getattr(self, "tor_liveness_timer", None)
+        if timer is not None:
+            timer.stop()
         if self.stop_event is not None:
             self.stop_event.set()
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        stop_tor = getattr(self.core, "stop_managed_tor", None)
+        if callable(stop_tor):
+            try:
+                stop_tor()
+            except Exception:
+                pass
         event.accept()
 
 

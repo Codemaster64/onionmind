@@ -154,7 +154,7 @@ modelfile() {  # $1 = extra FROM line for the vision projector, "" for none
 FROM /usr/lib/onionmind/weights/$FILE
 $1
 PARAMETER num_gpu $NUM_GPU
-PARAMETER num_ctx 8192
+PARAMETER num_ctx 16384
 PARAMETER temperature 0.7
 PARAMETER stop "<|im_start|>"
 PARAMETER stop "<|im_end|>"

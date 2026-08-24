@@ -15,7 +15,6 @@
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
   #manage { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
-  #tor-toggle { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
   .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -26,7 +25,10 @@
          border-bottom-left-radius: 4px; }
   .bot small { display: block; color: var(--dim); font-size: 11px; margin-top: 6px; }
   #form { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-          border-top: 1px solid var(--line); }
+          border-top: 1px solid var(--line); flex-wrap: wrap; }
+  #search-permission { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
+                       color: #cdbbd5; font-size: 12px; padding: 0 2px 2px; }
+  #search-permission input { accent-color: var(--purple); width: 16px; height: 16px; }
   #q { flex: 1; background: var(--card); border: 1px solid var(--line); color: inherit;
        border-radius: 12px; padding: 11px 14px; font: inherit; outline: none; }
   button { background: var(--purple); color: #fff; border: 0; border-radius: 12px;
@@ -64,7 +66,6 @@
     <circle cx="64" cy="64" r="5" fill="#7D4698" stroke="none"/>
   </svg>
   <h1>Onionmind</h1>
-  <button id="tor-toggle" onclick="toggleTor()">Tor on</button>
   <button id="manage" onclick="openManager()">Models</button>
   <div id="dots">
     <span class="dot" id="d-tor">tor</span><span class="dot" id="d-model">model</span>
@@ -108,16 +109,20 @@
 </div>
 
 <div id="chat"></div>
-<div id="busy">thinking + searching over tor…</div>
+<div id="busy">thinking locally…</div>
 <form id="form">
+  <label id="search-permission">
+    <input id="allow-search" type="checkbox">
+    Allow Tor search this turn
+  </label>
   <input id="q" placeholder="Ask anything…" autocomplete="off">
   <button id="send">Send</button>
 </form>
 
 <script>
 // Android does not isolate loopback between apps: any installed app can reach
-// 127.0.0.1:8081. This token is generated per process and pasted in when the
-// page is served, so a request without it is not from this page.
+// 127.0.0.1:8081. The page itself is served only at an unguessable per-process
+// capability URL; this separate token authenticates its API requests.
 const TOKEN = '__ONIONMIND_TOKEN__';
 const api = (path, init) => fetch(path, {...init,
   headers: {...(init && init.headers), 'X-Onionmind-Token': TOKEN}});
@@ -130,8 +135,7 @@ const $ = id => document.getElementById(id);
 async function poll() {
   try { status = await (await api('/api/status')).json(); } catch {}
   $('d-tor').classList.toggle('on', !!status.tor);
-  $('tor-toggle').textContent = status.torEnabled === false ? 'Tor off' : 'Tor on';
-  $('tor-toggle').title = status.torEnabled === false ? 'Turn Tor on to enable web search' : 'Turn Tor off to disable web search';
+  $('d-tor').title = status.tor ? 'Onionmind background Tor is running' : 'Background Tor is off';
   $('d-model').classList.toggle('on', status.model !== 'none' && !status.downloading);
   const setup = $('setup'), chat = $('chat'), form = $('form');
   if (status.model === 'none' && !status.downloading) {
@@ -151,16 +155,10 @@ async function poll() {
     $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">You can leave the app open while it resumes.</div></div>';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
-    if (!ready) { add('bot', 'Ready. ' + (status.torEnabled === false ? 'Tor is off — web search is disabled, but local chat still works.' : (status.tor ? 'Tor is up.' : 'Tor is still building circuits — searches wait for it, chat does not.')) + ' Ask anything.'); ready = true; }
+    if (!ready) { add('bot', 'Ready. Local chat is private by default. Web search stays off unless you allow Tor search for one turn. Ask anything.'); ready = true; }
   }
 }
 setInterval(poll, 2000); poll();
-
-async function toggleTor() {
-  const enabled = status.torEnabled === false;
-  await api('/api/tor', form('enabled=' + enabled));
-  await poll();
-}
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -245,13 +243,19 @@ function add(cls, text) {
 $('form').onsubmit = async e => {
   e.preventDefault();
   const q = $('q').value.trim(); if (!q) return;
+  const allowSearch = $('allow-search').checked;
+  // Consume permission before any asynchronous work. It cannot silently carry
+  // into the next message, even if this request fails.
+  $('allow-search').checked = false;
+  $('allow-search').disabled = true;
+  $('send').disabled = true;
   $('q').value = ''; add('you', q);
   history.push({role:'user', content:q});
-  $('busy').textContent = status.torEnabled === false ? 'thinking locally…' : 'thinking + searching over tor…';
+  $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : 'thinking locally…';
   $('busy').style.display = 'block';
   try {
     const response = await api('/api/chat',
-      form('messages=' + encodeURIComponent(JSON.stringify(history))));
+      form(new URLSearchParams({messages:JSON.stringify(history), allowSearch:String(allowSearch)})));
     const raw = await response.text();
     let r;
     try { r = JSON.parse(raw); }
@@ -261,6 +265,8 @@ $('form').onsubmit = async e => {
     history = r.messages || history;
   } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); }
   $('busy').style.display = 'none';
+  $('allow-search').disabled = false;
+  $('send').disabled = false;
 };
 </script>
 </body>

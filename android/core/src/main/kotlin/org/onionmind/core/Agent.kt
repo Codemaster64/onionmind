@@ -3,6 +3,7 @@ package org.onionmind.core
 import kotlinx.serialization.json.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.FormBody
@@ -30,7 +31,7 @@ object Agent {
         "https://html.duckduckgo.com/html/",
     )
 
-    const val NUM_PREDICT = 8192   // reasoning models spend the budget thinking first
+    const val NUM_PREDICT = 16384  // reasoning models can spend 8K+ tokens thinking first
 
     val TOOLS = """[{"type":"function","function":{
         "name":"web_search",
@@ -40,7 +41,18 @@ object Agent {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    private fun client(user: String, pass: String): OkHttpClient {
+    /** OkHttp resolves every DIRECT route before opening its socket. Our socket
+     *  factory needs a DIRECT route so OkHttp actually uses Socks5Socket (a
+     *  java.net SOCKS route would bypass it and require the global Authenticator).
+     *  Give OkHttp a non-routing placeholder while preserving the original
+     *  hostname on the InetAddress. Socks5Socket ignores the placeholder bytes
+     *  and sends hostString as SOCKS5 ATYP=DOMAIN, so only Tor resolves it. */
+    private val torRouteDns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> =
+            listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
+    }
+
+    internal fun client(user: String, pass: String): OkHttpClient {
         // okhttp layers TLS itself over whatever socket the factory hands it,
         // so a SOCKS5-auth socket below HTTPS just works.
         val factory = object : javax.net.SocketFactory() {
@@ -55,7 +67,8 @@ object Agent {
         }
         return OkHttpClient.Builder()
             .socketFactory(factory)
-            .proxy(Proxy.NO_PROXY)          // never the system proxy
+            .proxy(Proxy.NO_PROXY)          // force our socket factory; never the system proxy
+            .dns(torRouteDns)               // no JVM/Android target-host DNS lookup
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
             .build()
@@ -207,14 +220,17 @@ object Agent {
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(1800, TimeUnit.SECONDS).build()
     }
 
-    /** One full user turn against llama-server: chat, tool calls, search, repeat. */
+    /** One full user turn against llama-server: chat, permitted tool calls,
+     *  search, repeat. Search permission is deliberately a required per-call
+     *  value; callers must never infer it from a persistent setting. */
     fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
+             allowSearch: Boolean = false,
              search: (String) -> String = { q -> webSearch(q) }): String {
         val http = localHttp
         for (round in 0 until 6) {
             val body = buildJsonObject {
                 put("messages", JsonArray(messages))
-                put("tools", Json.parseToJsonElement(TOOLS))
+                if (allowSearch) put("tools", Json.parseToJsonElement(TOOLS))
                 put("stream", false)
                 put("max_tokens", NUM_PREDICT)
             }
@@ -277,8 +293,10 @@ object Agent {
                 val f = c.jsonObject["function"]!!.jsonObject
                 val name = f["name"]!!.jsonPrimitive.content
                 val args = f["arguments"]?.jsonObject
-                val result = if (name == "web_search")
+                val result = if (name == "web_search" && allowSearch)
                     search(args?.get("query")?.jsonPrimitive?.content ?: "")
+                else if (name == "web_search")
+                    "(web search was not allowed for this turn)"
                 else "(unknown tool $name)"
                 messages.add(buildJsonObject {
                     put("role", "tool")

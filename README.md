@@ -6,32 +6,41 @@
 
 **A native, local-first coding workbench with Ollama models and Tor search.**
 
-![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
-![local](https://img.shields.io/badge/inference-local--first-black)
-![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
-![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
-![project](https://img.shields.io/badge/free%20%26%20open%20source-non--commercial-9146F0)
+**Platforms:** Windows · Linux · Android · Matchstick USB
 
-[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
-[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
-[![Download for Android](https://img.shields.io/badge/Android-Onionmind--1.3.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.3/Onionmind-1.3.apk)
-[![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-amnesic-usb-stick)
+**Inference:** local-first · **License:** MIT / Apache-2.0 components · **Project:** free and open source
+
+**Downloads:** [releases](https://github.com/Codemaster64/onionmind/releases) ·
+[Linux installer](install-onionmind.sh) ·
+[Android APKs (manual releases)](https://github.com/Codemaster64/onionmind/releases) ·
+[Matchstick USB](#matchstick--the-amnesic-usb-stick)
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
 
-[all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
+Windows releases are built and attached manually as `Onionmind-Windows-x64.zip`.
+There is no cloud CI build or automatic release job. Because this repository is
+private, its GitHub release assets require sign-in and are not an anonymous
+distribution channel.
 
-**No Onionmind account · no Onionmind telemetry.** Local chat, project context,
-session history, and model inference stay on your computer. Optional network
-features have narrower boundaries: Tor search sends its query to DuckDuckGo's
-onion service, model installation downloads weights, and DeepSeek Harness agent
-traffic is direct rather than Tor-routed. The wrapper code is MIT-licensed;
-model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md`.
+**No Onionmind account · no Onionmind telemetry.** Opening Onionmind makes no
+external request, starts no network service, and performs no automatic update
+check. Local chat, project context, session history, and model inference stay on
+your computer. Every external action is user-triggered: Tor search is enabled
+per turn; on Windows, Onionmind then starts only Tor's background process with
+no Tor Browser or console window and shows its state in the Tor indicator. A
+search sends its query to DuckDuckGo's onion service; a confirmed model pull
+asks Ollama to download weights over the direct network; and a confirmed
+DeepSeek Harness run may use direct network-capable tools. The wrapper code is
+MIT-licensed; model weights retain the upstream licenses documented in
+`THIRD_PARTY_NOTICES.md`.
 
 On desktop, Onionmind is a standalone PySide6 application—not a browser shell,
 WebView, or localhost website. Its three-pane workbench combines project and
 session navigation, a streaming conversation, integrated terminal, Git changes,
 context inspection, model management, and a one-shot DeepSeek Harness agent mode.
+Each Chat turn immediately opens a textual **Thinking** state in the pending
+Onionmind reply. Its restrained motion stops on the first visible streamed token,
+on failure, or when the turn ends; reduced-motion mode keeps the same state static.
 The interaction model is informed by the public Claude Code and Codex workflows,
 while the product identity, model tiers, storage, and implementation remain
 Onionmind's own. The project uses published documentation and open-source
@@ -44,22 +53,34 @@ product code.
 
 ---
 
-## Get it in 60 seconds
+## Get Onionmind
 
-Every desktop install gives you **`onionmind`** and a desktop icon for the native
+The shell installer provides **`onionmind`** and a desktop icon for the native
 workbench. **`onionmind-code "task"`** runs a one-shot repository-aware DeepSeek
 Harness task through Ollama. **`onionmind-chat`** is retained as an alias for the
-workbench.
+workbench. The portable Windows archive is different: neither the ZIP nor its
+bootstrap creates a command or shortcut. Run `Onionmind.exe` from the extracted
+folder, or create a shortcut to that executable yourself.
 
-**Windows** — one download, one double-click:
-**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)**
-(75 KB — the entire installer in one file). Double-click it, wait out the
-model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
-in new terminals. SmartScreen may grumble at a self-contained script — that's
-what it does; *More info → Run anyway*.
+**Windows** — download the manually published `Onionmind-Windows-x64.zip`, then
+extract it. The archive contains `Onionmind.exe`, `onionmind-bootstrap.cmd`, and
+`onionmind-bootstrap.ps1`. Run the bootstrap to perform an **offline local
+inventory first**: it reports supported, missing, and out-of-date components
+without downloading anything or starting Tor, Ollama, or another service. It
+shows the exact install plan and direct-network destinations before asking you
+to apply it. Only confirmed missing or out-of-policy components are installed.
 
-*Prefer pasting?* The classic way still works: copy
-[install-onionmind.ps1](install-onionmind.ps1) into PowerShell.
+The Tor indicator starts at **Off**, or **Proxy · port** when it detects an
+unverified pre-existing SOCKS listener. Enabling **Allow Tor search this turn**
+can change it to **Starting** and then **Running · 9150**. Onionmind launches
+`tor.exe` hidden, never `firefox.exe`, and stops only the Tor process it owns
+when the app closes. An already-running local Tor proxy is reused and left alone.
+
+The older all-in-one `onionmind-setup.cmd` release is deprecated and does not
+contain the current native workbench. No GitHub workflow builds or publishes the
+Windows archive. Maintainers build it locally, verify it, and attach it to a
+release manually. Private GitHub releases require an authenticated account;
+downloading one is therefore not anonymous.
 
 **Linux** — one download, one command:
 **[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)**,
@@ -73,8 +94,9 @@ For repository-aware coding work from a terminal:
 onionmind-code "inspect this repository and explain the failing tests"
 ```
 
-It starts DeepSeek Harness in its public headless profile using the selected raw
-Ollama model name. Agent mode currently requires Node.js `^22.19` or `24+` and
+After a direct-network confirmation, it starts DeepSeek Harness in its public
+headless profile using the selected raw Ollama model name. Agent mode currently
+requires Node.js `^22.19` or `24+` and
 reports an actionable setup message when that runtime is missing. DeepSeek
 Harness is currently a developer preview. This agent
 path is intentionally labelled **direct network**: Ollama's launcher does not
@@ -85,19 +107,26 @@ Inside the workbench, switch the composer from **Chat** to **Agent** to run the
 same repository-aware path without opening a browser. Output, cancellation, and
 the network boundary remain visible in the transcript and activity inspector.
 
-After the first setup, update the installed code without touching the model:
+Onionmind never checks for or installs updates automatically. To inspect an
+existing source-based installation, run the manual updater yourself:
 
 ```text
 onionmind-update
 ```
 
+Invoking the updater is the network trigger: it contacts GitHub and the Python
+package index directly. Merely opening Onionmind never invokes it.
+
 **Android (light models)**
 
-**[⬇ Onionmind-1.3 APK](https://github.com/Codemaster64/onionmind/releases/download/v1.3/Onionmind-1.3.apk)**
-— 14 MB, one file, no app store. Tap it, allow installs from unknown sources,
-done. On first launch it downloads the model that fits your phone (the 4B on
-any 8 GB phone, the 9B on 12 GB flagships — resumable). The engine, Tor binary,
-and UI are on-device; web-search queries are sent to DuckDuckGo over Tor.
+Android **1.4** is the current source version. APKs are built and attached to
+the [releases page](https://github.com/Codemaster64/onionmind/releases) manually;
+an `Onionmind-1.4.apk` is available only when that exact asset is shown there.
+The older 1.3 APK is intentionally not linked because it predates the Android
+remote-DNS protection. On first launch, choose and confirm the model download
+that fits your phone (the 4B on any 8 GB phone, the 9B on 12 GB flagships —
+resumable). The engine, Tor binary, and UI are on-device; user-enabled web-search
+queries are sent to DuckDuckGo with hostname resolution performed by Tor.
 arm64 phones only.
 
 Want a terminal on your phone too? [Termux](https://f-droid.org) +
@@ -109,7 +138,7 @@ gives you the same `onionmind` command Android-side.
 ```bash
 onionmind                    # open the native desktop workbench
 onionmind-code "fix the parser tests"   # one-shot repository-aware agent
-python onionmind.py "who won the last election?"  # local CLI chat + Tor search
+python onionmind.py "explain this function"       # local CLI chat; search stays off unless enabled for that turn
 ```
 
 Or just double-click the icon. The desktop app keeps sessions locally and can
@@ -121,8 +150,8 @@ export a conversation; the classic CLI still supports `/save notes.txt`.
 - Stream model output, stop generation, inspect tool activity, and attach images to vision-capable models.
 - Run a real shell in the selected project with command history and cancel support.
 - Inspect the bounded project tree, Git status and diff, and recent activity beside the conversation.
-- Discover installed Ollama models, see their Onionmind tier names, switch models, and pull another model.
-- Run DeepSeek Harness headlessly in **Agent** mode; no browser window or embedded web UI is involved.
+- Discover installed Ollama models, see their Onionmind tier names, switch models, and confirm a direct-network pull for another model.
+- Run DeepSeek Harness headlessly in **Agent** mode after confirming its direct-network boundary; no browser window or embedded web UI is involved.
 
 Stop requests terminate the managed shell or Harness launcher process. A command
 that deliberately starts detached or background child processes may require
@@ -131,8 +160,26 @@ interactive approval requests fail closed; custom DSH profiles can change that
 composition.
 
 For source development, install `requirements-desktop.txt` and run
-`python onionmind_desktop.py`. `tools/build-desktop.ps1` builds the standalone
-Windows executable; CI publishes the native artifact on supported release runs.
+`python onionmind_desktop.py`. Builds and tests are explicit local operations;
+there is no GitHub Actions workflow. The principal checks are:
+
+```text
+python build.py --check
+python tests/test_parser.py
+python tests/test_backends.py
+python tests/test_desktop_core.py
+python tests/test_installer_contracts.py
+.\tools\build-desktop.ps1 -Check -PythonExecutable python
+.\tools\build-desktop.ps1 -PythonExecutable python
+```
+
+The final command produces the standalone Windows bundle. A maintainer packages
+it with the offline-first bootstrap as `Onionmind-Windows-x64.zip`, verifies the
+archive locally, and uploads it manually when making a release. The build audits
+its isolated environment first and does not invoke pip when the constrained
+versions are already present. If repair is needed, it prints the package-index
+plan and refuses until rerun with `-AllowDirectNetwork` (then prompts unless
+`-Yes` is also supplied).
 
 The models are named for the burn, from least heavy to heaviest:
 **SPARK < EMBER < BLAZE < INFERNO < CINDER < WILDFIRE < FLASHPOINT < PHOENIX < NOVA < PYRE**.

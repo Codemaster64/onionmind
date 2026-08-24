@@ -146,7 +146,13 @@ class DesktopUiTests(unittest.TestCase):
 
         dialog.model_name.setText("blaze")
         self.assertTrue(dialog.pull_button.isEnabled())
-        dialog.pull_button.click()
+        with mock.patch.object(
+            ui.QMessageBox,
+            "warning",
+            return_value=ui.QMessageBox.StandardButton.Yes,
+        ) as confirm_download:
+            dialog.pull_button.click()
+        confirm_download.assert_called_once()
         self.assertEqual(requested, ["blaze"])
         self.assertFalse(dialog.model_name.isEnabled())
         dialog.set_error("Ollama failed")
@@ -299,7 +305,13 @@ class DesktopUiTests(unittest.TestCase):
             )
             window.set_mode("agent")
             window.composer.setPlainText("Check every button")
-            window.send_button.click()
+            with mock.patch.object(
+                ui.QMessageBox,
+                "warning",
+                return_value=ui.QMessageBox.StandardButton.Yes,
+            ) as confirm_agent:
+                window.send_button.click()
+            confirm_agent.assert_called_once()
             self.assertEqual(agent_tasks, ["Check every button"])
 
             export_path = Path(temporary) / "conversation.md"

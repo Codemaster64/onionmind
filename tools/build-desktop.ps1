@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Check,
+    [switch]$AllowDirectNetwork,
+    [switch]$Yes,
     [string]$PythonExecutable = ""
 )
 
@@ -21,6 +23,8 @@ $PythonSources = @(
 $RuntimeAssets = @(
     "dsh-onionmind-tor-search.js",
     "dsh-onionmind-tor.patch.yml",
+    "onionmind-bootstrap.ps1",
+    "onionmind-bootstrap.cmd",
     "onionmind.ico",
     "logo.svg",
     "logo-small.svg",
@@ -110,24 +114,75 @@ if ($Check) {
     exit 0
 }
 
-if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
-    if (Test-Path -LiteralPath $VenvRoot) {
-        throw "The existing .desktop-build-venv is incomplete. Move it aside and run this script again."
-    }
-    Write-Host "Creating isolated build environment at $VenvRoot"
-    Invoke-CheckedCommand -FilePath $BasePythonPath -ArgumentList (
-        $BasePythonPrefix + @("-m", "venv", $VenvRoot)
-    )
+$DependencyAudit = @'
+import importlib.metadata as metadata
+import re
+
+requirements = {
+    'PySide6-Essentials': lambda value: (6, 11) <= value < (6, 12),
+    'requests': lambda value: (2, 32) <= value < (3,),
+    'PySocks': lambda value: (1, 7) <= value < (2,),
+    'Nuitka': lambda value: (4, 1) <= value < (5,),
+    'ordered-set': lambda value: (4, 1) <= value < (5,),
+    'zstandard': lambda value: (0, 23) <= value < (1,),
 }
 
-Write-Host "Installing constrained desktop build dependencies"
-Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
-    "-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip"
-)
-Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
-    "-m", "pip", "install", "--disable-pip-version-check",
-    "--requirement", (Join-Path $RepoRoot "requirements-desktop.txt")
-)
+issues = []
+for name, accepted in requirements.items():
+    try:
+        raw = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        issues.append((name, 'MISSING', '-'))
+        continue
+    match = re.match(r'^(\d+(?:\.\d+)*)', raw)
+    value = tuple(int(part) for part in match.group(1).split('.')) if match else ()
+    status = 'READY' if value and accepted(value) else 'OUTDATED'
+    print(f'[{status}] {name} {raw}')
+    if status != 'READY':
+        issues.append((name, status, raw))
+for name, status, raw in issues:
+    if status == 'MISSING':
+        print(f'[{status}] {name} {raw}')
+raise SystemExit(2 if issues else 0)
+'@
+
+$DependenciesReady = $false
+if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+    & $VenvPython -c $DependencyAudit
+    $DependenciesReady = ($LASTEXITCODE -eq 0)
+} else {
+    Write-Host "[MISSING] isolated desktop build environment: $VenvRoot"
+}
+
+if (-not $DependenciesReady) {
+    Write-Host ""
+    Write-Host "Direct-network build dependency plan" -ForegroundColor Yellow
+    Write-Host "  Install only packages missing or outside requirements-desktop.txt"
+    Write-Host "  Destination: $VenvRoot"
+    Write-Host "  pip may contact its configured package index directly"
+    if (-not $AllowDirectNetwork) {
+        throw "Build dependencies need repair. Re-run with -AllowDirectNetwork after reviewing the plan."
+    }
+    if (-not $Yes) {
+        $Answer = Read-Host "Proceed with the disclosed build dependency operation? [y/N]"
+        if ($Answer -notmatch '^(?i:y|yes)$') {
+            throw "Canceled. No build dependency network operation was started."
+        }
+    }
+    if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+        Write-Host "Creating isolated build environment at $VenvRoot"
+        Invoke-CheckedCommand -FilePath $BasePythonPath -ArgumentList (
+            $BasePythonPrefix + @("-m", "venv", $VenvRoot)
+        )
+    }
+    Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
+        "-m", "pip", "install", "--disable-pip-version-check",
+        "--requirement", (Join-Path $RepoRoot "requirements-desktop.txt")
+    )
+    Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @("-c", $DependencyAudit)
+} else {
+    Write-Host "Desktop build dependencies already satisfy the constrained ranges; pip was not run."
+}
 Write-Host "Resolved desktop compiler versions"
 Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
     "-m", "pip", "show", "PySide6-Essentials", "Nuitka"
@@ -142,21 +197,24 @@ $NuitkaArguments = @(
     "-m", "nuitka",
     "--mode=standalone",
     "--enable-plugin=pyside6",
-    "--assume-yes-for-downloads",
     "--deployment",
     "--output-dir=$DistRoot",
     "--output-filename=Onionmind.exe",
-    "--windows-console-mode=disable",
+    # Python 3.13/Nuitka can crash before Qt starts when the standard handles
+    # are removed entirely. "hide" keeps valid handles without a visible console.
+    "--windows-console-mode=hide",
     "--windows-icon-from-ico=$(Join-Path $RepoRoot 'onionmind.ico')",
     "--company-name=Onionmind",
     "--product-name=Onionmind",
     "--file-description=Onionmind local coding workbench",
-    "--file-version=1.0.0",
-    "--product-version=1.0.0",
+    "--file-version=1.4.0",
+    "--product-version=1.4.0",
     "--include-module=onionmind",
     "--include-module=onionmind_desktop_core",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor-search.js')=dsh-onionmind-tor-search.js",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor.patch.yml')=dsh-onionmind-tor.patch.yml",
+    "--include-data-files=$(Join-Path $RepoRoot 'onionmind-bootstrap.ps1')=onionmind-bootstrap.ps1",
+    "--include-data-files=$(Join-Path $RepoRoot 'onionmind-bootstrap.cmd')=onionmind-bootstrap.cmd",
     "--include-data-files=$(Join-Path $RepoRoot 'onionmind.ico')=onionmind.ico",
     "--include-data-files=$(Join-Path $RepoRoot 'logo.svg')=logo.svg",
     "--include-data-files=$(Join-Path $RepoRoot 'logo-small.svg')=logo-small.svg",
@@ -186,5 +244,49 @@ foreach ($Asset in $RuntimeAssets) {
     }
 }
 
+$ZipPath = Join-Path $DistRoot "Onionmind-Windows-x64.zip"
+$ZipScript = @'
+import os
+import pathlib
+import stat
+import sys
+import zipfile
+
+source = pathlib.Path(sys.argv[1]).resolve()
+destination = pathlib.Path(sys.argv[2]).resolve()
+temporary = destination.with_suffix(destination.suffix + '.tmp')
+prefix = 'Onionmind-Windows-x64'
+
+if temporary.exists():
+    temporary.unlink()
+
+with zipfile.ZipFile(
+    temporary,
+    mode='w',
+    compression=zipfile.ZIP_DEFLATED,
+    compresslevel=9,
+) as archive:
+    for path in sorted((value for value in source.rglob('*') if value.is_file()), key=lambda value: value.relative_to(source).as_posix()):
+        relative = path.relative_to(source).as_posix()
+        info = zipfile.ZipInfo(f'{prefix}/{relative}', date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = (stat.S_IFREG | 0o644) << 16
+        with path.open('rb') as stream:
+            archive.writestr(info, stream.read(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+os.replace(temporary, destination)
+print(destination)
+'@
+
+Write-Host "Creating deterministic portable archive"
+Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
+    "-c", $ZipScript, $ExpectedBundle, $ZipPath
+)
+if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) {
+    throw "Portable archive was not created: $ZipPath"
+}
+
 Write-Host "Onionmind desktop bundle ready: $ExpectedBundle"
 Write-Host "Executable: $ExpectedExecutable"
+Write-Host "Portable archive: $ZipPath"

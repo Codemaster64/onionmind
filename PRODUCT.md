@@ -16,22 +16,27 @@ Onionmind is a local AI workbench powered by models served on the user's machine
 
 ## Positioning
 
-Onionmind combines local Ollama inference with Tor-routed search and a DeepSeek Harness coding path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Chat search sends its query to DuckDuckGo's onion service through Tor; model downloads, updates, and Harness network-capable tools have separately disclosed direct-network boundaries.
+Onionmind combines local Ollama inference with user-enabled Tor-routed search and a DeepSeek Harness coding path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Opening the application makes no external request, starts no service, and checks for no update. Chat search requires per-turn opt-in before sending its query to DuckDuckGo's onion service through Tor. Model pulls and Harness runs require separate direct-network confirmations.
 
 ## Operating Context
 
-Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama; the current official launcher rejects Onionmind's optional Tor-provider patch, so agent network traffic is direct. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
+Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama only after a direct-network confirmation; the current official launcher rejects Onionmind's optional Tor-provider patch, so agent network traffic is direct. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
+
+Windows distribution is a manually built `Onionmind-Windows-x64.zip` containing `Onionmind.exe`, `onionmind-bootstrap.cmd`, and `onionmind-bootstrap.ps1`. The bootstrap performs an offline inventory before offering any download or service start. Builds, tests, and release uploads are deliberate local operations; the project has no cloud CI, automatic release, or automatic update check. Private GitHub release assets require sign-in and are not an anonymous distribution channel.
 
 ## Capabilities and Constraints
 
-- Preserve the existing CLI, streaming chat, Ollama and llama.cpp backends, model discovery and download, image input, conversation export, stop control, and Tor search behavior.
+- Preserve the existing CLI, streaming chat with an accessible pending-thinking state, Ollama and llama.cpp backends, model discovery and confirmed download, image input, conversation export, stop control, and per-turn Tor search opt-in.
 - The desktop surface must be a standalone native program, not a hosted site or a browser-only wrapper.
 - Repository-changing agent work is delegated to the public DeepSeek Harness integration; the UI must not imply a file was changed when it only chatted about it.
-- Model display keeps Onionmind's named tiers: SPARK, EMBER, BLAZE, INFERNO, CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, and PYRE. Backend identifiers remain available internally, while the normal UI uses Onionmind model names.
+- Model display keeps Onionmind's named tiers: SPARK, EMBER, BLAZE, INFERNO, CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, and PYRE. Backend identifiers remain available internally and where technically necessary, while the normal UI uses Onionmind model names.
 - The product UI names the coding path **Onionmind Agent**. Backend vendor names belong in technical/legal documentation and internal diagnostics, not ordinary interface copy.
 - Installers provision the isolated PySide6 runtime and mark it ready only after an import check; if provisioning fails, the legacy local chat UI remains available as a fallback.
-- Tor readiness and local model-server readiness are separate states and must be shown honestly.
+- The Windows bootstrap inventories installed versions offline, shows a component and network-destination plan, and installs only explicitly confirmed missing or out-of-policy components.
+- Opening the application must not start Tor, Ollama, an updater, or any other network service. Tor readiness and local model-server readiness are separate locally observed states and must be shown honestly.
+- After one-turn search permission on Windows, Onionmind may start only `tor.exe` as a hidden background process—never the Tor Browser UI—and must show Off, Starting, or Running state in the application.
 - DeepSeek Harness is a developer-preview dependency and may not be installed yet; the app needs an actionable unavailable state.
+- Model pulls and Harness runs must disclose that their traffic is direct and require confirmation before starting.
 
 ## Brand Commitments
 
@@ -43,7 +48,8 @@ The product name is **Onionmind**. Keep the supplied onion logo and the existing
 - Existing native desktop implementation and local inference/search core: `onionmind.py`.
 - Brand assets: `logo.svg`, `logo-small.svg`, and `onionmind.ico`.
 - DeepSeek Harness Tor integration: `dsh-onionmind-tor-search.js` and `dsh-onionmind-tor.patch.yml`.
-- Install and update flows: `onionmind-setup.cmd`, `install-onionmind.ps1`, `install-onionmind.sh`, `update-onionmind.ps1`, and `update-onionmind.sh`.
+- Windows distribution and bootstrap: `tools/build-desktop.ps1`, `onionmind-bootstrap.cmd`, and `onionmind-bootstrap.ps1`; the former `onionmind-setup.cmd` path is deprecated.
+- Compatibility install and manual update flows: `install-onionmind.ps1`, `install-onionmind.sh`, `update-onionmind.ps1`, and `update-onionmind.sh`.
 - No customer, benchmark, or feature-parity claims beyond the repository evidence should be fabricated.
 
 ## Product Principles
@@ -52,7 +58,9 @@ The product name is **Onionmind**. Keep the supplied onion logo and the existing
 2. Capabilities are real: every prominent control either works or explains exactly what must be installed or configured.
 3. The agent earns trust through reviewable actions, clear boundaries, and interruptibility.
 4. Privacy is described precisely; local inference and Tor-routed search are not conflated.
-5. Familiar coding-agent patterns reduce friction, while Onionmind's identity and model vocabulary remain its own.
+5. Quiet startup is a contract: opening Onionmind performs no external request, service start, release check, or update check.
+6. Builds, tests, downloads, searches, model pulls, and Harness runs happen only after an explicit local action appropriate to their network impact.
+7. Familiar coding-agent patterns reduce friction, while Onionmind's identity and model vocabulary remain its own.
 
 ## Accessibility & Inclusion
 

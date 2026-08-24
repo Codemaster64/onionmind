@@ -10,8 +10,8 @@ android {
         applicationId = "org.onionmind.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
         ndk { abiFilters += listOf("arm64-v8a") }   // phones this app is for are all arm64
     }
     buildTypes {

@@ -14,8 +14,36 @@ say()  { printf '\033[36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -ne 0 ] || die "run as your normal user, not root - it calls sudo where needed"
-command -v systemctl >/dev/null || die "needs systemd"
+AUDIT=0
+ALLOW_NETWORK=0
+ASSUME_YES=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --audit) AUDIT=1; shift ;;
+    --allow-network) ALLOW_NETWORK=1; shift ;;
+    --yes) ASSUME_YES=1; shift ;;
+    -h|--help)
+      echo "usage: $0 [--audit] [--allow-network --yes]"
+      echo "  --audit                 local read-only checks; no network or service starts"
+      echo "  --allow-network --yes   explicit noninteractive consent for the printed network plan"
+      exit 0
+      ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+confirm_network() {
+  [ "$ALLOW_NETWORK" = 1 ] && [ "$ASSUME_YES" = 1 ] && return 0
+  [ -t 0 ] || die "network consent required; rerun interactively or pass BOTH --allow-network and --yes"
+  printf 'Continue with exactly the network actions above? [y/N] '
+  read -r answer
+  case "$answer" in y|Y|yes|YES) ;; *) die "aborted before all network activity" ;; esac
+}
+
+if [ "$AUDIT" != 1 ]; then
+  [ "$(id -u)" -ne 0 ] || die "run as your normal user, not root - it calls sudo where needed"
+  command -v systemctl >/dev/null || die "needs systemd"
+fi
 
 if   command -v pacman  >/dev/null 2>&1; then DISTRO=arch
 elif command -v apt-get >/dev/null 2>&1; then DISTRO=debian
@@ -38,6 +66,154 @@ VRAM=${VRAM:-0}
 say "GPU: $GPU, ${VRAM} MiB VRAM"
 [ "$VRAM" -eq 0 ] && warn "no GPU VRAM detected - will run on CPU (slow). Check your drivers."
 
+# Pick the desired model before any network operation so the consent screen can
+# name the exact weight URLs that may be contacted.
+WANT="${ONIONMIND_MODEL:-auto}"
+case "$WANT" in
+  auto) [ "$VRAM" -ge 8000 ] && WANT=27b || WANT=fast ;;
+  fast|27b) ;;
+  *) die "ONIONMIND_MODEL must be auto, fast or 27b (got '$WANT')" ;;
+esac
+
+VISION=0
+if [ "$WANT" = 27b ]; then
+  VISION=1
+  if   [ "$VRAM" -ge 17000 ]; then
+    REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-mtp-Q4_K_M.gguf
+  elif [ "$VRAM" -ge 12000 ]; then
+    REPO=soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
+    FILE=qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
+  else
+    REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
+  fi
+  MODEL_NAME=inferno
+else
+  if [ "$VRAM" -ge 6000 ]; then
+    REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF; FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf; SZ=9B
+  else
+    REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF; FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf; SZ=4B
+  fi
+  [ "$SZ" = 4B ] && MODEL_NAME=ember || MODEL_NAME=blaze
+fi
+WEIGHTS_URL="https://huggingface.co/$REPO/resolve/main/$FILE"
+VIS=Qwen3.8-27B-Uncensored-vision-f16.gguf
+VIS_URL="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$VIS"
+
+audit_item() { printf '  %-24s %s\n' "$1" "$2"; }
+if [ "$AUDIT" = 1 ]; then
+  echo "Onionmind local audit (no network, writes, downloads, or service starts)"
+  audit_item "distro" "$DISTRO"
+  audit_item "install directory" "$([ -d "$DIR" ] && echo present || echo missing) ($DIR)"
+  for command_name in systemctl python3 curl tor ollama node; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      audit_item "$command_name" "present ($(command -v "$command_name"))"
+    else
+      audit_item "$command_name" "MISSING"
+    fi
+  done
+  command -v python3 >/dev/null 2>&1 && audit_item "python version" "$(python3 --version 2>&1)"
+  command -v ollama >/dev/null 2>&1 && audit_item "Ollama version" "not probed because some clients contact the local API; no minimum pinned"
+  if command -v node >/dev/null 2>&1; then
+    node_version=$(node --version 2>/dev/null || true)
+    if [[ "$node_version" =~ ^v([0-9]+)\.([0-9]+) ]]; then
+      node_major=${BASH_REMATCH[1]}; node_minor=${BASH_REMATCH[2]}
+      if [ "$node_major" -ge 24 ] || { [ "$node_major" -eq 22 ] && [ "$node_minor" -ge 19 ]; }; then
+        node_state=SUPPORTED
+      else
+        node_state=OUTDATED
+      fi
+    else
+      node_state=UNREADABLE
+    fi
+    audit_item "Node version" "${node_version:-unknown} ($node_state; needs ^22.19 or 24+)"
+  fi
+  if [ "$DISTRO" = arch ]; then
+    case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
+    AUDIT_PKGS=(tor python-requests python-pysocks python-tk curl "$OLLAMA_PKG")
+    for package_name in "${AUDIT_PKGS[@]}"; do
+      if package_version=$(pacman -Q "$package_name" 2>/dev/null); then
+        audit_item "package $package_name" "installed (${package_version#* })"
+      else
+        audit_item "package $package_name" "MISSING"
+      fi
+    done
+  else
+    AUDIT_PKGS=(tor python3-requests python3-socks python3-tk python3-venv curl ca-certificates zstd libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0)
+    for package_name in "${AUDIT_PKGS[@]}"; do
+      package_version=$(dpkg-query -W -f='${Status} ${Version}' "$package_name" 2>/dev/null || true)
+      case "$package_version" in
+        "install ok installed "*) audit_item "package $package_name" "installed (${package_version#install ok installed })" ;;
+        *) audit_item "package $package_name" "MISSING" ;;
+      esac
+    done
+  fi
+  audit_item "selected local model" "$MODEL_NAME ($FILE)"
+  audit_item "weight file" "$([ -s "$DIR/$FILE" ] && echo present || echo missing)"
+  if [ -x "$DIR/desktop-env/bin/python" ]; then
+    desktop_state=$("$DIR/desktop-env/bin/python" - <<'PY' 2>/dev/null || true
+from importlib import metadata
+import re
+
+def version(name):
+    value = metadata.version(name)
+    return value, tuple(int(x) for x in re.findall(r"\d+", value)[:3])
+
+rv, r = version("requests")
+sv, s = version("PySocks")
+qv, q = version("PySide6-Essentials")
+ok = (2, 32) <= r < (3,) and (1, 7) <= s < (2,) and (6, 11) <= q < (6, 12)
+print(f"requests={rv}, PySocks={sv}, PySide6-Essentials={qv} ({'SUPPORTED' if ok else 'OUTDATED/INCOMPATIBLE'})")
+PY
+    )
+    audit_item "desktop runtime" "${desktop_state:-MISSING/INCOMPATIBLE}"
+  else
+    audit_item "desktop runtime" "MISSING"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    tor_service=$(systemctl is-active tor 2>/dev/null || true); tor_service=${tor_service:-inactive}
+    ollama_service=$(systemctl is-active ollama 2>/dev/null || true); ollama_service=${ollama_service:-inactive}
+    audit_item "Tor service" "$tor_service (not changed)"
+    audit_item "Ollama service" "$ollama_service (not changed)"
+  else
+    audit_item "services" "systemd unavailable (not changed)"
+  fi
+  audit_item "remote freshness" "UNKNOWN by design; request apply to permit remote checks"
+  exit 0
+fi
+
+echo
+echo "Direct-network plan (nothing has contacted the network yet):"
+if [ "$DISTRO" = arch ]; then
+  echo "  - configured pacman mirrors: install only missing Onionmind prerequisites"
+  grep -hE '^[[:space:]]*Server[[:space:]]*=' /etc/pacman.d/mirrorlist /etc/pacman.conf 2>/dev/null | sed 's/^/      /' || true
+else
+  echo "  - configured APT repositories: refresh metadata only when a prerequisite is missing"
+  grep -rhE '^[[:space:]]*(deb[[:space:]]|URIs:)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | sed 's/^/      /' || true
+  case "$(uname -m)" in
+    x86_64|amd64) OLLAMA_ARCH=amd64 ;;
+    aarch64|arm64) OLLAMA_ARCH=arm64 ;;
+    *) OLLAMA_ARCH="$(uname -m)" ;;
+  esac
+  echo "  - https://ollama.com/download/ollama-linux-$OLLAMA_ARCH.tar.zst"
+  echo "      install the Ollama binary only if it is missing; no service enable/start"
+  [ "$GPU" = amd ] && echo "  - https://ollama.com/download/ollama-linux-$OLLAMA_ARCH-rocm.tar.zst (AMD runtime)"
+fi
+echo "  - $WEIGHTS_URL"
+echo "      download only when $DIR/$FILE is absent"
+[ "$VISION" = 1 ] && {
+  echo "  - $VIS_URL"
+  echo "      download only when $DIR/$VIS is absent"
+}
+echo "  - https://pypi.org/simple/requests/, https://pypi.org/simple/pysocks/, https://pypi.org/simple/pyside6-essentials/"
+echo "      repair the isolated desktop runtime only when local version/import checks fail"
+echo "  - https://api.github.com/repos/Codemaster64/onionmind/commits/main"
+echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/dsh-onionmind-tor-search.js"
+echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/dsh-onionmind-tor.patch.yml"
+echo "      fetch the two Harness adapter assets at one resolved revision"
+echo "  Tor is NOT started or enabled. Model downloads above are direct and can reveal"
+echo "  this machine's IP and Onionmind-related destinations to network observers."
+confirm_network
+
 # --- 2. Packages ------------------------------------------------------------
 # Python deps come from the distro, NOT pip: both Arch and Ubuntu 23.04+ mark the
 # system Python externally-managed (PEP 668) and `pip install` refuses outright.
@@ -58,28 +234,35 @@ else
     sudo apt-get install -y software-properties-common
     sudo add-apt-repository -y universe
   fi
-  say "Installing packages"
-  sudo apt-get update
-  sudo apt-get install -y tor python3-requests python3-socks python3-tk python3-venv curl ca-certificates \
-    libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
-  # Ollama is not in apt. This is upstream's documented installer; fetched to a file
-  # first so it can be read before it runs, rather than piped blind into a shell.
+  PKGS=(tor python3-requests python3-socks python3-tk python3-venv curl ca-certificates zstd \
+    libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0)
+  MISSING=()
+  for p in "${PKGS[@]}"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed$' || MISSING+=("$p")
+  done
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    say "Installing missing packages only: ${MISSING[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${MISSING[@]}"
+  else
+    say "OS prerequisites already installed; skipping apt"
+  fi
+  # Use the upstream binary archive rather than its service-managing installer:
+  # this script must never enable or start Ollama on the user's behalf.
   if ! command -v ollama >/dev/null 2>&1; then
-    # mktemp, not a fixed /tmp name: a predictable path in a world-writable
-    # directory can be pre-created as a symlink, and `curl -o` follows it, so
-    # another local user could redirect this write. The file is fetched rather
-    # than piped so it CAN be inspected - ONIONMIND_SHOW_OLLAMA_SCRIPT=1 prints
-    # it and waits, instead of only claiming that is possible.
-    oi=$(mktemp) || die "could not create a temp file"
+    oi=$(mktemp --suffix=.tar.zst) || die "could not create a temp file"
     trap 'rm -f "$oi"' EXIT
-    say "Installing Ollama (upstream script -> $oi)"
-    curl -fsSL https://ollama.com/install.sh -o "$oi"
-    if [ "${ONIONMIND_SHOW_OLLAMA_SCRIPT:-0}" = 1 ]; then
-      echo "--- ollama install.sh ---"; cat "$oi"; echo "--- end ---"
-      printf 'Run it? [y/N] '; read -r ok
-      case "$ok" in y|Y) ;; *) die "aborted before running the ollama installer" ;; esac
+    say "Installing the Ollama binary archive without starting a service"
+    curl -fsSL "https://ollama.com/download/ollama-linux-$OLLAMA_ARCH.tar.zst" -o "$oi"
+    sudo tar -C /usr --zstd -xf "$oi"
+    rm -f "$oi"; trap - EXIT
+    if [ "$GPU" = amd ]; then
+      oi=$(mktemp --suffix=.tar.zst) || die "could not create a temp file"
+      trap 'rm -f "$oi"' EXIT
+      curl -fsSL "https://ollama.com/download/ollama-linux-$OLLAMA_ARCH-rocm.tar.zst" -o "$oi"
+      sudo tar -C /usr --zstd -xf "$oi"
+      rm -f "$oi"; trap - EXIT
     fi
-    sh "$oi"
   fi
 fi
 command -v ollama >/dev/null || die "ollama not on PATH after install"
@@ -96,34 +279,34 @@ case "$DIR" in
 esac
 
 # --- 3. Tor daemon ----------------------------------------------------------
-# The daemon (SOCKS on 9050) beats Tor Browser here: no GUI, no window to keep open,
-# and systemd restarts it.
-systemctl is-active --quiet tor || { say "Starting tor"; sudo systemctl enable --now tor; }
+# Installing a package is not consent to announce Tor use to the local network.
+# Report readiness, but leave both starting and enabling the service to the user.
 tor_up() { (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null && { exec 3<&- 3>&-; return 0; }; return 1; }
-for _ in $(seq 1 40); do tor_up && break; sleep 2; done
 if tor_up; then say "Tor SOCKS up on 9050"
-else warn "tor not listening - 'systemctl status tor'; search will refuse until it is"; fi
+else warn "tor is installed but not started; search remains fail-closed until you explicitly start Tor"; fi
 
 # --- 4. Ollama tuning + service --------------------------------------------
 # Ollama runs as a systemd service under its own user, so exporting these in your shell
 # does nothing - the server never sees them. They have to be a unit drop-in.
-say "Applying ollama tuning (systemd drop-in)"
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-sudo tee /etc/systemd/system/ollama.service.d/10-tuning.conf >/dev/null <<'UNIT'
+if systemctl cat ollama.service >/dev/null 2>&1; then
+  say "Writing Ollama tuning without enabling, starting, or restarting it"
+  sudo mkdir -p /etc/systemd/system/ollama.service.d
+  sudo tee /etc/systemd/system/ollama.service.d/10-tuning.conf >/dev/null <<'UNIT'
 [Service]
 Environment="OLLAMA_FLASH_ATTENTION=1"
 Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
 UNIT
-sudo systemctl daemon-reload
-sudo systemctl enable --now ollama
-sudo systemctl restart ollama          # pick up the drop-in if it was already running
-
-for _ in $(seq 1 40); do
-  curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null && break
-  sleep 2
-done
-curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null \
-  || die "ollama did not come up on 11434 ('journalctl -u ollama -n50' to see why)"
+  sudo systemctl daemon-reload
+else
+  warn "no Ollama systemd unit is installed; run 'OLLAMA_HOST=127.0.0.1:11434 ollama serve' yourself when ready"
+fi
+OLLAMA_RUNNING=0
+if curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null; then
+  OLLAMA_RUNNING=1
+  say "Existing Ollama server is ready on loopback"
+else
+  warn "Ollama was not started; model registration will be deferred"
+fi
 
 # --- 5. Pick the build that fits -------------------------------------------
 # ONIONMIND_MODEL picks what gets installed:
@@ -134,34 +317,10 @@ curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null \
 # and no generation newer than 3.8 exists. Qwen3.5 is the newest line WITH small dense
 # models, so that is what "fast" means here.
 # MTP builds keep the multi-token-prediction head; ollama uses it for speculative decoding.
-WANT="${ONIONMIND_MODEL:-auto}"
-case "$WANT" in
-  auto) [ "$VRAM" -ge 8000 ] && WANT=27b || WANT=fast ;;
-  fast|27b) ;;
-  *) die "ONIONMIND_MODEL must be auto, fast or 27b (got '$WANT')" ;;
-esac
-
-VISION=0
 if [ "$WANT" = 27b ]; then
-  VISION=1                                   # the mmproj is built for the 27B architecture
-  if   [ "$VRAM" -ge 17000 ]; then
-    REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-mtp-Q4_K_M.gguf
-  elif [ "$VRAM" -ge 12000 ]; then
-    REPO=soyaakinohara/qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
-    FILE=qwen3.8-27b-abliterated-3.69bpw-12GB-MTP.gguf
-  else
-    REPO=hotdogs/Qwen3.8-27B-abliterated-MTP-GGUF; FILE=Qwen3.8-27B-abliterated-IQ2_M.gguf
-  fi
   [ "$VRAM" -lt 8000 ] && warn "${VRAM} MiB VRAM: the 27B will run mostly on CPU (~1-2 tok/s)."
-  MODEL_NAME=inferno
   say "Model: INFERNO (27B)"
 else
-  if [ "$VRAM" -ge 6000 ]; then
-    REPO=mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF; FILE=Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf; SZ=9B
-  else
-    REPO=mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF; FILE=Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf; SZ=4B
-  fi
-  [ "$SZ" = 4B ] && MODEL_NAME=ember || MODEL_NAME=blaze
   [ "$SZ" = 4B ] && LABEL=EMBER || LABEL=BLAZE
   say "Model: $LABEL (Qwen3.5-$SZ) - fits entirely in VRAM"
   [ "$VRAM" -lt 8000 ] && warn "No small Qwen3.8 exists, so this is one generation back but far faster."
@@ -193,12 +352,15 @@ verify() {  # file url
   say "verified $(basename "$1")"
 }
 
-say "Downloading $FILE (resumable, ~10-16GB)"
-# ponytail: curl -C - resumes a dropped download; no retry logic of our own
-WEIGHTS_URL="https://huggingface.co/$REPO/resolve/main/$FILE"
-curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" "$WEIGHTS_URL"
-verify "$DIR/$FILE" "$WEIGHTS_URL"
-chmod 644 "$DIR/$FILE"
+if [ -s "$DIR/$FILE" ]; then
+  say "Weight file already present; skipping download"
+else
+  say "Downloading $FILE (resumable, ~10-16GB)"
+  # ponytail: curl -C - resumes a dropped download; no retry logic of our own
+  curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" "$WEIGHTS_URL"
+  verify "$DIR/$FILE" "$WEIGHTS_URL"
+  chmod 644 "$DIR/$FILE"
+fi
 
 # --- 7. Model ---------------------------------------------------------------
 # num_gpu 99 = all layers on GPU; ollama's auto-split is too conservative and silently
@@ -209,7 +371,7 @@ chmod 644 "$DIR/$FILE"
 cat > "$DIR/Modelfile" <<MF
 FROM $DIR/$FILE
 PARAMETER num_gpu 99
-PARAMETER num_ctx 8192
+PARAMETER num_ctx 16384
 PARAMETER temperature 0.7
 PARAMETER stop "<|im_start|>"
 PARAMETER stop "<|im_end|>"
@@ -221,8 +383,19 @@ TEMPLATE """{{ if .System }}<|im_start|>system
 {{ .Response }}<|im_end|>
 """
 MF
-say "Registering model"
-ollama create "$MODEL_NAME" -f "$DIR/Modelfile"
+model_registered() {
+  [ "$OLLAMA_RUNNING" = 1 ] || return 1
+  OLLAMA_HOST=127.0.0.1:11434 ollama list 2>/dev/null |
+    awk -v wanted="$1" 'NR > 1 && ($1 == wanted || $1 == wanted ":latest") { found=1 } END { exit !found }'
+}
+if model_registered "$MODEL_NAME"; then
+  say "Model $MODEL_NAME is already registered; skipping ollama create"
+elif [ "$OLLAMA_RUNNING" = 1 ]; then
+  say "Registering model"
+  OLLAMA_HOST=127.0.0.1:11434 ollama create "$MODEL_NAME" -f "$DIR/Modelfile"
+else
+  warn "model $MODEL_NAME is downloaded but not registered; start Ollama explicitly and rerun this installer"
+fi
 
 # --- 7b. Vision (27B only - the mmproj is built for that architecture) -------
 if [ "$VISION" = 1 ]; then
@@ -230,19 +403,21 @@ if [ "$VISION" = 1 ]; then
 # quant-specific, so this one projector binds to any Qwen3.8-27B build (verified
 # against the 3.69bpw MTP model it is paired with here). Shares the base blob, so
 # it costs ~900MB on top, not another full model.
-VIS=Qwen3.8-27B-Uncensored-vision-f16.gguf
-say "Downloading vision projector (885 MiB)"
-VIS_URL="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/$VIS"
-curl -L -C - --fail --noproxy '*' -o "$DIR/$VIS" "$VIS_URL"
-verify "$DIR/$VIS" "$VIS_URL"
-chmod 644 "$DIR/$VIS"
+if [ -s "$DIR/$VIS" ]; then
+  say "Vision projector already present; skipping download"
+else
+  say "Downloading vision projector (885 MiB)"
+  curl -L -C - --fail --noproxy '*' -o "$DIR/$VIS" "$VIS_URL"
+  verify "$DIR/$VIS" "$VIS_URL"
+  chmod 644 "$DIR/$VIS"
+fi
 # ponytail: just write the second Modelfile; editing the first one with sed needs a
 # literal newline in the replacement, which sed rejects.
 cat > "$DIR/Modelfile.vision" <<MFV
 FROM $DIR/$FILE
 FROM $DIR/$VIS
 PARAMETER num_gpu 99
-PARAMETER num_ctx 8192
+PARAMETER num_ctx 16384
 PARAMETER temperature 0.7
 PARAMETER stop "<|im_start|>"
 PARAMETER stop "<|im_end|>"
@@ -254,9 +429,15 @@ TEMPLATE """{{ if .System }}<|im_start|>system
 {{ .Response }}<|im_end|>
 """
 MFV
-say "Registering vision model"
-ollama create "$MODEL_NAME-vision" -f "$DIR/Modelfile.vision" ||
-    warn "vision model failed to build - text model is fine"
+if model_registered "$MODEL_NAME-vision"; then
+  say "Vision model $MODEL_NAME-vision is already registered; skipping ollama create"
+elif [ "$OLLAMA_RUNNING" = 1 ]; then
+  say "Registering vision model"
+  OLLAMA_HOST=127.0.0.1:11434 ollama create "$MODEL_NAME-vision" -f "$DIR/Modelfile.vision" ||
+      warn "vision model failed to build - text model is fine"
+else
+  warn "vision assets are downloaded but registration is deferred until Ollama is started explicitly"
+fi
 fi
 
 # --- 8. Tor search tool -----------------------------------------------------
@@ -267,9 +448,9 @@ cat > "$DIR/onionmind.py" <<'PYEOF'
   onionmind.py "one-shot question"    # NOTE: lands in your shell history
   onionmind.py                        # interactive - queries stay out of history
 
-Needs a tor daemon on 9050 (systemctl start tor) or Tor Browser on 9150.
+Needs a local Tor service, or Tor Browser installed on Windows for hidden background Tor.
 """
-import sys, re, html, json, secrets, urllib.parse, requests
+import sys, re, html, json, os, secrets, socket, subprocess, time, urllib.parse, requests
 
 for _s in (sys.stdout, sys.stderr):              # Windows console defaults to cp1252,
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
@@ -285,7 +466,8 @@ MODEL  = "inferno"
 # key from $ALL_PROXY via setdefault, so listing it as None is what actually stops
 # the whole conversation being routed to whatever proxy the user has exported.
 NOPROXY = {"http": None, "https": None, "all": None}
-PORTS  = (9050, 9150)                            # 9050 = tor daemon, 9150 = Tor Browser
+PORTS  = (9150, 9050) if os.name == "nt" else (9050, 9150)
+# Windows prefers Tor Browser's hidden daemon; Unix prefers the system Tor daemon.
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
 UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
 # DuckDuckGo's onion service. Preferred over the clearnet endpoint for two reasons:
@@ -293,12 +475,14 @@ UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
 # clearnet endpoint returns 403 to most Tor exits, which looks like "search is broken".
 ENDPOINTS = ("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/",
              "https://html.duckduckgo.com/html/")
-# Reasoning models spend the budget thinking BEFORE answering. A 9B needed 5514 tokens
-# to reach its first word; capped lower it returns an empty string, which reads as a
-# refusal but is just truncation.
-NUM_PREDICT = 8192
+# Reasoning models spend the budget thinking BEFORE answering. Some local models
+# can consume the former 8192-token ceiling without reaching their visible answer.
+# Keep the request context at least as large as the generation budget.
+NUM_PREDICT = 16384
+NUM_CTX = 16384
 
 _port = None
+_managed_tor_process = None
 
 
 def _proxies(port, isolate):
@@ -309,9 +493,125 @@ def _proxies(port, isolate):
     # socks5h (not socks5) also resolves DNS through Tor; plain socks5 leaks every hostname.
 
 
+def tor_proxy_port():
+    """Return a locally listening SOCKS port without making an internet request."""
+    for port in PORTS:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return port
+        except OSError:
+            continue
+    return None
+
+
+def _tor_browser_roots():
+    """Return likely Tor Browser roots using local Windows paths only."""
+    roots = []
+    override = os.environ.get("ONIONMIND_TOR_BROWSER")
+    if override:
+        roots.append(override)
+    if os.name == "nt":
+        try:
+            import ctypes
+            desktop = ctypes.create_unicode_buffer(32768)
+            # CSIDL_DESKTOPDIRECTORY resolves OneDrive Known Folder Move too.
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, desktop) == 0:
+                roots.append(os.path.join(desktop.value, "Tor Browser"))
+        except (AttributeError, OSError, ValueError):
+            pass
+    roots.extend([
+        os.path.join(os.path.expanduser("~"), "Desktop", "Tor Browser"),
+        os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Tor Browser"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Tor Browser"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Tor Browser"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Tor Browser"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Tor Browser"),
+        os.path.join(os.environ.get("ProgramW6432", ""), "Tor Browser"),
+    ])
+    unique = []
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        root = os.path.abspath(os.path.expandvars(os.path.expanduser(root)))
+        if os.path.basename(root).lower() == "browser":
+            root = os.path.dirname(root)
+        key = os.path.normcase(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def start_tor_hidden(timeout=30, stop_event=None):
+    """Start Tor Browser's Tor daemon without opening a browser or console window.
+
+    This is called only after the user opts into Tor search. Existing Tor proxies
+    are reused and never adopted or stopped by Onionmind.
+    """
+    global _managed_tor_process
+    existing = tor_proxy_port()
+    if existing:
+        return existing
+    if _managed_tor_process is not None:
+        stop_managed_tor()
+    if os.name != "nt":
+        raise RuntimeError("Start the local Tor service, then enable Tor search again.")
+
+    for root in _tor_browser_roots():
+        browser = os.path.join(root, "Browser")
+        tor_exe = os.path.join(browser, "TorBrowser", "Tor", "tor.exe")
+        data = os.path.join(browser, "TorBrowser", "Data", "Tor")
+        defaults = os.path.join(data, "torrc-defaults")
+        torrc = os.path.join(data, "torrc")
+        if not all(os.path.isfile(path) for path in (tor_exe, defaults, torrc)):
+            continue
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Background Tor start was stopped.")
+        _managed_tor_process = subprocess.Popen(
+            [tor_exe, "--defaults-torrc", defaults, "-f", torrc,
+             "--DisableNetwork", "0", "--SocksPort", "9150 IsolateSOCKSAuth"],
+            cwd=browser,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                stop_managed_tor()
+                raise RuntimeError("Background Tor start was stopped.")
+            port = tor_proxy_port()
+            if port:
+                return port
+            if _managed_tor_process.poll() is not None:
+                break
+            time.sleep(0.25)
+        stop_managed_tor()
+        raise RuntimeError("The background Tor process did not become ready.")
+    raise RuntimeError("Tor Browser's background Tor process was not found. Install Tor Browser first.")
+
+
+def stop_managed_tor():
+    """Stop only the hidden Tor process that this Onionmind session started."""
+    global _managed_tor_process, _port
+    _port = None
+    process, _managed_tor_process = _managed_tor_process, None
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+
+
 def tor_check():
     """Pin the Tor port, or exit. Fails closed - never falls back to a direct connection."""
     global _port
+    _port = None
     for port in PORTS:
         try:
             r = requests.get("https://check.torproject.org/api/ip",
@@ -323,7 +623,7 @@ def tor_check():
             print(f"[tor] active, exit {r.get('IP')} (port {port})", file=sys.stderr)
             return
         print(f"[tor] port {port} responded but is NOT Tor - refusing", file=sys.stderr)
-    sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
+    sys.exit("No verified Tor proxy is available. Enable Tor search again or start your local Tor service.")
 
 
 def strip_tag(name):
@@ -410,11 +710,14 @@ TOOLS = [{"type": "function", "function": {
                    "properties": {"query": {"type": "string", "description": "search terms"}}}}}]
 
 
-def _ask_ollama(messages):
+def _ask_ollama(messages, allow_search=False):
+    payload = {"model": MODEL, "messages": messages, "stream": False,
+               "options": {"num_predict": NUM_PREDICT, "num_ctx": NUM_CTX}}
+    if allow_search:
+        payload["tools"] = TOOLS
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": False, "options": {"num_predict": NUM_PREDICT}})
+                          json=payload)
     except requests.exceptions.ConnectionError:
         sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
@@ -424,12 +727,15 @@ def _ask_ollama(messages):
     return r.json()["message"]
 
 
-def _ask_ollama_stream(messages, on_text, stop_event=None):
+def _ask_ollama_stream(messages, on_text, stop_event=None, allow_search=False):
     """Stream one Ollama response while retaining tool-call compatibility."""
+    payload = {"model": MODEL, "messages": messages, "stream": True,
+               "options": {"num_predict": NUM_PREDICT, "num_ctx": NUM_CTX}}
+    if allow_search:
+        payload["tools"] = TOOLS
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": True, "options": {"num_predict": NUM_PREDICT}})
+                          json=payload)
     except requests.exceptions.ConnectionError:
         sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
@@ -543,11 +849,14 @@ def _to_openai(messages):
     return out
 
 
-def _ask_llama(messages):
+def _ask_llama(messages, allow_search=False):
+    payload = {"messages": _to_openai(messages), "stream": False,
+               "max_tokens": NUM_PREDICT}
+    if allow_search:
+        payload["tools"] = TOOLS
     try:
         r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"messages": _to_openai(messages), "tools": TOOLS,
-                                "stream": False, "max_tokens": NUM_PREDICT})
+                          json=payload)
     except requests.exceptions.ConnectionError:
         sys.exit("llama-server is not running on 127.0.0.1:8080. Start it, then retry.")
     if not r.ok:
@@ -568,32 +877,41 @@ def _ask_llama(messages):
     return msg
 
 
-def turn(messages, stop_event=None):
-    """Run one user turn to completion, letting the model search as often as it needs."""
+def turn(messages, stop_event=None, allow_search=False):
+    """Run one user turn; external search is available only after explicit opt-in."""
     for _ in range(6):                            # ponytail: hard cap, not a retry policy
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
-        msg = _ask_llama(messages) if BACKEND == "llama-server" else _ask_ollama(messages)
+        msg = (_ask_llama(messages, allow_search=allow_search)
+               if BACKEND == "llama-server"
+               else _ask_ollama(messages, allow_search=allow_search))
         messages.append(msg)
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
             if not answer:
-                return ("(the model used its whole token budget thinking and never reached "
-                        f"an answer - raise NUM_PREDICT above {NUM_PREDICT} in this script)")
+                return (f"(the model used its whole {NUM_PREDICT}-token response budget "
+                        "thinking and never reached an answer; try a more direct prompt or "
+                        "raise NUM_PREDICT and NUM_CTX together)")
             return answer
         for c in calls:
             if stop_event is not None and stop_event.is_set():
                 return "(stopped)"
             fn = c["function"]
             args = fn.get("arguments") or {}
-            result = web_search(args.get("query", "")) if fn["name"] == "web_search" \
-                     else f"(unknown tool {fn['name']})"
+            if fn["name"] == "web_search":
+                if not allow_search:
+                    result = "(web search was not allowed for this turn)"
+                else:
+                    tor_check()
+                    result = web_search(args.get("query", ""))
+            else:
+                result = f"(unknown tool {fn['name']})"
             messages.append({"role": "tool", "tool_name": fn["name"], "content": result})
     return "(gave up after 6 tool rounds)"
 
 
-def turn_stream(messages, on_text, stop_event=None, on_event=None):
+def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=False):
     """Run a turn with live text and optional structured tool activity.
 
     The extra callback is deliberately optional so existing CLI, installer, and
@@ -601,31 +919,43 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None):
     to render real tool state without scraping transcript text.
     """
     if BACKEND != "ollama":
-        return turn(messages, stop_event)
+        return turn(messages, stop_event, allow_search=allow_search)
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
-        msg = _ask_ollama_stream(messages, on_text, stop_event)
+        msg = _ask_ollama_stream(messages, on_text, stop_event, allow_search=allow_search)
         if msg.get("stopped"):
             return "(stopped)"
         messages.append(msg)
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
-            return answer or ("(the model used its whole token budget thinking and never "
-                              f"reached an answer - raise NUM_PREDICT above {NUM_PREDICT} "
-                              "in this script)")
+            return answer or (f"(the model used its whole {NUM_PREDICT}-token response budget "
+                              "thinking and never reached an answer; try a more direct prompt or "
+                              "raise NUM_PREDICT and NUM_CTX together)")
         for c in calls:
             if stop_event is not None and stop_event.is_set():
                 return "(stopped)"
             fn = c["function"]
             args = fn.get("arguments") or {}
-            if on_event:
+            denied = fn["name"] == "web_search" and not allow_search
+            if on_event and denied:
+                on_event({"kind": "tool_refused", "name": fn.get("name", "unknown"),
+                          "arguments": args})
+            elif on_event:
                 on_event({"kind": "tool_started", "name": fn.get("name", "unknown"),
                           "arguments": args})
-            result = web_search(args.get("query", "")) if fn["name"] == "web_search" \
-                     else f"(unknown tool {fn['name']})"
-            if on_event:
+            if fn["name"] == "web_search":
+                if denied:
+                    result = "(web search was not allowed for this turn)"
+                else:
+                    tor_check()
+                    if on_event:
+                        on_event({"kind": "tor_verified", "port": _port})
+                    result = web_search(args.get("query", ""))
+            else:
+                result = f"(unknown tool {fn['name']})"
+            if on_event and not denied:
                 on_event({"kind": "tool_finished", "name": fn.get("name", "unknown"),
                           "result": result})
             messages.append({"role": "tool", "tool_name": fn["name"], "content": result})
@@ -735,7 +1065,20 @@ def run_legacy_ui():
     image_label.pack(side="left", padx=12, pady=5)
     remove_image = ttk.Button(actions, text="Remove image", state="disabled")
     remove_image.pack(side="left", pady=2)
-    hint = tk.Label(actions, text="Answers stay on this PC · searches use Tor",
+    allow_search_var = tk.BooleanVar(value=False)
+    allow_search = tk.Checkbutton(
+        actions,
+        text="Allow Tor search this turn",
+        variable=allow_search_var,
+        bg="#0e0b12",
+        fg=dim,
+        activebackground="#0e0b12",
+        activeforeground=text,
+        selectcolor=panel,
+        font=("Segoe UI", 9),
+    )
+    allow_search.pack(side="right", padx=(12, 0), pady=5)
+    hint = tk.Label(actions, text="Local-only unless you opt in",
                     bg="#0e0b12", fg=dim, font=("Segoe UI", 9))
     hint.pack(side="right", pady=5)
 
@@ -783,6 +1126,13 @@ def run_legacy_ui():
     def install_model():
         name = simpledialog.askstring("Install model", "Model name:", parent=root)
         if not name or BACKEND != "ollama" or busy:
+            return
+        if not messagebox.askyesno(
+                "Direct model download",
+                "The local Ollama service will download this model directly from its "
+                "configured registry. This is not Tor-routed and exposes this machine's "
+                "network address. Continue?",
+                parent=root):
             return
         stop_event.clear()
         install_model_button.configure(state="disabled")
@@ -882,10 +1232,11 @@ def run_legacy_ui():
     def start():
         try:
             detect_backend()
-            tor_check()
+            tor_port = tor_proxy_port()
             models = installed_models() if BACKEND == "ollama" else []
             root.after(0, lambda: populate_models(models))
-            root.after(0, lambda: set_status(f"ready · {MODEL} · Tor connected", "#9ef0b0"))
+            tor_note = f"Tor proxy {tor_port} available" if tor_port else "Tor search off"
+            root.after(0, lambda: set_status(f"ready · {MODEL} · {tor_note}", "#9ef0b0"))
             root.after(0, lambda: append("onion", f"Ready with {MODEL}. Ask anything."))
         except (Exception, SystemExit) as exc:
             root.after(0, lambda: set_status("not ready", "#e39a9a"))
@@ -908,27 +1259,37 @@ def run_legacy_ui():
                 return
             clear_image()
         history.append(message)
+        search_allowed = bool(allow_search_var.get())
+        allow_search_var.set(False)
         busy = True
         stop_event.clear()
         send.configure(state="disabled")
         stop.configure(state="normal")
+        allow_search.configure(state="disabled")
         set_status("thinking…", dim)
         stream_begin()
 
         def work():
             nonlocal busy
             try:
+                if search_allowed:
+                    port = start_tor_hidden(stop_event=stop_event)
+                    root.after(0, lambda: set_status(f"Tor running · {port}", "#9ef0b0"))
                 answer = turn_stream(
                     history,
                     lambda chunk: root.after(0, lambda chunk=chunk: stream_update(chunk)),
-                    stop_event)
+                    stop_event,
+                    allow_search=search_allowed)
             except (Exception, SystemExit) as exc:
                 answer = "Error: " + user_error(exc)
             root.after(0, lambda: stream_finish(answer))
             busy = False
+            tor_port = tor_proxy_port()
+            ready_text = f"ready · {MODEL} · Tor running · {tor_port}" if tor_port else f"ready · {MODEL} · Tor off"
             root.after(0, lambda: send.configure(state="normal"))
             root.after(0, lambda: stop.configure(state="disabled"))
-            root.after(0, lambda: set_status("ready", "#9ef0b0"))
+            root.after(0, lambda: allow_search.configure(state="normal"))
+            root.after(0, lambda: set_status(ready_text, "#9ef0b0"))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -946,15 +1307,19 @@ def run_legacy_ui():
 
     def launch_coding_agent():
         """Open DeepSeek Harness in its own agent session via Ollama."""
+        if not messagebox.askyesno(
+                "Run DeepSeek Harness directly?",
+                "DeepSeek Harness and commands it runs are not confined to Tor. They may "
+                "contact arbitrary hosts directly and expose this machine's network address. Continue?",
+                parent=root):
+            return
         try:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             env = os.environ.copy()
             env["ONIONMIND_PY"] = os.path.abspath(__file__)
             env["ONIONMIND_PYTHON"] = "python"
-            patch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "dsh-onionmind-tor.patch.yml")
             subprocess.Popen(["ollama", "launch", "dsh", "--model", MODEL,
-                              "--", "--patch", patch],
+                              "--", "--profile", "headless"],
                              creationflags=flags, env=env)
             set_status("coding agent launching…", "#9ef0b0")
         except (OSError, ValueError) as exc:
@@ -976,7 +1341,10 @@ def run_legacy_ui():
     question.bind("<Return>", lambda _event: ask())
     root.after(100, lambda: threading.Thread(target=start, daemon=True).start())
     question.focus_set()
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        stop_managed_tor()
 
 
 def run_ui():
@@ -997,41 +1365,58 @@ if __name__ == "__main__":
         query = " ".join(a for a in sys.argv[1:] if a != "--tor-search").strip()
         if not query:
             raise SystemExit("usage: onionmind.py --tor-search <query>")
-        tor_check()
-        print(web_search(query), end="")
+        try:
+            start_tor_hidden()
+            tor_check()
+            print(web_search(query), end="")
+        finally:
+            stop_managed_tor()
         raise SystemExit
     if "--ui" in sys.argv:
         run_ui()
         raise SystemExit
-    detect_backend()
-    tor_check()
-    history = []
-    if len(sys.argv) > 1:
-        history.append({"role": "user", "content": " ".join(sys.argv[1:])})
-        print("\n" + turn(history))
-    else:
-        # AI Act Art. 50(1): the interface itself must say it is an AI.
-        print("You are talking to an AI. It can be wrong; you are responsible for what you do with the output.")
-        print("Chat - it searches over Tor when it needs to. /save <file> exports the")
-        print("conversation. Ctrl-C to quit.\n")
-        while True:
-            try:
-                q = input("you> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if q.startswith("/save"):
-                parts = q.split(maxsplit=1)
-                if len(parts) < 2 or not parts[1].strip():
-                    print("usage: /save <file>   e.g. /save notes.txt")
-                else:
-                    try:
-                        _save(history, parts[1].strip())
-                    except OSError as e:
-                        print(f"[error] {e}")
-                continue
-            if q:
-                history.append({"role": "user", "content": q})
-                print("\n" + turn(history) + "\n")
+    allow_search_once = "--allow-search" in sys.argv
+    cli_args = [a for a in sys.argv[1:] if a != "--allow-search"]
+    try:
+        detect_backend()
+        history = []
+        if cli_args:
+            if allow_search_once:
+                start_tor_hidden()
+            history.append({"role": "user", "content": " ".join(cli_args)})
+            print("\n" + turn(history, allow_search=allow_search_once))
+        else:
+            # AI Act Art. 50(1): the interface itself must say it is an AI.
+            print("You are talking to an AI. It can be wrong; you are responsible for what you do with the output.")
+            print("Chat is local-only by default. /search <question> grants Tor search for one turn.")
+            print("/save <file> exports the conversation. Ctrl-C quits.\n")
+            while True:
+                try:
+                    q = input("you> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if q.startswith("/save"):
+                    parts = q.split(maxsplit=1)
+                    if len(parts) < 2 or not parts[1].strip():
+                        print("usage: /save <file>   e.g. /save notes.txt")
+                    else:
+                        try:
+                            _save(history, parts[1].strip())
+                        except OSError as e:
+                            print(f"[error] {e}")
+                    continue
+                search_this_turn = q.startswith("/search ")
+                if search_this_turn:
+                    q = q[len("/search "):].strip()
+                    if not q:
+                        print("usage: /search <question>")
+                        continue
+                    start_tor_hidden()
+                if q:
+                    history.append({"role": "user", "content": q})
+                    print("\n" + turn(history, allow_search=search_this_turn) + "\n")
+    finally:
+        stop_managed_tor()
 PYEOF
 # point the tool at whichever model was installed
 sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
@@ -1071,6 +1456,8 @@ __all__ = [
     "SettingsStore",
     "ChatSession",
     "SessionStore",
+    "strip_thinking",
+    "sanitize_messages",
     "WorkspaceChange",
     "WorkspaceSnapshot",
     "WorkspaceInspector",
@@ -1325,7 +1712,7 @@ class ChatSession:
             "title": self.title,
             "model": self.model,
             "workspace": self.workspace,
-            "messages": copy.deepcopy(self.messages),
+            "messages": sanitize_messages(self.messages),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "archived_at": self.archived_at,
@@ -1333,15 +1720,93 @@ class ChatSession:
 
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_THINK_TAG = re.compile(r"<\s*(/?)\s*think(?:\s[^>]*)?>", re.IGNORECASE)
+_REASONING_FIELDS = frozenset(
+    {"analysis", "reasoning", "reasoning_content", "thinking"}
+)
 
 
-def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def strip_thinking(text: str) -> str:
+    """Remove all model reasoning blocks from completed assistant text.
+
+    A response can contain reasoning before a tool call and another block after
+    the tool result.  Treat an unmatched closing tag as the end of an implicit
+    leading reasoning block, and an unmatched opening tag as reasoning through
+    end-of-response.  This deliberately fails closed for legacy transcripts.
+    """
+
+    if not isinstance(text, str):
+        raise TypeError("assistant content must be a string")
+
+    visible: list[str] = []
+    cursor = 0
+    depth = 0
+    for tag in _THINK_TAG.finditer(text):
+        closing = bool(tag.group(1))
+        if closing:
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    cursor = tag.end()
+            else:
+                # Some local reasoning models omit the opening tag. Preserve
+                # the established fail-closed behavior and discard that prefix.
+                visible.clear()
+                cursor = tag.end()
+            continue
+
+        if depth == 0:
+            visible.append(text[cursor:tag.start()])
+        depth += 1
+
+    if depth == 0:
+        tail = text[cursor:]
+        # If generation ended while spelling an opening tag, keep only the
+        # completed visible prefix. This also covers transcripts that contain
+        # an earlier complete block followed by a truncated later block.
+        partial = tail.casefold().find("<think")
+        visible.append(tail[:partial] if partial >= 0 else tail)
+    return "".join(visible).strip()
+
+
+def sanitize_messages(
+    messages: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deep-copy messages and remove reasoning from every assistant entry.
+
+    Non-content fields such as ``tool_calls`` are retained verbatim so a live
+    turn can finish its tool protocol before the sanitized history is stored.
+    """
+
     copied: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             raise TypeError(f"message {index} must be a mapping")
-        copied.append(copy.deepcopy(dict(message)))
+        item = copy.deepcopy(dict(message))
+        if item.get("role") == "assistant":
+            for key in list(item):
+                if isinstance(key, str) and key.casefold() in _REASONING_FIELDS:
+                    item.pop(key, None)
+            content = item.get("content")
+            item["content"] = _sanitize_assistant_content(content)
+        copied.append(item)
     return copied
+
+
+def _sanitize_assistant_content(value: Any) -> Any:
+    if isinstance(value, str):
+        return strip_thinking(value)
+    if isinstance(value, Mapping):
+        return {key: _sanitize_assistant_content(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_assistant_content(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_assistant_content(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return sanitize_messages(messages)
 
 
 class SessionStore:
@@ -2212,6 +2677,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -2283,6 +2749,7 @@ QLabel#attachmentLabel { color: #cdbbd5; background: #2c252e; border: 1px solid 
 QLabel#success { color: #84c08f; }
 QLabel#danger { color: #d88675; }
 QLabel#accent { color: #c3a1d3; }
+QLabel#thinkingLabel { color: #c9c1b7; }
 QPushButton, QToolButton, QComboBox, QLineEdit {
     background: #24221f;
     border: 1px solid #45413b;
@@ -2390,6 +2857,190 @@ def _brand_runtime_text(value: Any) -> str:
     for pattern, replacement in _BRAND_REPLACEMENTS:
         text = pattern.sub(replacement, text)
     return text
+
+
+_THINK_TAG = re.compile(r"<\s*(/?)\s*think(?:\s[^>]*)?>", re.IGNORECASE)
+_REASONING_FIELDS = frozenset(
+    {"analysis", "reasoning", "reasoning_content", "thinking"}
+)
+
+
+def _strip_thinking(text: Any) -> str:
+    """Fail closed when removing completed or truncated reasoning blocks."""
+
+    value = _as_text(text)
+    visible: list[str] = []
+    cursor = 0
+    depth = 0
+    for tag in _THINK_TAG.finditer(value):
+        closing = bool(tag.group(1))
+        if closing:
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    cursor = tag.end()
+            else:
+                visible.clear()
+                cursor = tag.end()
+            continue
+        if depth == 0:
+            visible.append(value[cursor:tag.start()])
+        depth += 1
+    if depth == 0:
+        tail = value[cursor:]
+        partial = tail.casefold().find("<think")
+        visible.append(tail[:partial] if partial >= 0 else tail)
+    return "".join(visible).strip()
+
+
+def _sanitize_assistant_messages(
+    messages: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy history while preserving tool protocol and dropping reasoning."""
+
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        item = copy.deepcopy(dict(message))
+        if item.get("role") == "assistant":
+            for key in list(item):
+                if isinstance(key, str) and key.casefold() in _REASONING_FIELDS:
+                    item.pop(key, None)
+            content = item.get("content")
+            item["content"] = _sanitize_assistant_content(content)
+        sanitized.append(item)
+    return sanitized
+
+
+def _sanitize_assistant_content(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_thinking(value)
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_assistant_content(item) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_assistant_content(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_assistant_content(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _conversation_markdown(
+    title: str,
+    model: str,
+    workspace: Optional[str],
+    messages: Iterable[dict[str, Any]],
+) -> str:
+    """Format a local export after defensively cleaning legacy history."""
+
+    lines = [f"# {title}", "", f"- Model: `{model}`"]
+    if workspace:
+        lines.append(f"- Workspace: `{workspace}`")
+    lines.extend(("", "---", ""))
+    for message in _sanitize_assistant_messages(messages):
+        role = _as_text(message.get("role", "message"))
+        heading = {"user": "Developer", "assistant": "Onionmind", "tool": "Local tool"}.get(
+            role, role.title()
+        )
+        content = message.get("content")
+        if not isinstance(content, str):
+            content = "[local image attachment]"
+        lines.extend((f"## {heading}", "", content, ""))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+class ThinkingStreamFilter:
+    """Hide ``<think>`` blocks without leaking split tag fragments.
+
+    The model transport is free to divide text at any byte boundary.  Keep only
+    the small amount of undecided tag text between calls; reasoning itself is
+    discarded instead of accumulated.  Tool use can cause several model
+    responses to share one callback, so opening tags remain detectable after
+    ordinary answer text has already streamed.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._state = "leading"
+        self._pending = ""
+        self._finished = False
+
+    @staticmethod
+    def _trailing_marker_prefix(text: str, marker: str) -> str:
+        maximum = min(len(text), len(marker) - 1)
+        for length in range(maximum, 0, -1):
+            if text.endswith(marker[:length]):
+                return text[-length:]
+        return ""
+
+    def feed(self, chunk: Any) -> str:
+        """Return only newly visible answer text from one transport chunk."""
+        if self._finished:
+            return ""
+        data = _as_text(chunk)
+        visible: list[str] = []
+
+        while data:
+            if self._state == "visible":
+                combined = self._pending + data
+                self._pending = ""
+                open_at = combined.find(self._OPEN)
+                if open_at < 0:
+                    suffix = self._trailing_marker_prefix(combined, self._OPEN)
+                    if suffix:
+                        visible.append(combined[:-len(suffix)])
+                        self._pending = suffix
+                    else:
+                        visible.append(combined)
+                    break
+                visible.append(combined[:open_at])
+                data = combined[open_at + len(self._OPEN):]
+                self._state = "thinking"
+                continue
+
+            if self._state == "leading":
+                self._pending += data
+                data = ""
+                content = self._pending.lstrip()
+                if not content:
+                    continue
+                if self._OPEN.startswith(content):
+                    if content == self._OPEN:
+                        self._pending = ""
+                        self._state = "thinking"
+                    continue
+                if content.startswith(self._OPEN):
+                    data = content[len(self._OPEN):]
+                    self._pending = ""
+                    self._state = "thinking"
+                    continue
+                data = self._pending
+                self._pending = ""
+                self._state = "visible"
+                continue
+
+            combined = self._pending + data
+            self._pending = ""
+            close_at = combined.find(self._CLOSE)
+            if close_at < 0:
+                self._pending = self._trailing_marker_prefix(combined, self._CLOSE)
+                break
+            data = combined[close_at + len(self._CLOSE):]
+            self._state = "visible"
+
+        return "".join(visible)
+
+    def finish(self) -> None:
+        """Close a completed stream without exposing an undecided tag prefix."""
+        self._pending = ""
+        self._state = "finished"
+        self._finished = True
+
+    def abort(self) -> None:
+        """Drop buffered model output after stop or failure."""
+        self.finish()
 
 
 def _friendly_error(core: Any, exc: BaseException) -> str:
@@ -2640,6 +3291,118 @@ class StatusPill(QFrame):
         self.setAccessibleName(f"{self.prefix} status: {text}")
 
 
+def _ui_animations_enabled() -> bool:
+    override = os.environ.get("ONIONMIND_REDUCE_MOTION", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        enabled = ctypes.c_int(1)
+        # SPI_GETCLIENTAREAANIMATION follows Windows' Animation effects setting.
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+            return bool(enabled.value)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
+class ThinkingDots(QWidget):
+    """A tiny, low-cost progress cue; adjacent text carries the meaning."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._frame = 0
+        self.setFixedSize(34, 16)
+        self.setAccessibleName("Thinking progress")
+
+    def advance(self) -> None:
+        self._frame = (self._frame + 1) % 3
+        self.update()
+
+    def reset(self) -> None:
+        self._frame = 0
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index, x in enumerate((6, 17, 28)):
+            active = index == self._frame
+            painter.setBrush(QColor("#b791c9" if active else "#625b63"))
+            radius = 3.0 if active else 2.5
+            painter.drawEllipse(QPointF(float(x), 8.0), radius, radius)
+
+
+class ThinkingIndicator(QWidget):
+    """Accessible pending state that becomes static when motion is reduced."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._running = False
+        self._motion_enabled = _ui_animations_enabled()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 1, 0, 2)
+        layout.setSpacing(6)
+        self.label = QLabel("Thinking")
+        self.label.setObjectName("thinkingLabel")
+        self.dots = ThinkingDots(self)
+        layout.addWidget(self.label)
+        layout.addWidget(self.dots)
+        layout.addStretch(1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(280)
+        self.timer.timeout.connect(self.dots.advance)
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._application_state_changed)
+        self.setAccessibleName("Onionmind is thinking")
+        self.setAccessibleDescription("A local response is pending")
+        self.hide()
+
+    def start(self, text: str = "Thinking") -> None:
+        self._running = True
+        self.set_label(text)
+        self.dots.reset()
+        self.show()
+        self._sync_timer()
+
+    def stop(self) -> None:
+        self._running = False
+        self.timer.stop()
+        self.hide()
+
+    def set_label(self, text: str) -> None:
+        label = text.strip() or "Thinking"
+        self.label.setText(label)
+        self.setAccessibleName(f"Onionmind is {label.lower()}")
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._sync_timer()
+
+    def hideEvent(self, event: Any) -> None:
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def _application_state_changed(self, state: Qt.ApplicationState) -> None:
+        del state
+        self._sync_timer()
+
+    def _sync_timer(self) -> None:
+        app = QApplication.instance()
+        active = app is None or app.applicationState() == Qt.ApplicationState.ApplicationActive
+        should_run = self._running and self._motion_enabled and self.isVisible() and active
+        if should_run:
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+
 class ComposerEdit(QTextEdit):
     sendRequested = Signal()
     filesDropped = Signal(list)
@@ -2723,7 +3486,10 @@ class MessageBlock(QWidget):
         self.body.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._target_body_width = max(520, self.body.fontMetrics().horizontalAdvance("0" * 74))
         self.set_reading_width(self._target_body_width)
-        self.body.setAccessibleName(f"{who.text()} message")
+        self._author_name = who.text()
+        self.body.setAccessibleName(f"{self._author_name} message")
+        self.thinking = ThinkingIndicator(self)
+        column.addWidget(self.thinking)
         column.addWidget(self.body)
         outer.addLayout(column, 1)
 
@@ -2732,14 +3498,37 @@ class MessageBlock(QWidget):
         return self._text
 
     def set_text(self, text: str) -> None:
+        self.stop_thinking()
         self._text = text
         self.body.setText(text)
         self._sync_body_height()
 
     def append_text(self, text: str) -> None:
+        if text:
+            self.stop_thinking()
         self._text += text
         self.body.setText(self._text)
         self._sync_body_height()
+
+    def start_thinking(self, text: str = "Thinking") -> None:
+        self._text = ""
+        self.body.clear()
+        self.body.hide()
+        self.thinking.start(text)
+        self.setAccessibleName(self.thinking.accessibleName())
+        self.updateGeometry()
+
+    def set_pending_label(self, text: str) -> None:
+        if self.thinking._running:
+            self.thinking.set_label(text)
+            self.setAccessibleName(self.thinking.accessibleName())
+
+    def stop_thinking(self) -> None:
+        if self.thinking._running or not self.thinking.isHidden():
+            self.thinking.stop()
+            self.body.show()
+            self.setAccessibleName(f"{self._author_name} message")
+            self._sync_body_height()
 
     def set_reading_width(self, available_width: int) -> None:
         body_width = max(240, min(self._target_body_width, available_width))
@@ -2874,16 +3663,33 @@ class SessionBridge:
                 self.store = None
         self.fallback = QSettings(APP_NAME, APP_ID)
 
+    @staticmethod
+    def _clean_messages(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _sanitize_assistant_messages(messages)
+
+    @classmethod
+    def _clean_session(cls, session: Any) -> Any:
+        messages = cls._clean_messages(_field(session, "messages", ()) or ())
+        if dataclasses.is_dataclass(session):
+            return dataclasses.replace(session, messages=messages)
+        if isinstance(session, dict):
+            cleaned = copy.deepcopy(session)
+            cleaned["messages"] = messages
+            return cleaned
+        setattr(session, "messages", messages)
+        return session
+
     def create(self, title: str, model: str, workspace: Optional[str], messages: Iterable[dict[str, Any]]) -> Any:
+        clean_messages = self._clean_messages(messages)
         if self.store is not None:
-            return self.store.create(title=title, model=model, workspace=workspace, messages=tuple(messages))
+            return self.store.create(title=title, model=model, workspace=workspace, messages=clean_messages)
         now = _now_iso()
         return {
             "id": uuid.uuid4().hex,
             "title": title,
             "model": model,
             "workspace": workspace,
-            "messages": list(messages),
+            "messages": clean_messages,
             "created_at": now,
             "updated_at": now,
         }
@@ -2891,15 +3697,19 @@ class SessionBridge:
     def list(self) -> list[Any]:
         if self.store is not None:
             try:
-                return list(self.store.list())
+                return [self._clean_session(item) for item in self.store.list()]
             except Exception:
                 return []
         try:
-            return list(json.loads(self.fallback.value("sessions", "[]")))
+            return [
+                self._clean_session(item)
+                for item in json.loads(self.fallback.value("sessions", "[]"))
+            ]
         except (TypeError, ValueError):
             return []
 
     def save(self, session: Any, *, title: str, model: str, workspace: Optional[str], messages: list[dict[str, Any]]) -> Any:
+        clean_messages = self._clean_messages(messages)
         if self.store is not None:
             if dataclasses.is_dataclass(session):
                 session = dataclasses.replace(
@@ -2907,14 +3717,14 @@ class SessionBridge:
                     title=title,
                     model=model,
                     workspace=workspace,
-                    messages=list(messages),
+                    messages=clean_messages,
                 )
             else:
                 for key, value in {
                     "title": title,
                     "model": model,
                     "workspace": workspace,
-                    "messages": tuple(messages),
+                    "messages": clean_messages,
                 }.items():
                     setattr(session, key, value)
             return self.store.save(session)
@@ -2923,7 +3733,7 @@ class SessionBridge:
             title=title,
             model=model,
             workspace=workspace,
-            messages=list(messages),
+            messages=clean_messages,
             updated_at=_now_iso(),
         )
         sessions = [s for s in self.list() if _field(s, "id") != payload["id"]]
@@ -3699,7 +4509,10 @@ class ModelManagerDialog(QDialog):
         layout = QVBoxLayout(self)
         heading = QLabel("Onionmind models")
         heading.setObjectName("brand")
-        copy_label = QLabel("Choose from models installed on this machine, or add another Onionmind model locally.")
+        copy_label = QLabel(
+            "Installed model identifiers stay visible. Pulling asks the local model service "
+            "to download directly from its configured registry; that download is not Tor-routed."
+        )
         copy_label.setObjectName("meta")
         copy_label.setWordWrap(True)
         layout.addWidget(heading)
@@ -3755,6 +4568,18 @@ class ModelManagerDialog(QDialog):
         name = self.model_name.text().strip()
         if not name:
             self.progress.setFormat("Enter an Onionmind model name")
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Direct model download",
+            "The local model service will download this model directly from its "
+            "configured registry. This is not Tor-routed and exposes this machine's "
+            "network address. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.progress.setFormat("Download cancelled")
             return
         self.pull_button.setEnabled(False)
         self.model_name.setEnabled(False)
@@ -3859,6 +4684,8 @@ class OnionmindWindow(QMainWindow):
         self.harness_process: Optional[QProcess] = None
         self.harness_output = ""
         self.harness_generation = 0
+        self.tor_probe_generation = 0
+        self.tor_phase = "off"
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -3869,6 +4696,10 @@ class OnionmindWindow(QMainWindow):
         else:
             self._restore_state()
             self._probe_services()
+            self.tor_liveness_timer = QTimer(self)
+            self.tor_liveness_timer.setInterval(2500)
+            self.tor_liveness_timer.timeout.connect(self._poll_tor_liveness)
+            self.tor_liveness_timer.start()
 
     def _build_window(self) -> None:
         self.setWindowTitle("Onionmind — private local workbench")
@@ -3951,8 +4782,10 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.model_combo)
         self.model_status = StatusPill("Model", "Checking", "busy")
         toolbar_layout.addWidget(self.model_status)
-        self.tor_status = StatusPill("Tor", "Checking", "busy")
-        self.tor_status.setToolTip("Tor search state is separate from Onionmind inference")
+        self.tor_status = StatusPill("Tor", "Off", "idle")
+        self.tor_status.setToolTip(
+            "Local background Tor state. Onionmind starts it without a browser window only after you allow search for a turn."
+        )
         toolbar_layout.addWidget(self.tor_status)
 
         terminal_toggle = QToolButton()
@@ -4095,6 +4928,13 @@ class OnionmindWindow(QMainWindow):
             "Onionmind Agent protected actions stop safely"
         )
         controls.addWidget(self.approval_state)
+        self.search_consent = QCheckBox("Allow Tor search this turn")
+        self.search_consent.setChecked(False)
+        self.search_consent.setToolTip(
+            "One-turn permission. If needed, Onionmind starts Tor in the background without opening Tor Browser."
+        )
+        self.search_consent.setAccessibleName("Allow Tor web search for the next Chat turn only")
+        controls.addWidget(self.search_consent)
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
@@ -4157,22 +4997,25 @@ class OnionmindWindow(QMainWindow):
         worker.signals.result.connect(self._model_probe_complete)
         worker.signals.error.connect(lambda message: self._model_probe_failed(message))
 
-        checker = getattr(self.core, "tor_check", None)
+        checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
-            self.tor_status.set_status("Not checked", "idle")
+            self.tor_status.set_status("Off", "idle")
             return
+        self.tor_probe_generation += 1
+        generation = self.tor_probe_generation
+        self.tor_phase = "probing"
 
         def tor_probe(signals: WorkerSignals) -> Any:
             del signals
-            checker()
-            return getattr(self.core, "_port", None)
+            return checker()
 
         tor_worker = self._start_worker(tor_probe)
         tor_worker.signals.result.connect(
-            lambda port: self.tor_status.set_status(f"Ready · {port}" if port else "Ready", "good")
+            lambda port, value=generation: self._tor_probe_complete(port, value)
         )
-        tor_worker.signals.result.connect(lambda _: self.inspector.append_activity("Tor readiness verified separately"))
-        tor_worker.signals.error.connect(lambda message: self._tor_probe_failed(message))
+        tor_worker.signals.error.connect(
+            lambda message, value=generation: self._tor_probe_failed(message, value)
+        )
 
     def _start_worker(self, fn: Callable[[WorkerSignals], Any]) -> SafeWorker:
         worker = SafeWorker(fn, self.core)
@@ -4202,10 +5045,106 @@ class OnionmindWindow(QMainWindow):
         self.set_status(message)
         self.inspector.append_activity(f"Onionmind inference unavailable: {message}")
 
-    def _tor_probe_failed(self, message: str) -> None:
-        self.tor_status.set_status("Not ready", "bad")
-        self.tor_status.setToolTip(message + " Search fails closed and does not fall back to a direct request.")
-        self.inspector.append_activity("Tor not ready; Chat search will fail closed")
+    def _tor_probe_failed(self, message: str, generation: Optional[int] = None) -> None:
+        if generation is not None and (
+            generation != self.tor_probe_generation or self.tor_phase != "probing"
+        ):
+            return
+        self.tor_phase = "off"
+        self.tor_status.set_status("Off", "idle")
+        self.tor_status.setToolTip(
+            message + " Onionmind did not make an external request; search remains off."
+        )
+        self.inspector.append_activity("Background Tor is off; Chat remains local-only")
+
+    def _tor_probe_complete(self, port: Any, generation: Optional[int] = None) -> None:
+        if generation is not None and (
+            generation != self.tor_probe_generation or self.tor_phase != "probing"
+        ):
+            return
+        self._show_local_tor_state(port)
+
+    def _show_local_tor_state(self, port: Any) -> None:
+        managed = getattr(self.core, "_managed_tor_process", None)
+        try:
+            managed_running = managed is not None and managed.poll() is None
+        except Exception:
+            managed_running = False
+        if managed_running and not port:
+            stop = getattr(self.core, "stop_managed_tor", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception:
+                    pass
+            managed_running = False
+        verified = bool(port and getattr(self.core, "_port", None) == port)
+        if port and (managed_running or verified):
+            self.tor_phase = "running"
+            self.tor_status.set_status(f"Running · {port}", "good")
+            if managed_running:
+                self.tor_status.setToolTip(
+                    "Onionmind's Tor process is running in the background; no Tor Browser or console window is open."
+                )
+                self.inspector.append_activity(f"Onionmind-owned background Tor running on local port {port}")
+            else:
+                self.tor_status.setToolTip(
+                    "A pre-existing local proxy was verified as Tor. Onionmind did not start or adopt it."
+                )
+                self.inspector.append_activity(f"Pre-existing local Tor proxy verified on port {port}")
+        elif port:
+            self.tor_phase = "proxy"
+            self.tor_status.set_status(f"Proxy · {port}", "warn")
+            self.tor_status.setToolTip(
+                "A local SOCKS listener was detected but not externally verified. Search still fails closed."
+            )
+            self.inspector.append_activity(f"Unverified local SOCKS listener detected on port {port}")
+        else:
+            self.tor_phase = "off"
+            self.tor_status.set_status("Off", "idle")
+            self.tor_status.setToolTip(
+                "Tor is off. Onionmind starts it without a browser window only after one-turn search permission."
+            )
+            self.inspector.append_activity("Background Tor is off; Chat remains local-only")
+
+    def _poll_tor_liveness(self) -> None:
+        """Keep the only Tor indicator honest using local process/socket state."""
+        if self.tor_phase not in ("running", "proxy"):
+            return
+        managed = getattr(self.core, "_managed_tor_process", None)
+        managed_exited = False
+        if managed is not None:
+            try:
+                managed_exited = managed.poll() is not None
+            except Exception:
+                managed_exited = True
+            if managed_exited:
+                stop = getattr(self.core, "stop_managed_tor", None)
+                if callable(stop):
+                    try:
+                        stop()
+                    except Exception:
+                        pass
+        probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = probe() if callable(probe) else None
+        except Exception:
+            port = None
+        if managed_exited:
+            self._show_local_tor_state(port)
+            return
+        if not port:
+            try:
+                setattr(self.core, "_port", None)
+            except Exception:
+                pass
+            self._show_local_tor_state(None)
+        elif getattr(self.core, "_port", None) not in (None, port):
+            try:
+                setattr(self.core, "_port", None)
+            except Exception:
+                pass
+            self._show_local_tor_state(port)
 
     def _describe_model(self, raw_id: str) -> str:
         helper = getattr(self.desktop_core, "describe_model", None) if self.desktop_core else None
@@ -4267,10 +5206,13 @@ class OnionmindWindow(QMainWindow):
         self.mode = mode
         if mode == "chat":
             self.approval_state.hide()
-            self.disclosure.setText("Private on-device chat · search is the only Tor-routed exception")
+            self.search_consent.show()
+            self.disclosure.setText("Private local chat · Tor search needs one-turn permission")
             self.composer.setPlaceholderText("Ask Onionmind anything…")
         else:
             self.approval_state.show()
+            self.search_consent.setChecked(False)
+            self.search_consent.hide()
             self.disclosure.setText("Early access · Agent network access is separate from Tor search")
             self.composer.setPlaceholderText("Describe what you want Onionmind Agent to change…")
         self.settings_data["mode"] = mode
@@ -4456,6 +5398,10 @@ class OnionmindWindow(QMainWindow):
         if not self.chat_messages:
             return True
         try:
+            # This is the final persistence boundary. A live tool round keeps
+            # its raw structure in the worker's private history until it has
+            # completed; only the copy owned by the UI is cleaned here.
+            self.chat_messages = _sanitize_assistant_messages(self.chat_messages)
             title = self._session_title()
             model = self.current_model_id()
             if self.current_session is None:
@@ -4531,19 +5477,14 @@ class OnionmindWindow(QMainWindow):
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(".md")
-        lines = [f"# {self._session_title()}", "", f"- Model: `{self._describe_model(self.current_model_id())}`"]
-        if self.workspace:
-            lines.append(f"- Workspace: `{self.workspace}`")
-        lines.extend(("", "---", ""))
-        for message in self.chat_messages:
-            role = _as_text(message.get("role", "message"))
-            heading = {"user": "Developer", "assistant": "Onionmind", "tool": "Local tool"}.get(role, role.title())
-            content = message.get("content")
-            if not isinstance(content, str):
-                content = "[local image attachment]"
-            lines.extend((f"## {heading}", "", content, ""))
+        document = _conversation_markdown(
+            self._session_title(),
+            self._describe_model(self.current_model_id()),
+            self.workspace,
+            self.chat_messages,
+        )
         try:
-            destination.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            destination.write_text(document, encoding="utf-8")
         except OSError as exc:
             self.set_status(f"Could not export conversation: {exc}")
             QMessageBox.warning(self, "Export failed", f"Could not write the export.\n\n{exc}")
@@ -4567,7 +5508,9 @@ class OnionmindWindow(QMainWindow):
             self.set_status("That saved session is no longer available.")
             return
         self.current_session = session
-        self.chat_messages = [dict(message) for message in (_field(session, "messages", ()) or ())]
+        self.chat_messages = _sanitize_assistant_messages(
+            _field(session, "messages", ()) or ()
+        )
         self.transcript.clear()
         for message in self.chat_messages:
             role = message.get("role")
@@ -4601,6 +5544,20 @@ class OnionmindWindow(QMainWindow):
             return
         if not task:
             task = "Review the attached local files."
+        if self.mode == "agent":
+            answer = QMessageBox.warning(
+                self,
+                "Run Onionmind Agent directly?",
+                "Onionmind Agent and commands it runs are not confined to Tor. They may "
+                "contact arbitrary hosts directly and expose this machine's network address. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.set_status("Agent run cancelled; no process was started.")
+                return
+        search_allowed = self.mode == "chat" and self.search_consent.isChecked()
+        self.search_consent.setChecked(False)
         attachment_names = [Path(path).name for path in self.attachments]
         visible_task = task + ("\n\nAttached locally: " + ", ".join(attachment_names) if attachment_names else "")
         message, agent_task = self._build_user_payload(task)
@@ -4615,7 +5572,10 @@ class OnionmindWindow(QMainWindow):
                 [("Not saved", "The run will continue; check local disk access")],
             )
         if self.mode == "chat":
-            self._start_chat()
+            if search_allowed:
+                self._start_chat(True)
+            else:
+                self._start_chat()
         else:
             self._start_harness(agent_task)
 
@@ -4757,6 +5717,9 @@ class OnionmindWindow(QMainWindow):
         self.chat_button.setEnabled(not running)
         self.agent_button.setEnabled(not running)
         self.model_combo.setEnabled(not running)
+        self.search_consent.setEnabled(not running)
+        if running:
+            self.search_consent.setChecked(False)
         self.left_rail.projects.setEnabled(not running)
         self.left_rail.sessions.setEnabled(not running)
         if not running:
@@ -4764,18 +5727,37 @@ class OnionmindWindow(QMainWindow):
             self.harness_process = None
         self._sync_action_states()
 
-    def _start_chat(self) -> None:
+    def _start_chat(self, allow_search: bool = False) -> None:
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
         history = copy.deepcopy(self.chat_messages)
         block = self.transcript.add_message("assistant", "")
+        block.start_thinking("Starting Tor" if allow_search else "Thinking")
         self.stream_block = block
-        self.set_status(f"Streaming from {self._describe_model(model)}…")
-        self.inspector.append_activity("Chat turn started on the local inference path")
+        if allow_search:
+            self.tor_probe_generation += 1
+            self.tor_phase = "starting"
+            self.tor_status.set_status("Starting", "busy")
+            self.set_status("Starting background Tor without opening a browser window…")
+            self.inspector.append_activity("One-turn Tor search permission granted")
+        else:
+            self.set_status(f"Thinking with {self._describe_model(model)}…")
+            self.inspector.append_activity("Chat turn started on the local-only inference path")
 
         def chat_job(signals: WorkerSignals) -> dict[str, Any]:
             setattr(self.core, "MODEL", model)
+            if allow_search:
+                starter = getattr(self.core, "start_tor_hidden", None)
+                if not callable(starter):
+                    raise RuntimeError("This Onionmind core cannot start background Tor.")
+                port = starter(stop_event=stop_event)
+                managed = getattr(self.core, "_managed_tor_process", None)
+                signals.event.emit({
+                    "kind": "tor_ready",
+                    "port": port,
+                    "managed": managed is not None,
+                })
             if not getattr(self.core, "BACKEND", None):
                 detector = getattr(self.core, "detect_backend", None)
                 if callable(detector):
@@ -4783,32 +5765,48 @@ class OnionmindWindow(QMainWindow):
             turn_stream = getattr(self.core, "turn_stream", None)
             if not callable(turn_stream):
                 raise RuntimeError("The Onionmind core does not expose streaming chat.")
-            raw = ""
-            visible = ""
+            stream_filter = ThinkingStreamFilter()
 
             def on_text(chunk: str) -> None:
-                nonlocal raw, visible
-                raw += _as_text(chunk)
-                if "<think>" in raw and "</think>" not in raw:
-                    candidate = ""
-                elif "</think>" in raw:
-                    candidate = raw.split("</think>")[-1]
-                else:
-                    candidate = raw
-                if len(candidate) > len(visible):
-                    delta = candidate[len(visible):]
-                    visible = candidate
+                if stop_event.is_set():
+                    stream_filter.abort()
+                    return
+                delta = stream_filter.feed(chunk)
+                if delta:
                     signals.text.emit(delta)
 
             def on_event(event: dict[str, Any]) -> None:
                 signals.event.emit(dict(event))
 
             try:
-                answer = turn_stream(history, on_text, stop_event=stop_event, on_event=on_event)
-            except TypeError as exc:
-                if "on_event" not in _as_text(exc):
-                    raise
-                answer = turn_stream(history, on_text, stop_event)
+                try:
+                    answer = turn_stream(
+                        history,
+                        on_text,
+                        stop_event=stop_event,
+                        on_event=on_event,
+                        allow_search=allow_search,
+                    )
+                except TypeError as exc:
+                    if "on_event" not in _as_text(exc):
+                        raise
+                    try:
+                        answer = turn_stream(
+                            history,
+                            on_text,
+                            stop_event=stop_event,
+                            allow_search=allow_search,
+                        )
+                    except TypeError as compatibility_error:
+                        if "allow_search" in _as_text(compatibility_error):
+                            raise RuntimeError(
+                                "The installed Onionmind core is too old to enforce per-turn search permission."
+                            ) from compatibility_error
+                        raise
+            except BaseException:
+                stream_filter.abort()
+                raise
+            stream_filter.finish()
             return {"answer": _as_text(answer), "history": history}
 
         worker = self._start_worker(chat_job)
@@ -4826,38 +5824,89 @@ class OnionmindWindow(QMainWindow):
         kind = _as_text(event.get("kind"))
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
-        if kind == "tool_started":
+        if kind == "tor_ready":
+            port = event.get("port")
+            if event.get("managed"):
+                self.tor_phase = "running"
+                self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+                self.tor_status.setToolTip(
+                    "Tor is running as a background process; no Tor Browser or console window was opened."
+                )
+            else:
+                self.tor_phase = "proxy"
+                self.tor_status.set_status(f"Proxy · {port}" if port else "Proxy", "warn")
+                self.tor_status.setToolTip(
+                    "An existing local SOCKS listener was reused and will be verified before a query is sent."
+                )
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Thinking")
+            self.set_status(f"Background Tor ready · thinking with {self._describe_model(self.current_model_id())}…")
+            self.inspector.append_activity("Background Tor ready; no browser window opened")
+        elif kind == "tor_verified":
+            port = event.get("port")
+            self.tor_phase = "running"
+            self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+            self.tor_status.setToolTip(
+                "The background SOCKS path was verified as Tor after explicit search permission."
+            )
+            self.inspector.append_activity("Background Tor path verified")
+        elif kind == "tool_started":
             arguments = event.get("arguments") or {}
             detail = _as_text(arguments.get("query")) if isinstance(arguments, dict) else ""
             state = "Running through Tor · fails closed" if name == "web_search" else "Running locally"
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Searching via Tor" if name == "web_search" else "Using local tool")
             self.transcript.add_tool_card(display_name, [(detail or "Tool request", state)])
             activity = "Tor search started" if name == "web_search" else f"Local tool started: {display_name}"
             self.inspector.append_activity(activity)
         elif kind == "tool_finished":
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Thinking")
             state = "Tor result returned" if name == "web_search" else "Finished"
             self.transcript.add_tool_card(display_name, [("Tool result", state)])
             activity = "Tor search finished" if name == "web_search" else f"Local tool finished: {display_name}"
             self.inspector.append_activity(activity)
+        elif kind == "tool_refused":
+            self.transcript.add_tool_card(display_name, [("Not run", "No one-turn search permission")])
+            self.inspector.append_activity("Tor search request refused; no network request was made")
 
     def _chat_complete(self, payload: dict[str, Any]) -> None:
-        answer = payload.get("answer") or "The local model returned no answer."
+        answer = _strip_thinking(payload.get("answer"))
+        if not answer:
+            answer = "The local model returned no answer."
         if self.stream_block is not None:
             self.stream_block.set_text(answer)
-        self.chat_messages = payload.get("history") or [*self.chat_messages, {"role": "assistant", "content": answer}]
+        raw_history = payload.get("history") or [
+            *self.chat_messages,
+            {"role": "assistant", "content": answer},
+        ]
+        self.chat_messages = _sanitize_assistant_messages(raw_history)
         if self.chat_messages and self.chat_messages[-1].get("role") == "assistant":
             self.chat_messages[-1]["content"] = answer
         if not self.chat_messages or self.chat_messages[-1].get("role") != "assistant":
             self.chat_messages.append({"role": "assistant", "content": answer})
+        local_probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = local_probe() if callable(local_probe) else None
+        except Exception:
+            port = None
+        self._show_local_tor_state(port)
         self.set_status("Chat turn complete")
         self.inspector.append_activity("Chat turn completed locally")
         self._set_active(None)
         self.save_current_session()
 
     def _chat_failed(self, message: str) -> None:
-        message = _brand_runtime_text(message)
+        message = _brand_runtime_text(_strip_thinking(message))
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
         self.chat_messages.append({"role": "assistant", "content": f"Local inference failed: {message}"})
+        local_probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = local_probe() if callable(local_probe) else None
+        except Exception:
+            port = None
+        self._show_local_tor_state(port)
         self.set_status(f"Local inference failed: {message}")
         self.inspector.append_activity(f"Chat turn failed: {message}")
         self._set_active(None)
@@ -5009,6 +6058,8 @@ class OnionmindWindow(QMainWindow):
             return
         if self.active_kind == "chat" and self.stop_event is not None:
             self.stop_event.set()
+            if self.stream_block is not None:
+                self.stream_block.set_pending_label("Stopping")
             self.set_status("Stopping the local model after the current read…")
         elif self.active_kind == "agent":
             if self.harness_process is None:
@@ -5080,7 +6131,7 @@ class OnionmindWindow(QMainWindow):
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
         self.model_status.set_status("Local · Ready", "good")
-        self.tor_status.set_status("Connected", "good")
+        self.tor_status.set_status("Running · 9150", "good")
         self.workspace = str(Path.home() / "onion" / "leaflink")
         self.repo_label.setText("leaflink")
         self.repo_label.setToolTip(self.workspace)
@@ -5173,7 +6224,7 @@ class OnionmindWindow(QMainWindow):
         self.inspector.update_snapshot(demo_snapshot)
         self.inspector.append_activity("Observed Git state refreshed after Agent exit")
         self.inspector.append_activity("Agent finished with exit code 0")
-        self.inspector.append_activity("Onionmind inference and Tor readiness reported separately")
+        self.inspector.append_activity("Background Tor state and local model readiness reported separately")
         self.set_mode("agent")
         self.set_status("Ready · 4 observed changes · all inference local")
         self._sync_action_states()
@@ -5181,11 +6232,20 @@ class OnionmindWindow(QMainWindow):
 
     def closeEvent(self, event: Any) -> None:
         self.save_current_session()
+        timer = getattr(self, "tor_liveness_timer", None)
+        if timer is not None:
+            timer.stop()
         if self.stop_event is not None:
             self.stop_event.set()
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        stop_tor = getattr(self.core, "stop_managed_tor", None)
+        if callable(stop_tor):
+            try:
+                stop_tor()
+            except Exception:
+                pass
         event.accept()
 
 
@@ -5248,17 +6308,35 @@ chmod 644 "$DIR/onionmind_desktop_core.py" "$DIR/onionmind_desktop.py"
 
 DESKTOP_ENV="$DIR/desktop-env"
 DESKTOP_MARKER="$DESKTOP_ENV/.onionmind-desktop-ready"
-rm -f -- "$DESKTOP_MARKER"
 say "Preparing native desktop runtime"
-if python3 -m venv "$DESKTOP_ENV"; then
+desktop_runtime_ready() {
+  [ -x "$DESKTOP_ENV/bin/python" ] || return 1
+  "$DESKTOP_ENV/bin/python" - <<'PY' 2>/dev/null
+from importlib import metadata
+import re
+
+def version(name):
+    return tuple(int(x) for x in re.findall(r"\d+", metadata.version(name))[:3])
+
+assert (2, 32) <= version("requests") < (3,)
+assert (1, 7) <= version("PySocks") < (2,)
+assert (6, 11) <= version("PySide6-Essentials") < (6, 12)
+import requests, socks, PySide6.QtWidgets
+PY
+}
+if desktop_runtime_ready; then
+  say "Native desktop dependencies already satisfy the pinned ranges; skipping pip"
+  : > "$DESKTOP_MARKER"
+elif python3 -m venv "$DESKTOP_ENV"; then
+  rm -f -- "$DESKTOP_MARKER"
   if ! "$DESKTOP_ENV/bin/python" -m pip install --quiet --disable-pip-version-check \
-      requests PySocks PySide6-Essentials==6.11.1; then
+      'requests>=2.32,<3' 'PySocks>=1.7,<2' 'PySide6-Essentials>=6.11,<6.12'; then
     warn "native desktop dependency download failed; checking the existing environment"
   fi
-  if "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets'; then
+  if desktop_runtime_ready; then
     : > "$DESKTOP_MARKER"
   else
-    warn "native desktop dependencies could not be imported; the classic UI remains available"
+    warn "native desktop dependencies are missing or outside supported ranges; the classic UI remains available"
   fi
 else
   warn "could not create the native desktop environment; the classic UI remains available"
@@ -5297,8 +6375,8 @@ MODEL_LITERAL=$(python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "
 sudo tee /usr/local/bin/onionmind >/dev/null <<LAUNCH
 #!/bin/sh
 DIR=$DIR_LITERAL
-systemctl is-active --quiet tor 2>/dev/null || sudo -n systemctl start tor 2>/dev/null \
-  || echo "[tor] not running - search will refuse until: sudo systemctl start tor"
+systemctl is-active --quiet tor 2>/dev/null || \
+  echo "[tor] not running; Onionmind will not start it. Search remains unavailable until you explicitly start Tor." >&2
 cd "\$HOME"             # /save <file> lands here
 PYTHON="\$DIR/desktop-env/bin/python"
 [ -x "\$PYTHON" ] && [ -f "\$DIR/desktop-env/.onionmind-desktop-ready" ] || PYTHON=python3
@@ -5311,15 +6389,19 @@ LAUNCH
 sudo chmod 755 /usr/local/bin/onionmind
 
 # Repository-aware coding agent, kept separate from Onionmind's local Tor chat.
-DSH_REVISION=$(curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
-[[ "$DSH_REVISION" =~ ^[0-9a-fA-F]{40}$ ]] || die "could not resolve a fixed DSH asset revision"
-DSH_BASE="https://raw.githubusercontent.com/Codemaster64/onionmind/$DSH_REVISION"
-curl -fsSL "$DSH_BASE/dsh-onionmind-tor-search.js" \
-  -o "$DIR/dsh-onionmind-tor-search.js"
-curl -fsSL "$DSH_BASE/dsh-onionmind-tor.patch.yml" \
-  -o "$DIR/dsh-onionmind-tor.patch.yml"
-python3 - "$DIR/dsh-onionmind-tor.patch.yml" "$DIR/dsh-onionmind-tor-search.js" <<'PATCHPY'
+if [ -s "$DIR/dsh-onionmind-tor-search.js" ] && [ -s "$DIR/dsh-onionmind-tor.patch.yml" ] &&
+   ! grep -q '@ONIONMIND_DSH_PLUGIN@' "$DIR/dsh-onionmind-tor.patch.yml"; then
+  say "Harness adapter assets already present; skipping GitHub download"
+else
+  DSH_REVISION=$(curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+  [[ "$DSH_REVISION" =~ ^[0-9a-fA-F]{40}$ ]] || die "could not resolve a fixed DSH asset revision"
+  DSH_BASE="https://raw.githubusercontent.com/Codemaster64/onionmind/$DSH_REVISION"
+  curl -fsSL "$DSH_BASE/dsh-onionmind-tor-search.js" \
+    -o "$DIR/dsh-onionmind-tor-search.js"
+  curl -fsSL "$DSH_BASE/dsh-onionmind-tor.patch.yml" \
+    -o "$DIR/dsh-onionmind-tor.patch.yml"
+  python3 - "$DIR/dsh-onionmind-tor.patch.yml" "$DIR/dsh-onionmind-tor-search.js" <<'PATCHPY'
 from pathlib import Path
 import sys
 
@@ -5330,6 +6412,8 @@ if "@ONIONMIND_DSH_PLUGIN@" not in text:
     raise SystemExit("DSH patch placeholder is missing")
 patch.write_text(text.replace("@ONIONMIND_DSH_PLUGIN@", plugin), encoding="utf-8")
 PATCHPY
+  printf '%s\n' "$DSH_REVISION" > "$DIR/.onionmind-revision"
+fi
 
 sudo tee /usr/local/bin/onionmind-code >/dev/null <<AGENT
 #!/bin/sh
@@ -5364,10 +6448,33 @@ sudo chmod 755 /usr/local/bin/onionmind-code
 sudo tee /usr/local/bin/onionmind-update >/dev/null <<UPDATE
 #!/bin/sh
 DIR=$DIR_LITERAL
+audit=0
+for arg in "\$@"; do [ "\$arg" = --audit ] && audit=1; done
+if [ "\$audit" = 1 ]; then
+  echo "Onionmind updater local audit (no network or writes)"
+  echo "  install directory: \$DIR"
+  [ -f "\$DIR/.onionmind-revision" ] && echo "  installed revision: \$(cat "\$DIR/.onionmind-revision")" || echo "  installed revision: unknown"
+  for f in onionmind.py onionmind_desktop_core.py onionmind_desktop.py dsh-onionmind-tor-search.js dsh-onionmind-tor.patch.yml; do
+    [ -s "\$DIR/\$f" ] && echo "  \$f: present" || echo "  \$f: MISSING"
+  done
+  echo "  remote freshness: UNKNOWN by design"
+  exit 0
+fi
+echo "Direct-network plan:"
+echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.sh"
+echo "      download the updater; it will separately disclose GitHub/PyPI actions"
+allow=0; yes=0
+for arg in "\$@"; do [ "\$arg" = --allow-network ] && allow=1; [ "\$arg" = --yes ] && yes=1; done
+if [ "\$allow" != 1 ] || [ "\$yes" != 1 ]; then
+  [ -t 0 ] || { echo "network consent required; pass BOTH --allow-network and --yes" >&2; exit 1; }
+  printf 'Download the updater from that exact URL? [y/N] '
+  read answer
+  case "\$answer" in y|Y|yes|YES) ;; *) echo "aborted before network activity" >&2; exit 1 ;; esac
+fi
 tmp=\$(mktemp) || exit 1
 trap 'rm -f "\$tmp"' EXIT
 curl -fsSL https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.sh -o "\$tmp" || exit 1
-bash "\$tmp" --install-dir "\$DIR"
+bash "\$tmp" --install-dir "\$DIR" "\$@"
 status=\$?
 rm -f "\$tmp"
 trap - EXIT
@@ -5395,10 +6502,16 @@ fi
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 echo
-say "Ready"
+if [ "$OLLAMA_RUNNING" = 1 ]; then
+  say "Ready"
+else
+  say "Installed; local model registration is pending"
+  echo "  Ollama:      explicitly start 'OLLAMA_HOST=127.0.0.1:11434 ollama serve', then rerun this script"
+fi
 echo "  Desktop:     onionmind   (native local workbench)"
 echo "  Coding:      onionmind-code \"task\"   (headless Harness; direct network)"
 echo "  Updates:     onionmind-update   (code only, model untouched)"
 [ "$VISION" = 1 ] && echo "  Images:      ollama run $MODEL_NAME-vision   (then give it an image path)"
 echo "  Web search:  $DIR/onionmind.py \"your question\""
+echo "  Tor:         not started or enabled by this installer"
 echo "  Shortcut:    Onionmind - double-click to open the workbench"
