@@ -858,12 +858,10 @@ class WorkspaceInspector:
 
 
 HARNESS_LIMITATION = (
-    "DeepSeek Harness is an Ollama developer-preview integration. The current "
-    "official launcher rejects the Onionmind --patch option, so this command "
-    "does not attach Onionmind's Tor search patch. The Harness process starts "
-    "in the selected working directory; its own tools govern what it can access. "
-    "The stock headless profile has no interactive approval answerer, so approval "
-    "requests fail closed; custom DSH profiles can change that composition."
+    "Onionmind Agent is an early-access local coding workflow. It starts in the "
+    "selected working directory, while its own tools govern what it can access. "
+    "Interactive approval prompts are not available in this build, so protected "
+    "actions stop safely. Agent network access is separate from Tor search."
 )
 
 
@@ -923,8 +921,8 @@ class HarnessSpec:
                 available=False,
                 executable=None,
                 reason=(
-                    "Ollama was not found on PATH. Install or start Ollama, then "
-                    "try the coding agent again."
+                    "Onionmind's local engine is not ready. Re-run Onionmind setup "
+                    "or start its local model service, then try Agent mode again."
                 ),
             )
         try:
@@ -941,7 +939,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=f"Ollama could not be started: {exc}",
+                reason=f"Onionmind's local engine could not be started: {exc}",
             )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).decode(
@@ -950,7 +948,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=detail or "Ollama did not pass its version check.",
+                reason=detail or "Onionmind's local engine did not pass its readiness check.",
             )
 
         node = shutil.which("node")
@@ -959,8 +957,8 @@ class HarnessSpec:
                 available=False,
                 executable=executable,
                 reason=(
-                    "DeepSeek Harness requires Node.js ^22.19 or 24+. Install a "
-                    "supported Node.js release, then try Agent mode again."
+                    "Onionmind Agent prerequisites are incomplete. Re-run Onionmind "
+                    "setup, then try Agent mode again."
                 ),
             )
         try:
@@ -977,7 +975,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=f"Node.js could not be checked: {exc}",
+                reason=f"Onionmind Agent prerequisites could not be checked: {exc}",
             )
         node_text = (node_result.stdout or node_result.stderr).decode(
             "utf-8", errors="replace"
@@ -1000,17 +998,14 @@ class HarnessSpec:
                 available=False,
                 executable=executable,
                 reason=(
-                    f"DeepSeek Harness requires Node.js ^22.19 or 24+; found "
-                    f"{shown}. Update Node.js, then try Agent mode again."
+                    f"Onionmind Agent needs a newer local runtime; found {shown}. "
+                    "Re-run Onionmind setup, then try Agent mode again."
                 ),
             )
         return HarnessAvailability(
             available=True,
             executable=executable,
-            reason=(
-                f"Ollama and Node.js {node_text} are available. DeepSeek Harness "
-                "will start on demand."
-            ),
+            reason="Onionmind Agent is ready and will start on demand.",
         )
 
 

@@ -1888,12 +1888,10 @@ class WorkspaceInspector:
 
 
 HARNESS_LIMITATION = (
-    "DeepSeek Harness is an Ollama developer-preview integration. The current "
-    "official launcher rejects the Onionmind --patch option, so this command "
-    "does not attach Onionmind's Tor search patch. The Harness process starts "
-    "in the selected working directory; its own tools govern what it can access. "
-    "The stock headless profile has no interactive approval answerer, so approval "
-    "requests fail closed; custom DSH profiles can change that composition."
+    "Onionmind Agent is an early-access local coding workflow. It starts in the "
+    "selected working directory, while its own tools govern what it can access. "
+    "Interactive approval prompts are not available in this build, so protected "
+    "actions stop safely. Agent network access is separate from Tor search."
 )
 
 
@@ -1953,8 +1951,8 @@ class HarnessSpec:
                 available=False,
                 executable=None,
                 reason=(
-                    "Ollama was not found on PATH. Install or start Ollama, then "
-                    "try the coding agent again."
+                    "Onionmind's local engine is not ready. Re-run Onionmind setup "
+                    "or start its local model service, then try Agent mode again."
                 ),
             )
         try:
@@ -1971,7 +1969,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=f"Ollama could not be started: {exc}",
+                reason=f"Onionmind's local engine could not be started: {exc}",
             )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).decode(
@@ -1980,7 +1978,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=detail or "Ollama did not pass its version check.",
+                reason=detail or "Onionmind's local engine did not pass its readiness check.",
             )
 
         node = shutil.which("node")
@@ -1989,8 +1987,8 @@ class HarnessSpec:
                 available=False,
                 executable=executable,
                 reason=(
-                    "DeepSeek Harness requires Node.js ^22.19 or 24+. Install a "
-                    "supported Node.js release, then try Agent mode again."
+                    "Onionmind Agent prerequisites are incomplete. Re-run Onionmind "
+                    "setup, then try Agent mode again."
                 ),
             )
         try:
@@ -2007,7 +2005,7 @@ class HarnessSpec:
             return HarnessAvailability(
                 available=False,
                 executable=executable,
-                reason=f"Node.js could not be checked: {exc}",
+                reason=f"Onionmind Agent prerequisites could not be checked: {exc}",
             )
         node_text = (node_result.stdout or node_result.stderr).decode(
             "utf-8", errors="replace"
@@ -2030,17 +2028,14 @@ class HarnessSpec:
                 available=False,
                 executable=executable,
                 reason=(
-                    f"DeepSeek Harness requires Node.js ^22.19 or 24+; found "
-                    f"{shown}. Update Node.js, then try Agent mode again."
+                    f"Onionmind Agent needs a newer local runtime; found {shown}. "
+                    "Re-run Onionmind setup, then try Agent mode again."
                 ),
             )
         return HarnessAvailability(
             available=True,
             executable=executable,
-            reason=(
-                f"Ollama and Node.js {node_text} are available. DeepSeek Harness "
-                "will start on demand."
-            ),
+            reason="Onionmind Agent is ready and will start on demand.",
         )
 
 
@@ -2149,7 +2144,7 @@ def parse_terminal_command(
 $desktopUi = @'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
 OWN-WORLD: Matte warm graphite planes, fine charcoal seams, bone type, and aubergine selection; native controls stay compact and square-edged.
-STORY: Choose a repository and local model, describe the work, watch an interruptible Chat or Harness run, then verify observed context, changes, and activity.
+STORY: Choose a repository and Onionmind model, describe the work, watch an interruptible Chat or Agent run, then verify observed context, changes, and activity.
 FIRST VIEWPORT: A 224px project/session rail, dominant open transcript with terminal drawer and composer, and a 292px three-tab inspector under a compact state toolbar.
 FORM: Approved balanced workbench A; Operate mode; seed approved-onionmind-workbench-a.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
@@ -2293,12 +2288,15 @@ QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTreeWidget:focus, QTa
 }
 QPushButton#primaryButton { background: #5c4566; border-color: #765984; color: #faf6f0; font-weight: 600; padding-left: 17px; padding-right: 17px; }
 QPushButton#primaryButton:hover { background: #684e73; border-color: #8a6b98; }
+QPushButton#primaryButton:disabled { background: #2b2729; border-color: #403a3f; color: #777078; }
 QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: #b8b1a8; }
 QPushButton#modeButton:checked { background: #47364f; color: #f5edf8; border: 1px solid #684f73; }
 QPushButton#railAction { text-align: left; background: transparent; border-color: transparent; padding: 7px 9px; }
 QPushButton#railAction:hover { background: #292724; border-color: #3f3b36; }
 QToolButton#bareButton { background: transparent; border-color: transparent; padding: 4px; }
 QToolButton#bareButton:hover { background: #2a2825; border-color: #403c37; }
+QToolButton#bareButton:checked { background: #3a3040; border-color: #684f73; }
+QToolButton#bareButton:disabled { background: transparent; border-color: transparent; }
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: #262421; border: 1px solid #4a453f; selection-background-color: #46384b; selection-color: #f5efe7; outline: 0; }
@@ -2364,15 +2362,34 @@ def _as_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+_BRAND_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bDeepSeek\s+Harness\b", re.IGNORECASE), "Onionmind Agent"),
+    (re.compile(r"\bDeepSeek\b", re.IGNORECASE), "Onionmind"),
+    (re.compile(r"\bHarness\b"), "Onionmind Agent"),
+    (re.compile(r"\bDSH\b", re.IGNORECASE), "Onionmind Agent"),
+    (re.compile(r"\bOllama\b", re.IGNORECASE), "Onionmind local engine"),
+    (re.compile(r"\bllama(?:\.cpp|-server)?\b", re.IGNORECASE), "Onionmind local engine"),
+    (re.compile(r"\bNode\.js\b", re.IGNORECASE), "Agent runtime"),
+)
+
+
+def _brand_runtime_text(value: Any) -> str:
+    """Keep implementation brands behind Onionmind's product language."""
+    text = _as_text(value)
+    for pattern, replacement in _BRAND_REPLACEMENTS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _friendly_error(core: Any, exc: BaseException) -> str:
     text = _as_text(exc) or exc.__class__.__name__
     helper = getattr(core, "user_error", None)
     if callable(helper):
         try:
-            return _as_text(helper(exc))
+            text = _as_text(helper(exc)) or text
         except Exception:
             pass
-    return text.replace("Ollama", "local model service").replace("ollama", "local model service")
+    return _brand_runtime_text(text)
 
 
 def _icon(name: str, size: int = 18) -> QIcon:
@@ -3097,9 +3114,9 @@ class WorkspaceBridge:
 
 class HarnessBridge:
     FALLBACK_LIMITATION = (
-        "DeepSeek Harness headless is a developer preview. The stock headless profile has no "
-        "interactive approval answerer, so approval requests fail closed; custom DSH profiles "
-        "can change that composition. Harness network access is not Tor-confined."
+        "Onionmind Agent is an early-access local coding workflow. Interactive approval "
+        "prompts are not available in this build, so protected actions stop safely. "
+        "Agent network access is separate from Tor search."
     )
 
     def __init__(self, desktop_core: Any) -> None:
@@ -3114,17 +3131,24 @@ class HarnessBridge:
     @property
     def limitation(self) -> str:
         if self.spec is not None:
-            return _as_text(getattr(self.spec, "limitation", "")) or _as_text(
+            value = _as_text(getattr(self.spec, "limitation", "")) or _as_text(
                 getattr(self.desktop_core, "HARNESS_LIMITATION", "")
             ) or self.FALLBACK_LIMITATION
+            return _brand_runtime_text(value)
         return self.FALLBACK_LIMITATION
 
     def check(self) -> tuple[bool, str]:
         if self.spec is not None:
             availability = self.spec.check()
-            return bool(_field(availability, "available", False)), _as_text(_field(availability, "reason", ""))
+            return bool(_field(availability, "available", False)), _brand_runtime_text(
+                _field(availability, "reason", "")
+            )
         executable = shutil.which("ollama")
-        return bool(executable), ("" if executable else "Install Ollama with DeepSeek Harness support, then restart Onionmind.")
+        return bool(executable), (
+            ""
+            if executable
+            else "Onionmind Agent is not ready. Re-run Onionmind setup, then restart the app."
+        )
 
     def build(self, *, model: str, task: str, cwd: str) -> tuple[list[str], str]:
         if self.spec is not None:
@@ -3155,14 +3179,18 @@ class LeftRail(QWidget):
 
         quick = QHBoxLayout()
         new_button = QPushButton("New task")
+        new_button.setObjectName("newTaskButton")
         new_button.setIcon(_icon("new_task"))
         new_button.setAccessibleName("Create new task")
         new_button.clicked.connect(self.newTaskRequested)
+        self.new_button = new_button
         folder_button = QToolButton()
+        folder_button.setObjectName("openFolderButton")
         folder_button.setIcon(_icon("folder_open"))
         folder_button.setToolTip("Open folder (Ctrl+O)")
         folder_button.setAccessibleName("Open project folder")
         folder_button.clicked.connect(self.openFolderRequested)
+        self.folder_button = folder_button
         quick.addWidget(new_button, 1)
         quick.addWidget(folder_button)
         layout.addLayout(quick)
@@ -3176,6 +3204,7 @@ class LeftRail(QWidget):
         add_project.setToolTip("Open another project")
         add_project.setAccessibleName("Open another project")
         add_project.clicked.connect(self.openFolderRequested)
+        self.add_project_button = add_project
         project_header.addWidget(project_label)
         project_header.addStretch(1)
         project_header.addWidget(add_project)
@@ -3202,6 +3231,8 @@ class LeftRail(QWidget):
         archive.setToolTip("Archive selected session")
         archive.setAccessibleName("Archive selected session")
         archive.clicked.connect(self._archive_selected)
+        archive.setEnabled(False)
+        self.archive_button = archive
         session_header.addWidget(session_label)
         session_header.addStretch(1)
         session_header.addWidget(archive)
@@ -3211,6 +3242,9 @@ class LeftRail(QWidget):
         self.sessions.itemClicked.connect(
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
+        self.sessions.currentItemChanged.connect(
+            lambda current, previous: self.archive_button.setEnabled(current is not None)
+        )
         layout.addWidget(self.sessions, 1)
 
         export = QPushButton("Export conversation")
@@ -3219,16 +3253,20 @@ class LeftRail(QWidget):
         export.setToolTip("Export this conversation as Markdown (Ctrl+Shift+S)")
         export.setAccessibleName("Export conversation as Markdown")
         export.clicked.connect(self.exportRequested)
+        export.setEnabled(False)
+        self.export_button = export
         models = QPushButton("Models")
         models.setObjectName("railAction")
         models.setIcon(_icon("model"))
         models.setAccessibleName("Manage local models")
         models.clicked.connect(self.modelsRequested)
+        self.models_button = models
         settings = QPushButton("Settings")
         settings.setObjectName("railAction")
         settings.setIcon(_icon("settings"))
         settings.setAccessibleName("Open Onionmind settings")
         settings.clicked.connect(self.settingsRequested)
+        self.settings_button = settings
         layout.addWidget(export)
         layout.addWidget(models)
         layout.addWidget(settings)
@@ -3237,6 +3275,9 @@ class LeftRail(QWidget):
         item = self.sessions.currentItem()
         if item is not None:
             self.archiveRequested.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
+
+    def set_conversation_available(self, available: bool) -> None:
+        self.export_button.setEnabled(bool(available))
 
     def add_project(self, path: str, select: bool = True) -> None:
         if not path:
@@ -3308,18 +3349,23 @@ class TerminalPane(QFrame):
         )
         stop.setAccessibleName("Stop terminal command")
         stop.clicked.connect(self.stop)
+        stop.setEnabled(False)
+        self.stop_button = stop
         clear = QToolButton()
         clear.setObjectName("bareButton")
         clear.setIcon(_icon("clear"))
         clear.setToolTip("Clear terminal")
         clear.setAccessibleName("Clear terminal output")
         clear.clicked.connect(lambda: self.output.clear())
+        clear.setEnabled(False)
+        self.clear_button = clear
         close = QToolButton()
         close.setObjectName("bareButton")
         close.setIcon(_icon("close"))
         close.setToolTip("Close terminal drawer (Ctrl+`)")
         close.setAccessibleName("Close terminal drawer")
         close.clicked.connect(self.closeRequested)
+        self.close_button = close
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.scope_label)
@@ -3334,6 +3380,9 @@ class TerminalPane(QFrame):
         self.output.setReadOnly(True)
         self.output.setAccessibleName("Terminal output")
         self.output.document().setMaximumBlockCount(5000)
+        self.output.textChanged.connect(
+            lambda: self.clear_button.setEnabled(bool(self.output.toPlainText()))
+        )
         outer.addWidget(self.output, 1)
         command_row = QHBoxLayout()
         prompt = QLabel(">")
@@ -3347,6 +3396,7 @@ class TerminalPane(QFrame):
         )
         self.command.setAccessibleName("Terminal command")
         self.command.returnPressed.connect(self.run_current)
+        self.process.stateChanged.connect(self._sync_process_state)
         command_row.addWidget(prompt)
         command_row.addWidget(self.command, 1)
         outer.addLayout(command_row)
@@ -3394,8 +3444,15 @@ class TerminalPane(QFrame):
         self.process.start(argv[0], list(argv[1:]))
         self.stateChanged.emit(f"Running {command}")
 
+    def _sync_process_state(self, state: QProcess.ProcessState) -> None:
+        running = state != QProcess.ProcessState.NotRunning
+        self.stop_button.setEnabled(running)
+        self.command.setEnabled(not running)
+
     def stop(self) -> None:
         if self.process.state() != QProcess.ProcessState.NotRunning:
+            self.stop_button.setEnabled(False)
+            self.stateChanged.emit("Stopping terminal command…")
             self.process.terminate()
             QTimer.singleShot(1200, self._kill_if_running)
 
@@ -3479,7 +3536,7 @@ class InspectorPane(QWidget):
         privacy_title.addWidget(self.privacy_state)
         privacy_layout.addLayout(privacy_title)
         privacy_copy = QLabel(
-            "Prompts and model inference stay on this machine. Search queries are the explicit exception and use Tor when Chat invokes search. Harness network access is separate."
+            "Prompts and model inference stay on this machine. Search queries are the explicit exception and use Tor when Chat invokes search. Agent network access is a separate boundary."
         )
         privacy_copy.setObjectName("meta")
         privacy_copy.setWordWrap(True)
@@ -3498,6 +3555,8 @@ class InspectorPane(QWidget):
         refresh.setToolTip("Refresh observed Git changes")
         refresh.setAccessibleName("Refresh Git changes")
         refresh.clicked.connect(self.refreshRequested)
+        refresh.setEnabled(False)
+        self.refresh_button = refresh
         changes_header.addWidget(self.change_summary)
         changes_header.addStretch(1)
         changes_header.addWidget(refresh)
@@ -3519,7 +3578,7 @@ class InspectorPane(QWidget):
         self.activity_tab = QWidget()
         activity_layout = QVBoxLayout(self.activity_tab)
         activity_layout.setContentsMargins(2, 10, 2, 3)
-        activity_copy = QLabel("Observed application events. Harness output is not treated as proof of a file change.")
+        activity_copy = QLabel("Observed application events. Agent output is not treated as proof of a file change.")
         activity_copy.setObjectName("meta")
         activity_copy.setWordWrap(True)
         activity_layout.addWidget(activity_copy)
@@ -3533,11 +3592,12 @@ class InspectorPane(QWidget):
 
     def append_activity(self, text: str) -> None:
         stamp = datetime.now().strftime("%H:%M")
-        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {text}"))
+        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {_brand_runtime_text(text)}"))
         while self.activity.count() > 150:
             self.activity.takeItem(self.activity.count() - 1)
 
     def update_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self.refresh_button.setEnabled(bool(snapshot.get("root")))
         agents = snapshot.get("agents_files") or []
         if agents:
             self.agent_title.setText(Path(agents[0]).name)
@@ -3613,15 +3673,22 @@ class InspectorPane(QWidget):
 class ModelManagerDialog(QDialog):
     pullRequested = Signal(str)
 
-    def __init__(self, models: list[str], current: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        models: list[str],
+        current: str,
+        label_for_model: Optional[Callable[[str], str]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Local models — Onionmind")
+        self._label_for_model = label_for_model or (lambda value: "ONIONMIND MODEL")
+        self.setWindowTitle("Onionmind models")
         self.setModal(True)
         self.resize(520, 390)
         layout = QVBoxLayout(self)
-        heading = QLabel("Local model manager")
+        heading = QLabel("Onionmind models")
         heading.setObjectName("brand")
-        copy_label = QLabel("Installed model identifiers stay visible. Pulls go only to the local model service configured on this machine.")
+        copy_label = QLabel("Choose from models installed on this machine, or add another Onionmind model locally.")
         copy_label.setObjectName("meta")
         copy_label.setWordWrap(True)
         layout.addWidget(heading)
@@ -3635,11 +3702,15 @@ class ModelManagerDialog(QDialog):
         self.set_models(models, current)
         row = QHBoxLayout()
         self.model_name = QLineEdit()
-        self.model_name.setPlaceholderText("Model identifier, for example blaze")
-        self.model_name.setAccessibleName("Model identifier to pull")
-        self.pull_button = QPushButton("Pull model")
+        self.model_name.setPlaceholderText("Onionmind model name, for example BLAZE")
+        self.model_name.setAccessibleName("Onionmind model to add")
+        self.pull_button = QPushButton("Add model")
         self.pull_button.setObjectName("primaryButton")
+        self.pull_button.setAccessibleName("Add Onionmind model")
         self.pull_button.clicked.connect(self._request_pull)
+        self.pull_button.setEnabled(False)
+        self.model_name.textChanged.connect(self._sync_pull_button)
+        self.model_name.returnPressed.connect(self._request_pull)
         row.addWidget(self.model_name, 1)
         row.addWidget(self.pull_button)
         layout.addLayout(row)
@@ -3649,21 +3720,33 @@ class ModelManagerDialog(QDialog):
         self.progress.setFormat("Ready")
         layout.addWidget(self.progress)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close_button is not None:
+            close_button.setAccessibleName("Close Onionmind model manager")
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def set_models(self, models: list[str], current: str = "") -> None:
         self.models.clear()
+        counts: dict[str, int] = {}
         for model in models:
-            item = QListWidgetItem(model + ("  · selected" if model == current else ""))
+            base = self._label_for_model(model)
+            counts[base] = counts.get(base, 0) + 1
+            label = base if counts[base] == 1 else f"{base} {counts[base]}"
+            item = QListWidgetItem(label + ("  · selected" if model == current else ""))
+            item.setData(Qt.ItemDataRole.UserRole, model)
             self.models.addItem(item)
+
+    def _sync_pull_button(self) -> None:
+        self.pull_button.setEnabled(bool(self.model_name.text().strip()))
 
     def _request_pull(self) -> None:
         name = self.model_name.text().strip()
         if not name:
-            self.progress.setFormat("Enter a model identifier")
+            self.progress.setFormat("Enter an Onionmind model name")
             return
         self.pull_button.setEnabled(False)
+        self.model_name.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat("Starting…")
@@ -3672,23 +3755,26 @@ class ModelManagerDialog(QDialog):
     def set_progress(self, fraction: float, status: str) -> None:
         self.progress.setRange(0, 100)
         self.progress.setValue(max(0, min(100, round(fraction * 100))))
-        self.progress.setFormat(f"{status} · %p%")
+        self.progress.setFormat(f"{_brand_runtime_text(status)} · %p%")
 
     def set_error(self, message: str) -> None:
-        self.pull_button.setEnabled(True)
+        self.model_name.setEnabled(True)
+        self._sync_pull_button()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setFormat(message[:80])
+        self.progress.setFormat(_brand_runtime_text(message)[:80])
 
     def set_complete(self) -> None:
-        self.pull_button.setEnabled(True)
+        self.model_name.setEnabled(True)
+        self.model_name.clear()
         self.progress.setValue(100)
         self.progress.setFormat("Installed locally")
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, data_root: Path, harness_limitation: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, data_root: Path, agent_limitation: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self.data_root = data_root
         self.setWindowTitle("Onionmind settings")
         self.resize(540, 350)
         outer = QVBoxLayout(self)
@@ -3697,13 +3783,13 @@ class SettingsDialog(QDialog):
         outer.addWidget(heading)
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.addRow("Inference", QLabel("Local model service on this machine"))
+        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
         tor = QLabel("Only Chat search queries use Tor; a failed Tor check never falls back to direct search.")
         tor.setWordWrap(True)
         form.addRow("Tor", tor)
-        harness = QLabel(harness_limitation)
-        harness.setWordWrap(True)
-        form.addRow("Harness", harness)
+        agent = QLabel(_brand_runtime_text(agent_limitation))
+        agent.setWordWrap(True)
+        form.addRow("Agent", agent)
         form.addRow("Telemetry", QLabel("No Onionmind telemetry or account"))
         storage = QLabel(str(data_root))
         storage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -3711,11 +3797,27 @@ class SettingsDialog(QDialog):
         form.addRow("Session storage", storage)
         outer.addLayout(form)
         outer.addStretch(1)
+        self.storage_feedback = QLabel()
+        self.storage_feedback.setObjectName("meta")
+        self.storage_feedback.setWordWrap(True)
+        outer.addWidget(self.storage_feedback)
         actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         open_folder = actions.addButton("Open storage folder", QDialogButtonBox.ButtonRole.ActionRole)
-        open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_root))))
+        open_folder.setAccessibleName("Open Onionmind storage folder")
+        open_folder.clicked.connect(self._open_storage_folder)
         actions.rejected.connect(self.reject)
         outer.addWidget(actions)
+
+    def _open_storage_folder(self) -> None:
+        try:
+            self.data_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.storage_feedback.setText(f"Could not open storage: {exc}")
+            return
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_root)))
+        self.storage_feedback.setText(
+            "Opened Onionmind storage." if opened else "The system could not open the storage folder."
+        )
 
 
 class OnionmindWindow(QMainWindow):
@@ -3758,7 +3860,7 @@ class OnionmindWindow(QMainWindow):
             self._probe_services()
 
     def _build_window(self) -> None:
-        self.setWindowTitle("Onionmind — local AI workbench")
+        self.setWindowTitle("Onionmind — private local workbench")
         icon_path = MODULE_DIR / "onionmind.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -3832,14 +3934,14 @@ class OnionmindWindow(QMainWindow):
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(190)
         self.model_combo.setMaximumWidth(260)
-        self.model_combo.setAccessibleName("Local model")
-        self.model_combo.setToolTip("Choose the exact local model identifier used for the next run")
+        self.model_combo.setAccessibleName("Onionmind model")
+        self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         toolbar_layout.addWidget(self.model_combo)
         self.model_status = StatusPill("Model", "Checking", "busy")
         toolbar_layout.addWidget(self.model_status)
         self.tor_status = StatusPill("Tor", "Checking", "busy")
-        self.tor_status.setToolTip("Tor state is separate from the local model service")
+        self.tor_status.setToolTip("Tor search state is separate from Onionmind inference")
         toolbar_layout.addWidget(self.tor_status)
 
         terminal_toggle = QToolButton()
@@ -3924,6 +4026,7 @@ class OnionmindWindow(QMainWindow):
         self.composer.setPlaceholderText("Describe what you want Onionmind to do in this project…")
         self.composer.sendRequested.connect(self.submit)
         self.composer.filesDropped.connect(self.add_attachments)
+        self.composer.textChanged.connect(self._sync_action_states)
         outer.addWidget(self.composer, 1)
         self.attachment_row = QWidget()
         attachment_layout = QHBoxLayout(self.attachment_row)
@@ -3957,6 +4060,10 @@ class OnionmindWindow(QMainWindow):
         mode_layout.setSpacing(0)
         self.chat_button = QPushButton("Chat")
         self.agent_button = QPushButton("Agent")
+        self.chat_button.setAccessibleName("Use Onionmind Chat")
+        self.chat_button.setToolTip("Chat privately with the selected Onionmind model")
+        self.agent_button.setAccessibleName("Use Onionmind Agent")
+        self.agent_button.setToolTip("Ask Onionmind Agent to work in the selected project")
         for button in (self.chat_button, self.agent_button):
             button.setObjectName("modeButton")
             button.setCheckable(True)
@@ -3968,13 +4075,13 @@ class OnionmindWindow(QMainWindow):
         self.chat_button.clicked.connect(lambda: self.set_mode("chat"))
         self.agent_button.clicked.connect(lambda: self.set_mode("agent"))
         controls.addWidget(mode_frame)
-        self.approval_state = QLabel("Stock headless approvals fail closed")
+        self.approval_state = QLabel("Protected actions stop safely")
         self.approval_state.setObjectName("accent")
         self.approval_state.setToolTip(
-            "The stock headless DSH profile has no interactive approval answerer; custom profiles can change its composition"
+            "This early-access Agent cannot answer interactive approval prompts, so protected actions stop instead of continuing"
         )
         self.approval_state.setAccessibleName(
-            "Stock headless Harness approvals fail closed"
+            "Onionmind Agent protected actions stop safely"
         )
         controls.addWidget(self.approval_state)
         self.disclosure = QLabel()
@@ -3988,6 +4095,7 @@ class OnionmindWindow(QMainWindow):
         controls.addWidget(self.send_button)
         outer.addLayout(controls)
         self.set_mode(_as_text(self.settings_data.get("mode", "agent")))
+        self._sync_action_states()
         return frame
 
     def _install_shortcuts(self) -> None:
@@ -4071,16 +4179,17 @@ class OnionmindWindow(QMainWindow):
         return worker
 
     def _model_probe_complete(self, payload: tuple[str, list[str]]) -> None:
-        backend, models = payload
+        _backend, models = payload
         current = self.current_model_id()
         self.set_model_options(models or [current], current)
-        self.model_status.set_status(backend or "Ready", "good")
-        self.inspector.append_activity(f"Local model service ready: {backend or 'available'}")
+        self.model_status.set_status("Ready", "good")
+        self.model_status.setToolTip("Onionmind inference is ready on this machine")
+        self.inspector.append_activity("Onionmind inference ready")
 
     def _model_probe_failed(self, message: str) -> None:
         self.model_status.set_status("Unavailable", "bad")
         self.set_status(message)
-        self.inspector.append_activity(f"Local model service unavailable: {message}")
+        self.inspector.append_activity(f"Onionmind inference unavailable: {message}")
 
     def _tor_probe_failed(self, message: str) -> None:
         self.tor_status.set_status("Not ready", "bad")
@@ -4093,16 +4202,18 @@ class OnionmindWindow(QMainWindow):
             try:
                 display = helper(raw_id)
                 tier = _as_text(_field(display, "tier", "")).upper()
-                name = _as_text(_field(display, "display_name", ""))
-                if name and raw_id not in name:
-                    return f"{name} · {raw_id}"
-                return name or (f"{tier} · {raw_id}" if tier else raw_id)
+                if tier:
+                    return tier
             except Exception:
                 pass
         lower = raw_id.lower()
         tiers = ("spark", "ember", "blaze", "inferno", "cinder", "wildfire", "flashpoint", "phoenix", "nova", "pyre")
-        tier = next((name.upper() for name in tiers if name in lower), "LOCAL")
-        return f"{tier} · {raw_id}"
+        tier = next((name.upper() for name in tiers if name in lower), "")
+        if tier:
+            return tier
+        tag = raw_id.rsplit(":", 1)[-1] if ":" in raw_id else ""
+        size = tag.upper() if re.fullmatch(r"\d+(?:\.\d+)?B", tag, re.IGNORECASE) else ""
+        return "ONIONMIND CUSTOM" + (f" · {size}" if size else "")
 
     def set_model_options(self, models: Iterable[str], current: str = "") -> None:
         values: list[str] = []
@@ -4113,8 +4224,12 @@ class OnionmindWindow(QMainWindow):
         self.installed_model_ids = values
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        counts: dict[str, int] = {}
         for model in values:
-            self.model_combo.addItem(self._describe_model(model), model)
+            base = self._describe_model(model)
+            counts[base] = counts.get(base, 0) + 1
+            label = base if counts[base] == 1 else f"{base} {counts[base]}"
+            self.model_combo.addItem(label, model)
         index = self.model_combo.findData(current)
         self.model_combo.setCurrentIndex(max(0, index))
         self.model_combo.blockSignals(False)
@@ -4141,12 +4256,12 @@ class OnionmindWindow(QMainWindow):
         self.mode = mode
         if mode == "chat":
             self.approval_state.hide()
-            self.disclosure.setText("Local inference · search is the only Tor-routed exception")
-            self.composer.setPlaceholderText("Ask the local model anything…")
+            self.disclosure.setText("Private on-device chat · search is the only Tor-routed exception")
+            self.composer.setPlaceholderText("Ask Onionmind anything…")
         else:
             self.approval_state.show()
-            self.disclosure.setText("Headless developer preview · Harness network is not Tor-confined")
-            self.composer.setPlaceholderText("Describe the repository task for DeepSeek Harness…")
+            self.disclosure.setText("Early access · Agent network access is separate from Tor search")
+            self.composer.setPlaceholderText("Describe what you want Onionmind Agent to change…")
         self.settings_data["mode"] = mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
@@ -4155,6 +4270,7 @@ class OnionmindWindow(QMainWindow):
         self.composer.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def set_status(self, text: str) -> None:
+        text = _brand_runtime_text(text)
         self.status_label.setText(text)
         self.status_label.setAccessibleName(f"Application status: {text}")
 
@@ -4177,6 +4293,11 @@ class OnionmindWindow(QMainWindow):
         if target:
             self.terminal.command.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
+    def _sync_action_states(self) -> None:
+        has_draft = bool(self.composer.toPlainText().strip() or self.attachments)
+        self.send_button.setEnabled(bool(self.active_kind) or has_draft)
+        self.left_rail.set_conversation_available(bool(self.chat_messages))
+
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
         width = self.width()
@@ -4195,8 +4316,8 @@ class OnionmindWindow(QMainWindow):
             self.inspector.hide()
         elif self._inspector_requested:
             self.inspector.show()
-        self.rail_toggle.setChecked(self.left_rail.isVisible())
-        self.inspector_toggle.setChecked(self.inspector.isVisible())
+        self.rail_toggle.setChecked(not self.left_rail.isHidden())
+        self.inspector_toggle.setChecked(not self.inspector.isHidden())
 
     def choose_attachments(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -4222,12 +4343,14 @@ class OnionmindWindow(QMainWindow):
         if not self.attachments:
             self.attachment_row.hide()
             self.attachment_label.clear()
+            self._sync_action_states()
             return
         names = [Path(path).name for path in self.attachments]
         display = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
         self.attachment_label.setText(f"Attached locally: {display}")
         self.attachment_label.setToolTip("\n".join(self.attachments))
         self.attachment_row.show()
+        self._sync_action_states()
 
     def open_folder(self) -> None:
         if self.active_kind:
@@ -4305,7 +4428,7 @@ class OnionmindWindow(QMainWindow):
         self.transcript.clear()
         self.transcript.add_message(
             "assistant",
-            "Open a project, choose a local model, then describe the task. Chat stays in the local inference path; Agent hands repository work to DeepSeek Harness.",
+            "Open a project, choose an Onionmind model, then describe the task. Chat answers privately; Agent works in the selected repository and reports only changes observed on disk.",
         )
         self.composer.clear()
         self.clear_attachments()
@@ -4397,7 +4520,7 @@ class OnionmindWindow(QMainWindow):
         destination = Path(path)
         if not destination.suffix:
             destination = destination.with_suffix(".md")
-        lines = [f"# {self._session_title()}", "", f"- Model: `{self.current_model_id()}`"]
+        lines = [f"# {self._session_title()}", "", f"- Model: `{self._describe_model(self.current_model_id())}`"]
         if self.workspace:
             lines.append(f"- Workspace: `{self.workspace}`")
         lines.extend(("", "---", ""))
@@ -4614,7 +4737,7 @@ class OnionmindWindow(QMainWindow):
         self.send_button.setAccessibleName("Stop active run" if running else "Send task")
         if kind == "agent":
             self.send_button.setToolTip(
-                "Stop the Harness launcher; child processes it started may require manual termination"
+                "Stop Onionmind Agent; child processes it started may require manual termination"
             )
         elif kind == "chat":
             self.send_button.setToolTip("Stop local generation after the current read")
@@ -4628,6 +4751,7 @@ class OnionmindWindow(QMainWindow):
         if not running:
             self.stop_event = None
             self.harness_process = None
+        self._sync_action_states()
 
     def _start_chat(self) -> None:
         self.stop_event = threading.Event()
@@ -4719,6 +4843,7 @@ class OnionmindWindow(QMainWindow):
         self.save_current_session()
 
     def _chat_failed(self, message: str) -> None:
+        message = _brand_runtime_text(message)
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
         self.chat_messages.append({"role": "assistant", "content": f"Local inference failed: {message}"})
@@ -4742,10 +4867,10 @@ class OnionmindWindow(QMainWindow):
         generation = self.harness_generation
         self.stream_block = self.transcript.add_message(
             "assistant",
-            "Checking the local DeepSeek Harness launcher…\n\n" + self.harness_bridge.limitation,
-            "Harness",
+            "Preparing Onionmind Agent…\n\n" + self.harness_bridge.limitation,
+            "Onionmind Agent",
         )
-        self.set_status("Checking DeepSeek Harness availability…")
+        self.set_status("Preparing Onionmind Agent…")
 
         def prepare(signals: WorkerSignals) -> dict[str, Any]:
             del signals
@@ -4769,15 +4894,15 @@ class OnionmindWindow(QMainWindow):
         if generation != self.harness_generation or self.active_kind != "agent":
             return
         if not payload.get("available"):
-            reason = payload.get("reason") or "DeepSeek Harness is unavailable."
-            text = _as_text(reason) + "\n\n" + self.harness_bridge.limitation
+            reason = payload.get("reason") or "Onionmind Agent is unavailable."
+            text = _brand_runtime_text(reason) + "\n\n" + self.harness_bridge.limitation
             if self.stream_block is None:
-                self.stream_block = self.transcript.add_message("assistant", text, "Harness")
+                self.stream_block = self.transcript.add_message("assistant", text, "Onionmind Agent")
             else:
                 self.stream_block.set_text(text)
             self.chat_messages.append({"role": "assistant", "content": text})
-            self.set_status("DeepSeek Harness is unavailable")
-            self.inspector.append_activity("Harness unavailable; no repository action started")
+            self.set_status("Onionmind Agent is unavailable")
+            self.inspector.append_activity("Agent unavailable; no repository action started")
             self._set_active(None)
             self.save_current_session()
             return
@@ -4785,23 +4910,23 @@ class OnionmindWindow(QMainWindow):
         cwd = _as_text(payload.get("cwd") or self.workspace)
         if not argv:
             self._harness_start_failed(
-                "The Harness adapter returned no executable command.", generation
+                "The Agent adapter returned no executable command.", generation
             )
             return
         self.harness_output = ""
         start_text = (
-            "Starting DeepSeek Harness headless…\n"
+            "Starting Onionmind Agent…\n"
             + self.harness_bridge.limitation
-            + "\n\nHarness output (unverified until disk refresh):\n"
+            + "\n\nAgent output (unverified until disk refresh):\n"
         )
         if self.stream_block is None:
-            self.stream_block = self.transcript.add_message("assistant", start_text, "Harness")
+            self.stream_block = self.transcript.add_message("assistant", start_text, "Onionmind Agent")
         else:
             self.stream_block.set_text(start_text)
         self.harness_output = self.stream_block.text
         self.terminal.show()
         self.terminal_toggle.setChecked(True)
-        self.terminal.append("\n[agent] Starting DeepSeek Harness headless\n")
+        self.terminal.append("\n[agent] Starting Onionmind Agent\n")
         process = QProcess(self)
         self.harness_process = process
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -4810,14 +4935,14 @@ class OnionmindWindow(QMainWindow):
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
         process.start(argv[0], argv[1:])
-        self.set_status("DeepSeek Harness is running headless…")
-        self.inspector.append_activity("Harness headless run started; output is not yet proof of disk changes")
+        self.set_status("Onionmind Agent is working…")
+        self.inspector.append_activity("Agent run started; output is not yet proof of disk changes")
 
     def _read_harness_output(self) -> None:
         if self.harness_process is None:
             return
         chunk = bytes(self.harness_process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        clean = ANSI_ESCAPE.sub("", chunk)
+        clean = _brand_runtime_text(ANSI_ESCAPE.sub("", chunk))
         self.harness_output += clean
         if self.stream_block is not None:
             self.stream_block.append_text(clean)
@@ -4828,14 +4953,14 @@ class OnionmindWindow(QMainWindow):
         if self.active_kind != "agent":
             return
         normal = status == QProcess.ExitStatus.NormalExit
-        suffix = f"\n\nHarness {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
+        suffix = f"\n\nAgent {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
         if self.stream_block is not None:
             self.stream_block.append_text(suffix)
         content = (self.stream_block.text if self.stream_block is not None else self.harness_output + suffix)
         self.chat_messages.append({"role": "assistant", "content": content})
         self.terminal.append(suffix + "\n")
-        self.set_status(f"Harness exited with code {exit_code}; refreshing observed changes…")
-        self.inspector.append_activity(f"Harness exited with code {exit_code}; disk inspection requested")
+        self.set_status(f"Agent exited with code {exit_code}; refreshing observed changes…")
+        self.inspector.append_activity(f"Agent exited with code {exit_code}; disk inspection requested")
         self._set_active(None)
         self.save_current_session()
         self.refresh_workspace()
@@ -4856,14 +4981,15 @@ class OnionmindWindow(QMainWindow):
             return
         if generation is not None and generation != self.harness_generation:
             return
-        text = f"DeepSeek Harness could not start: {message}\n\n{self.harness_bridge.limitation}"
+        message = _brand_runtime_text(message)
+        text = f"Onionmind Agent could not start: {message}\n\n{self.harness_bridge.limitation}"
         if self.stream_block is None:
-            self.stream_block = self.transcript.add_message("assistant", text, "Harness")
+            self.stream_block = self.transcript.add_message("assistant", text, "Onionmind Agent")
         else:
             self.stream_block.set_text(text)
         self.chat_messages.append({"role": "assistant", "content": text})
-        self.set_status(f"Harness could not start: {message}")
-        self.inspector.append_activity("Harness failed before a repository action could be verified")
+        self.set_status(f"Agent could not start: {message}")
+        self.inspector.append_activity("Agent failed before a repository action could be verified")
         self._set_active(None)
         self.save_current_session()
 
@@ -4876,7 +5002,7 @@ class OnionmindWindow(QMainWindow):
         elif self.active_kind == "agent":
             if self.harness_process is None:
                 self.harness_generation += 1
-                text = "Harness start canceled before a repository action began."
+                text = "Agent start canceled before a repository action began."
                 if self.stream_block is not None:
                     self.stream_block.set_text(text)
                 self.chat_messages.append({"role": "assistant", "content": text})
@@ -4888,7 +5014,7 @@ class OnionmindWindow(QMainWindow):
                 self.harness_process.terminate()
                 QTimer.singleShot(1500, self._kill_harness_if_running)
                 self.set_status(
-                    "Stopping the Harness launcher; spawned child processes may require manual termination."
+                    "Stopping Onionmind Agent; spawned child processes may require manual termination."
                 )
 
     def _kill_harness_if_running(self) -> None:
@@ -4896,7 +5022,12 @@ class OnionmindWindow(QMainWindow):
             self.harness_process.kill()
 
     def open_model_manager(self) -> None:
-        dialog = ModelManagerDialog(self.installed_model_ids, self.current_model_id(), self)
+        dialog = ModelManagerDialog(
+            self.installed_model_ids,
+            self.current_model_id(),
+            self._describe_model,
+            self,
+        )
         self._model_dialog = dialog
         dialog.pullRequested.connect(lambda name: self.pull_model(name, dialog))
         dialog.exec()
@@ -4905,7 +5036,7 @@ class OnionmindWindow(QMainWindow):
     def pull_model(self, name: str, dialog: ModelManagerDialog) -> None:
         pull = getattr(self.core, "pull_model", None)
         if not callable(pull):
-            dialog.set_error("This local model service does not support pulls")
+            dialog.set_error("This Onionmind installation cannot add models yet")
             return
         stop_event = threading.Event()
 
@@ -4922,7 +5053,7 @@ class OnionmindWindow(QMainWindow):
 
     def _model_pull_complete(self, name: str, dialog: ModelManagerDialog, ok: bool) -> None:
         if not ok:
-            dialog.set_error("Model pull was stopped")
+            dialog.set_error("Adding the model was stopped")
             return
         if name not in self.installed_model_ids:
             self.installed_model_ids.append(name)
@@ -4930,7 +5061,7 @@ class OnionmindWindow(QMainWindow):
         self.set_model_options(self.installed_model_ids, current)
         dialog.set_models(self.installed_model_ids, current)
         dialog.set_complete()
-        self.inspector.append_activity(f"Local model installed: {name}")
+        self.inspector.append_activity(f"Onionmind model installed: {self._describe_model(name)}")
 
     def open_settings(self) -> None:
         SettingsDialog(self.data_root, self.harness_bridge.limitation, self).exec()
@@ -4974,6 +5105,20 @@ class OnionmindWindow(QMainWindow):
             "assistant",
             "All 512 tests passed. The shared UserBuilder now lives in tests/helpers/user_builder.rb and six call sites use it.\n\nObserved after the run: 4 changed files · +192 / -84. Review the actual diff in Changes.",
         )
+        self.chat_messages = [
+            {
+                "role": "user",
+                "content": "The user factory in tests is duplicated. Extract a shared builder in tests/helpers, update the callers, and run the test suite.",
+            },
+            {
+                "role": "assistant",
+                "content": "I’ll inspect the existing factories and test conventions, make the smallest shared helper, then run the focused tests before the full suite.",
+            },
+            {
+                "role": "assistant",
+                "content": "All 512 tests passed. The shared UserBuilder now lives in tests/helpers/user_builder.rb and six call sites use it.\n\nObserved after the run: 4 changed files · +192 / -84. Review the actual diff in Changes.",
+            },
+        ]
         self.terminal.output.setPlainText(
             "leaflink on main · local runtime 3.2.2\n"
             "> bundle exec rake test\n"
@@ -5015,11 +5160,12 @@ class OnionmindWindow(QMainWindow):
         }
         self.current_snapshot = demo_snapshot
         self.inspector.update_snapshot(demo_snapshot)
-        self.inspector.append_activity("Observed Git state refreshed after Harness exit")
-        self.inspector.append_activity("Harness finished with exit code 0")
-        self.inspector.append_activity("Local model and Tor readiness reported separately")
+        self.inspector.append_activity("Observed Git state refreshed after Agent exit")
+        self.inspector.append_activity("Agent finished with exit code 0")
+        self.inspector.append_activity("Onionmind inference and Tor readiness reported separately")
         self.set_mode("agent")
         self.set_status("Ready · 4 observed changes · all inference local")
+        self._sync_action_states()
         QTimer.singleShot(0, lambda: self.transcript.verticalScrollBar().setValue(0))
 
     def closeEvent(self, event: Any) -> None:

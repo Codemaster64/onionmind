@@ -125,7 +125,7 @@ components:
 
 **Creative North Star: "The Calm Local Work Loop"**
 
-Onionmind is one native workbench for choosing a repository and local model, describing work, watching an interruptible Chat or Harness run, and verifying what was observed. The transcript stays primary while projects, sessions, terminal output, context, changes, and activity remain part of the same legible loop.
+Onionmind is one native workbench for choosing a repository and Onionmind model, describing work, watching an interruptible Chat or Agent run, and verifying what was observed. The transcript stays primary while projects, sessions, terminal output, context, changes, and activity remain part of the same legible loop.
 
 The interface is quiet and operational: matte warm graphite planes, fine charcoal seams, soft bone type, and aubergine held back for selection, focus, and the primary action. Density is compact and information-rich without becoming a dashboard; balanced Workbench A in Operate mode is the canonical expression.
 
@@ -237,11 +237,11 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 ### Status and Privacy
 
 - **Status containers:** compact 4px radius, 4px × 8px padding, a 6px state dot inside a 10px indicator, and a textual prefix plus value.
-- **Privacy boundary:** present local inference, Tor-routed Chat search, and Harness networking as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
+- **Privacy boundary:** present Onionmind inference, Tor-routed Chat search, and Agent networking as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
 
-**The Honest State Rule.** Model, Tor, Harness, permission, activity, and observed-change states are always named in text and never encoded by color alone.
+**The Honest State Rule.** Onionmind model, Tor, Agent, permission, activity, and observed-change states are always named in text and never encoded by color alone.
 
-**The Separate Boundaries Rule.** Present local inference, Tor-routed Chat search, and Harness networking as separate facts; never imply Harness traffic is Tor-confined.
+**The Separate Boundaries Rule.** Present Onionmind inference, Tor-routed Chat search, and Agent networking as separate facts; never imply Agent traffic is Tor-confined.
 
 ## Do's and Don'ts
 
@@ -251,7 +251,8 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 - **Do** keep the transcript largest, with a responsive 74-character message measure and 78-character tool measure.
 - **Do** use the authored monochrome icon set for actions and the supplied Onionmind asset for product identity.
 - **Do** provide visible keyboard focus, accessible names, selectable output, and textual state labels.
-- **Do** distinguish local inference, Tor search, and Harness networking wherever privacy boundaries appear.
+- **Do** distinguish Onionmind inference, Tor search, and Agent networking wherever privacy boundaries appear.
+- **Do** keep backend vendor names out of ordinary UI copy; use Onionmind model tiers, Onionmind Chat, and Onionmind Agent.
 
 ### Don't:
 

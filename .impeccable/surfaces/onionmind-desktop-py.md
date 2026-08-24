@@ -12,7 +12,7 @@ related_targets: []
 - Target: `onionmind_desktop.py`
 - Mode: Operate
 - Audience: developers working in a local repository
-- Job: converse with a local model, hand repository-changing work to DeepSeek Harness, run project commands, and review context and git changes in one native application
+- Job: converse with an Onionmind model, hand repository-changing work to Onionmind Agent, run project commands, and review context and git changes in one native application
 - Primary action: describe a task in the composer and send it in Chat or Agent mode
 
 ## Chosen direction
@@ -31,14 +31,14 @@ The balanced workbench keeps the transcript primary, with projects and sessions 
 | Inspector | 292px default with Context, Changes, Activity; changes show real git data | Qt tab widget, lists, and monospace diff viewer |
 | Terminal drawer | Compact command runner scoped to the selected workspace; output remains selectable | `QProcess` plus a monospace plain-text view |
 | Composer | Multiline, attachment affordance, Chat/Agent, permission disclosure, model, Stop/Send | Qt input and standard controls |
-| Privacy boundary | Ollama and Tor are separate status facts; Harness network access is never described as Tor-confined | Semantic labels and status indicators |
+| Privacy boundary | Onionmind inference and Tor are separate status facts; Agent network access is never described as Tor-confined | Semantic labels and status indicators |
 | Onionmind identity | Existing onion icon, product name, and named model tiers | Existing `.ico`/SVG assets and text |
 
 ## Interaction and responsive behavior
 
 - Keyboard first: Ctrl+N new task, Ctrl+O open folder, Ctrl+L focus composer, Ctrl+` toggle terminal, Ctrl+Shift+I toggle inspector, Escape stops an active run.
 - At narrow widths the inspector collapses first, then the left rail; both remain reachable from toolbar actions.
-- Chat mode uses the existing local streaming engine and Tor search tool. Agent mode starts DeepSeek Harness headless through Ollama in the selected workspace; Harness tools govern their own access. Missing Node/DSH prerequisites and the stock profile's fail-closed approvals are reported plainly.
+- Chat mode uses the existing local streaming engine and Tor search tool. Agent mode starts the repository workflow in the selected workspace; Agent tools govern their own access. Missing prerequisites and protected-action stops are reported plainly in Onionmind product language.
 - Git and project inspection are read-only. Onionmind never claims a change until it observes it on disk.
 
 ## Module seams

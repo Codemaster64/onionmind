@@ -332,15 +332,15 @@ class HarnessAndTerminalTests(unittest.TestCase):
             )
             self.assertEqual(command.cwd, cwd.resolve())
             self.assertNotIn("--patch", command.argv)
-            self.assertIn("rejects the Onionmind --patch option", core.HARNESS_LIMITATION)
             self.assertIn("starts in the selected working directory", core.HARNESS_LIMITATION)
+            self.assertIn("Agent network access is separate from Tor search", core.HARNESS_LIMITATION)
 
     def test_harness_availability_is_actionable_and_safe(self) -> None:
         spec = core.HarnessSpec()
         with mock.patch.object(core.shutil, "which", return_value=None):
             missing = spec.check()
         self.assertFalse(missing.available)
-        self.assertIn("not found", missing.reason)
+        self.assertIn("local engine is not ready", missing.reason)
         self.assertEqual(missing.limitation, core.HARNESS_LIMITATION)
 
         completed = subprocess.CompletedProcess(
@@ -385,7 +385,7 @@ class HarnessAndTerminalTests(unittest.TestCase):
         ):
             unsupported = spec.check()
         self.assertFalse(unsupported.available)
-        self.assertIn("requires Node.js", unsupported.reason)
+        self.assertIn("newer local runtime", unsupported.reason)
 
     def test_terminal_parser_builds_argv_without_shell_true(self) -> None:
         if os.name == "nt":
