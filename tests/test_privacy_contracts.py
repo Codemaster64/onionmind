@@ -353,6 +353,39 @@ class AndroidPrivacyTests(unittest.TestCase):
         self.assertIn('"-c", "16384"', manager)
         self.assertIn("const val NUM_PREDICT = 16384", agent)
 
+    def test_android_chat_never_adopts_an_unowned_model_listener(self) -> None:
+        manager = self.text(
+            "android/app/src/main/java/org/onionmind/app/ProcessManager.kt"
+        )
+        ownership = self.text(
+            "android/core/src/main/kotlin/org/onionmind/core/OwnedLoopbackProcess.kt"
+        )
+        server = self.text("android/app/src/main/java/org/onionmind/app/Server.kt")
+
+        # Android loopback is shared by every installed app. An open port is
+        # therefore readiness evidence only when our exact child is still live;
+        # it is never evidence that Onionmind owns the listener by itself.
+        self.assertIn("fun ensureLlama(ctx: Context): Boolean", manager)
+        self.assertIn(
+            "OwnedLoopbackProcess(listenerOpen = { portOpen(LLAMA_PORT) })",
+            manager,
+        )
+        self.assertIn("if (listenerOpen()) return@synchronized false", ownership)
+        self.assertIn("child === owned && owned.isAlive", ownership)
+        self.assertNotIn("private fun llamaAlive() = portOpen(8080)", manager)
+        self.assertNotIn("fun llamaReady() = portOpen(8080)", manager)
+
+        # Startup and readiness are serialized with the chat itself. A failure
+        # becomes a clear 503 and Agent.turn is unreachable on that branch.
+        chat = server[server.index("private fun chat(") :]
+        ensure = chat.index("ProcessManager.ensureLlama(ctx)")
+        await_ready = chat.index("ProcessManager.awaitLlamaReady()")
+        turn = chat.index("Agent.turn(LLAMA, messages, allowSearch)")
+        self.assertLess(ensure, await_ready)
+        self.assertLess(await_ready, turn)
+        self.assertIn("Response.Status.SERVICE_UNAVAILABLE", chat)
+        self.assertIn("Local model server could not start safely", chat)
+
     def test_android_loopback_page_requires_an_unshared_capability_url(self) -> None:
         server = self.text("android/app/src/main/java/org/onionmind/app/Server.kt")
         activity = self.text(

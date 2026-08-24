@@ -177,19 +177,31 @@ object Server {
         val messages = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
             .map { it.jsonObject }.toMutableList()
         // the UI sends plain {role, content} turns; the agent extends the list
-        ProcessManager.ensureLlama(ctx)
         val answer = try {
-            chatLock.submit<String> { Agent.turn(LLAMA, messages, allowSearch) { query ->
-                // Starting Tor is lazy: checking the one-turn box merely makes
-                // the tool available. No Tor process or network is touched
-                // unless the model actually asks to search during this turn.
-                if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady())
-                    "(Tor could not start safely; web search was not performed)"
-                else Agent.webSearch(query)
-            } }.get()
+            chatLock.submit<String?> {
+                // Starting and checking the child are serialized with its chat.
+                // An occupied shared-loopback port is never allowed to reach
+                // Agent.turn unless our exact llama-server child is still live.
+                if (!ProcessManager.ensureLlama(ctx) || !ProcessManager.awaitLlamaReady()) {
+                    null
+                } else {
+                    Agent.turn(LLAMA, messages, allowSearch) { query ->
+                        // Starting Tor is lazy: checking the one-turn box merely makes
+                        // the tool available. No Tor process or network is touched
+                        // unless the model actually asks to search during this turn.
+                        if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady())
+                            "(Tor could not start safely; web search was not performed)"
+                        else Agent.webSearch(query)
+                    }
+                }
+            }.get()
         } catch (e: ExecutionException) {
             return error(Response.Status.INTERNAL_ERROR, rootMessage(e))
         }
+        if (answer == null) return error(
+            Response.Status.SERVICE_UNAVAILABLE,
+            "Local model server could not start safely",
+        )
         return json(buildJsonObject {
             put("answer", answer)
             put("messages", JsonArray(messages))
