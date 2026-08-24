@@ -237,9 +237,9 @@ local. In interactive chat, `/save notes.txt` exports the conversation so far.
 
 ### What protects you
 
-- **DuckDuckGo's `.onion` service** — the query never leaves the Tor network, so no exit node
-  ever sees it. Also the only reliable option: the clearnet endpoint returns **403** to most
-  Tor exits.
+- **DuckDuckGo's `.onion` service only** — the query never leaves the Tor network, so no exit
+  node ever sees it. A failed request is retried through a fresh circuit to the same onion
+  service; it is never redirected to a direct endpoint.
 - **A fresh circuit per search** — random SOCKS credentials per request make Tor build a
   separate circuit. Without this every search shares one exit and they're trivially linkable.
 - **`socks5h://`** — DNS resolves through Tor. Plain `socks5` leaks every hostname to your
@@ -549,11 +549,11 @@ You put a `DRAFT` line in the Modelfile with a non-MTP model. Ollama's `DRAFT` d
 wired to the model's own MTP head, not an external draft model. Use an MTP build or drop the
 directive.
 
-### Search returns nothing, or `403 Forbidden`
+### Search returns nothing, or an HTTP error
 
-DuckDuckGo blocks Tor exit nodes on its clearnet endpoint. The script prefers the `.onion`
-service specifically to avoid this, and retries on a fresh circuit. If both fail, the exit is
-rate-limited — retry for a new circuit.
+Search uses DuckDuckGo's `.onion` service exclusively and makes two attempts, each through a
+fresh Tor circuit. If both attempts fail, the onion service may be unavailable or rate-limited;
+retry later for new circuits.
 
 ### `No verified Tor proxy is available`
 

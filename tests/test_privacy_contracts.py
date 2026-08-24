@@ -61,6 +61,24 @@ class SearchConsentTests(unittest.TestCase):
         self.assertEqual(history[-2]["content"], "(web search was not allowed for this turn)")
 
 
+class OnionSearchTests(unittest.TestCase):
+    def test_retries_only_the_onion_service_with_fresh_circuits(self) -> None:
+        attempts = []
+
+        def fail(url, **kwargs):
+            attempts.append((url, kwargs["proxies"]))
+            raise RuntimeError("offline")
+
+        with mock.patch.object(onionmind.secrets, "token_hex", side_effect=("first", "second")), \
+             mock.patch.object(onionmind.requests, "post", side_effect=fail):
+            result = onionmind.web_search("private query")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(all(url == onionmind.ENDPOINT for url, _ in attempts))
+        self.assertNotEqual(attempts[0][1], attempts[1][1])
+        self.assertIn("onion service", result)
+
+
 class BackgroundTorTests(unittest.TestCase):
     def tearDown(self) -> None:
         onionmind._managed_tor_process = None
@@ -121,6 +139,43 @@ class DistributionPrivacyTests(unittest.TestCase):
         workflow_dir = ROOT / ".github" / "workflows"
         self.assertFalse(list(workflow_dir.glob("*.yml")))
         self.assertFalse(list(workflow_dir.glob("*.yaml")))
+
+    def test_search_runtime_is_onion_only(self) -> None:
+        onion_endpoint = (
+            "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad"
+            ".onion/html/"
+        )
+        runtime_holders = (
+            "onionmind.py",
+            "android/core/src/main/kotlin/org/onionmind/core/Agent.kt",
+            "install-onionmind.ps1",
+            "install-onionmind.sh",
+            "install-onionmind-android.sh",
+            "onionmind-setup.cmd",
+        )
+        forbidden = (
+            "https://html." + "duckduckgo.com/html/",
+            "clearnet",
+            "direct fallback",
+            "both endpoints",
+        )
+
+        for name in runtime_holders:
+            with self.subTest(name=name):
+                runtime = self.text(name)
+                self.assertIn(onion_endpoint, runtime)
+                lowered = runtime.lower()
+                for phrase in forbidden:
+                    self.assertNotIn(phrase, lowered)
+
+        android = self.text(
+            "android/core/src/main/kotlin/org/onionmind/core/Agent.kt"
+        )
+        search = android[android.index("    fun webSearch(") :]
+        search = search[: search.index("    fun parseResults(")]
+        self.assertIn("repeat(2)", search)
+        self.assertIn("Socks5Socket.randomCreds()", search)
+        self.assertIn("Request.Builder().url(ENDPOINT)", search)
 
     def test_windows_launchers_never_start_tor_browser(self) -> None:
         for name in (

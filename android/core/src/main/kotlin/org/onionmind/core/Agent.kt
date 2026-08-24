@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 /**
  * The search agent, ported line-for-line in spirit from onionmind.py: fails
  * closed without tor, one fresh circuit per attempt, the .onion DuckDuckGo
- * endpoint first, per-block result parsing, thinking-stripped answers.
+ * service only, per-block result parsing, thinking-stripped answers.
  */
 object Agent {
 
@@ -24,12 +24,9 @@ object Agent {
     const val UA =
         "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
 
-    // Onion first: it never leaves the Tor network (no exit sees the query),
-    // and the clearnet endpoint 403s most tor exits anyway.
-    val ENDPOINTS = listOf(
-        "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/",
-        "https://html.duckduckgo.com/html/",
-    )
+    // This service keeps every query inside Tor; requests never leave Tor.
+    const val ENDPOINT =
+        "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/"
 
     const val NUM_PREDICT = 16384  // reasoning models can spend 8K+ tokens thinking first
 
@@ -117,28 +114,26 @@ object Agent {
 
     fun webSearch(query: String, n: Int = 5): String {
         var err: String? = null
-        for (url in ENDPOINTS) {
-            repeat(2) {
-                val (u, p) = Socks5Socket.randomCreds()
-                val http = client(u, p)
-                try {
-                    http.newCall(
-                        Request.Builder().url(url)
-                            .header("User-Agent", UA)
-                            .post(FormBody.Builder().add("q", query).build())
-                            .build()
-                    ).execute().use { resp ->              // .use: close on every path
-                        if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
-                        val hits = parseResults(resp.body?.string() ?: "", n)
-                        if (hits.isEmpty()) { err = "empty result page"; return@repeat }
-                        System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
-                        return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
-                    }
-                } catch (e: Exception) { err = e.message }
-                finally { retire(http) }
-            }
+        repeat(2) {
+            val (u, p) = Socks5Socket.randomCreds()
+            val http = client(u, p)
+            try {
+                http.newCall(
+                    Request.Builder().url(ENDPOINT)
+                        .header("User-Agent", UA)
+                        .post(FormBody.Builder().add("q", query).build())
+                        .build()
+                ).execute().use { resp ->              // .use: close on every path
+                    if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
+                    val hits = parseResults(resp.body?.string() ?: "", n)
+                    if (hits.isEmpty()) { err = "empty result page"; return@repeat }
+                    System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
+                    return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
+                }
+            } catch (e: Exception) { err = e.message }
+            finally { retire(http) }
         }
-        return "(search failed after trying both endpoints on fresh circuits: $err)"
+        return "(search failed on the onion service after fresh-circuit retries: $err)"
     }
 
     /** Per-result-BLOCK parsing, ported from onionmind.py's parse_results:

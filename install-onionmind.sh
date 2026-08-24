@@ -470,11 +470,9 @@ PORTS  = (9150, 9050) if os.name == "nt" else (9050, 9150)
 # Windows prefers Tor Browser's hidden daemon; Unix prefers the system Tor daemon.
 # Tor Browser's own UA. A unique UA is a fingerprint; blending into the herd is the point.
 UA = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
-# DuckDuckGo's onion service. Preferred over the clearnet endpoint for two reasons:
-# it never leaves the Tor network (no exit node sees the query at all), and the
-# clearnet endpoint returns 403 to most Tor exits, which looks like "search is broken".
-ENDPOINTS = ("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/",
-             "https://html.duckduckgo.com/html/")
+# DuckDuckGo's onion service keeps every query inside the Tor network, so no
+# exit node sees it and a failed onion request can never become a direct request.
+ENDPOINT = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/"
 # Reasoning models spend the budget thinking BEFORE answering. Some local models
 # can consume the former 8192-token ceiling without reaching their visible answer.
 # Keep the request context at least as large as the generation budget.
@@ -670,22 +668,21 @@ def parse_results(page, n=5):
 def web_search(query, n=5):
     """One attempt = one fresh Tor circuit. A 200 with zero results is a failure too."""
     err = None
-    for url in ENDPOINTS:                        # onion first, clearnet as fallback
-        for _ in range(2):                       # each attempt gets a fresh circuit
-            try:
-                resp = requests.post(url, data={"q": query}, headers={"User-Agent": UA},
-                                     proxies=_proxies(_port, True), timeout=90)
-                resp.raise_for_status()
-            except Exception as e:
-                err = e
-                continue
-            hits = parse_results(resp.text, n)
-            if hits:                             # empty 200 == rate-limited or reshaped
-                print(f"[tor] searched {query!r} -> {len(hits)} results", file=sys.stderr)
-                return "\n".join(f"- {t}\n  {s}\n  {u}" for t, s, u in hits)
-            err = "empty result page"
+    for _ in range(2):                           # each attempt gets a fresh circuit
+        try:
+            resp = requests.post(ENDPOINT, data={"q": query}, headers={"User-Agent": UA},
+                                 proxies=_proxies(_port, True), timeout=90)
+            resp.raise_for_status()
+        except Exception as e:
+            err = e
+            continue
+        hits = parse_results(resp.text, n)
+        if hits:                                 # empty 200 == rate-limited or reshaped
+            print(f"[tor] searched {query!r} -> {len(hits)} results", file=sys.stderr)
+            return "\n".join(f"- {t}\n  {s}\n  {u}" for t, s, u in hits)
+        err = "empty result page"
     print(f"[tor] search failed for {query!r}: {err}", file=sys.stderr)
-    return f"(search failed after trying both endpoints on fresh circuits: {err})"
+    return f"(search failed on the onion service after fresh-circuit retries: {err})"
 
 
 def strip_thinking(text):
