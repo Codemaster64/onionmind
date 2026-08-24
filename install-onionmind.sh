@@ -3127,88 +3127,52 @@ def _conversation_markdown(
 
 
 class ThinkingStreamFilter:
-    """Hide reasoning blocks without leaking split or variant tag fragments.
+    """Bound model output until the completed response can be sanitized.
 
-    The model transport is free to divide text at any byte boundary.  Keep only
-    the small amount of undecided tag text between calls; reasoning itself is
-    discarded instead of accumulated.  Tool use can cause several model
-    responses to share one callback, so opening tags remain detectable after
-    ordinary answer text has already streamed.
+    Incremental display cannot safely handle a model that omits its opening
+    reasoning tag: text may already be visible when a later closing tag proves
+    it was private.  Buffering makes the completed sanitizer the only release
+    boundary.  The hard limit bounds memory and fails closed on abnormal output.
     """
 
-    def __init__(self) -> None:
-        self._depth = 0
-        self._candidate = ""
-        self._leading = True
-        self._leading_space = ""
+    MAX_CHARACTERS = 1_048_576
+
+    def __init__(self, max_characters: int = MAX_CHARACTERS) -> None:
+        if not isinstance(max_characters, int) or max_characters <= 0:
+            raise ValueError("max_characters must be a positive integer")
+        self._max_characters = max_characters
+        self._chunks: list[str] = []
+        self._characters = 0
         self._finished = False
 
-    def _emit_plain(self, text: str, visible: list[str]) -> None:
-        if self._depth:
-            return
-        for character in text:
-            if self._leading:
-                if character.isspace():
-                    self._leading_space += character
-                    continue
-                visible.append(self._leading_space + character)
-                self._leading_space = ""
-                self._leading = False
-            else:
-                visible.append(character)
-
-    def _accept_tag(self, closing: bool) -> None:
-        if closing:
-            if self._depth:
-                self._depth -= 1
-            return
-        if self._leading:
-            self._leading_space = ""
-        self._depth += 1
-
     def feed(self, chunk: Any) -> str:
-        """Return only newly visible answer text from one transport chunk."""
+        """Store one transport chunk and deliberately emit nothing."""
         if self._finished:
             return ""
-        data = _as_text(chunk)
-        visible: list[str] = []
+        text = _as_text(chunk)
+        if self._characters + len(text) > self._max_characters:
+            self.abort()
+            raise RuntimeError("Model response exceeded the privacy buffer limit.")
+        if text:
+            self._chunks.append(text)
+            self._characters += len(text)
+        return ""
 
-        while data:
-            character, data = data[0], data[1:]
-            if not self._candidate:
-                if character == "<":
-                    self._candidate = character
-                else:
-                    self._emit_plain(character, visible)
-                continue
-
-            self._candidate += character
-            state, closing = _think_tag_candidate(self._candidate)
-            if state == "prefix":
-                continue
-            if state == "complete":
-                self._candidate = ""
-                self._accept_tag(closing)
-                continue
-
-            # The first ``<`` is now proven ordinary. Replay the rest so a
-            # second ``<`` can still begin a valid reasoning tag.
-            replay, self._candidate = self._candidate[1:] + data, ""
-            self._emit_plain("<", visible)
-            data = replay
-
-        return "".join(visible)
-
-    def finish(self) -> None:
-        """Close a completed stream without exposing an undecided tag prefix."""
-        self._candidate = ""
-        self._leading_space = ""
-        self._depth = 0
+    def finish(self) -> str:
+        """Sanitize one completed response, erase its raw chunks, and return it."""
+        if self._finished:
+            return ""
+        raw = "".join(self._chunks)
+        self._chunks.clear()
+        self._characters = 0
         self._finished = True
+        return _strip_thinking(raw)
 
     def abort(self) -> None:
         """Drop buffered model output after stop or failure."""
-        self.finish()
+        self._chunks.clear()
+        self._characters = 0
+        self._finished = True
 
 
 def _friendly_error(core: Any, exc: BaseException) -> str:
@@ -3374,7 +3338,6 @@ def _register_system_fonts(app: QApplication) -> None:
 class WorkerSignals(QObject):
     result = Signal(object)
     error = Signal(str)
-    text = Signal(str)
     event = Signal(object)
     progress = Signal(float, str)
     finished = Signal()
@@ -5939,9 +5902,7 @@ class OnionmindWindow(QMainWindow):
                 if stop_event.is_set():
                     stream_filter.abort()
                     return
-                delta = stream_filter.feed(chunk)
-                if delta:
-                    signals.text.emit(delta)
+                stream_filter.feed(chunk)
 
             def on_event(event: dict[str, Any]) -> None:
                 signals.event.emit(dict(event))
@@ -5974,19 +5935,19 @@ class OnionmindWindow(QMainWindow):
             except BaseException:
                 stream_filter.abort()
                 raise
-            stream_filter.finish()
-            return {"answer": _as_text(answer), "history": history}
+            if stop_event.is_set():
+                stream_filter.abort()
+                safe_answer = ""
+            else:
+                buffered_answer = stream_filter.finish()
+                returned_answer = _strip_thinking(_as_text(answer))
+                safe_answer = returned_answer or buffered_answer
+            return {"answer": safe_answer, "history": history}
 
         worker = self._start_worker(chat_job)
-        worker.signals.text.connect(self._append_stream)
         worker.signals.event.connect(self._chat_event)
         worker.signals.result.connect(self._chat_complete)
         worker.signals.error.connect(self._chat_failed)
-
-    def _append_stream(self, text: str) -> None:
-        if self.stream_block is not None:
-            self.stream_block.append_text(text)
-            self.transcript._scroll_later()
 
     def _chat_event(self, event: dict[str, Any]) -> None:
         kind = _as_text(event.get("kind"))

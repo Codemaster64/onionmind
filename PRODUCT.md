@@ -26,7 +26,7 @@ Windows distribution is a manually built `Onionmind-Windows-x64.zip` containing 
 
 ## Capabilities and Constraints
 
-- Preserve the existing CLI, streaming chat with an accessible pending-thinking state, Ollama and llama.cpp backends, model discovery and confirmed download, image input, conversation export, stop control, and per-turn Tor search opt-in.
+- Preserve the existing CLI, privacy-filtered chat with an accessible pending-thinking state, Ollama and llama.cpp backends, model discovery and confirmed download, image input, conversation export, stop control, and per-turn Tor search opt-in.
 - The desktop surface must be a standalone native program, not a hosted site or a browser-only wrapper.
 - Repository-changing agent work is delegated to the public DeepSeek Harness integration; the UI must not imply a file was changed when it only chatted about it.
 - Model display keeps Onionmind's named tiers: SPARK, EMBER, BLAZE, INFERNO, CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, and PYRE. Backend identifiers remain available internally and where technically necessary, while the normal UI uses Onionmind model names.
