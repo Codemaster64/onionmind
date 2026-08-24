@@ -294,10 +294,61 @@ class ChatSession:
 
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_THINK_TAG = re.compile(r"<\s*(/?)\s*think(?:\s[^>]*)?>", re.IGNORECASE)
+_THINK_TAG_PATTERN = r"<\s*(/?)\s*think(?:\s[^>]*)?>"
+_THINK_TAG = re.compile(_THINK_TAG_PATTERN, re.IGNORECASE)
 _REASONING_FIELDS = frozenset(
     {"analysis", "reasoning", "reasoning_content", "thinking"}
 )
+
+
+def _think_tag_candidate(candidate: str) -> tuple[str, bool]:
+    """Classify text beginning with ``<`` against prefixes of _THINK_TAG."""
+    if not candidate.startswith("<"):
+        return "invalid", False
+    index, size = 1, len(candidate)
+    while index < size and candidate[index].isspace():
+        index += 1
+    if index == size:
+        return "prefix", False
+
+    closing = candidate[index] == "/"
+    if closing:
+        index += 1
+        while index < size and candidate[index].isspace():
+            index += 1
+        if index == size:
+            return "prefix", True
+
+    for expected in "think":
+        if index == size:
+            return "prefix", closing
+        if re.fullmatch(expected, candidate[index], re.IGNORECASE) is None:
+            return "invalid", closing
+        index += 1
+    if index == size:
+        return "prefix", closing
+    if candidate[index] == ">":
+        match = _THINK_TAG.fullmatch(candidate[:index + 1])
+        return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+    if not candidate[index].isspace():
+        return "invalid", closing
+    index += 1
+    while index < size:
+        if candidate[index] == ">":
+            match = _THINK_TAG.fullmatch(candidate[:index + 1])
+            return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+        index += 1
+    return "prefix", closing
+
+
+def _partial_think_tag(text: str) -> tuple[int, bool] | None:
+    start = text.find("<")
+    while start >= 0:
+        state, closing = _think_tag_candidate(text[start:])
+        if state == "prefix":
+            return start, closing
+        start = text.find("<", start + 1)
+    return None
 
 
 def strip_thinking(text: str) -> str:
@@ -335,11 +386,14 @@ def strip_thinking(text: str) -> str:
 
     if depth == 0:
         tail = text[cursor:]
-        # If generation ended while spelling an opening tag, keep only the
-        # completed visible prefix. This also covers transcripts that contain
-        # an earlier complete block followed by a truncated later block.
-        partial = tail.casefold().find("<think")
-        visible.append(tail[:partial] if partial >= 0 else tail)
+        partial = _partial_think_tag(tail)
+        if partial is None:
+            visible.append(tail)
+        elif partial[1]:
+            visible.clear()
+        else:
+            # Keep completed visible text before an unfinished opening tag.
+            visible.append(tail[:partial[0]])
     return "".join(visible).strip()
 
 

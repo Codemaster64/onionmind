@@ -28,6 +28,9 @@ object Agent {
     const val ENDPOINT =
         "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/"
 
+    private val THINK_TAG =
+        Regex("""<\s*(/?)\s*think(?:\s[^>]*)?>""", RegexOption.IGNORE_CASE)
+
     const val NUM_PREDICT = 16384  // reasoning models can spend 8K+ tokens thinking first
 
     val TOOLS = """[{"type":"function","function":{
@@ -200,11 +203,97 @@ object Agent {
         "nbsp" to " ", "hellip" to "\u2026", "mdash" to "\u2014", "ndash" to "\u2013",
         "rsquo" to "\u2019", "lsquo" to "\u2018", "ldquo" to "\u201c", "rdquo" to "\u201d")
 
-    /** Ported from strip_thinking: a truncated monologue is not an answer. */
+    private enum class ThinkTagState { INVALID, PREFIX, COMPLETE }
+
+    private data class ThinkTagCandidate(
+        val state: ThinkTagState,
+        val closing: Boolean = false,
+    )
+
+    /** Classify text beginning with '<' against prefixes of THINK_TAG. */
+    private fun thinkTagCandidate(candidate: String): ThinkTagCandidate {
+        if (!candidate.startsWith("<")) return ThinkTagCandidate(ThinkTagState.INVALID)
+        var index = 1
+        while (index < candidate.length && candidate[index].isWhitespace()) index++
+        if (index == candidate.length) return ThinkTagCandidate(ThinkTagState.PREFIX)
+
+        val closing = candidate[index] == '/'
+        if (closing) {
+            index++
+            while (index < candidate.length && candidate[index].isWhitespace()) index++
+            if (index == candidate.length)
+                return ThinkTagCandidate(ThinkTagState.PREFIX, true)
+        }
+
+        for (expected in "think") {
+            if (index == candidate.length)
+                return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+            if (!candidate[index].equals(expected, ignoreCase = true))
+                return ThinkTagCandidate(ThinkTagState.INVALID, closing)
+            index++
+        }
+        if (index == candidate.length)
+            return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+
+        fun completed(): ThinkTagCandidate {
+            val match = THINK_TAG.matchEntire(candidate.substring(0, index + 1))
+            return if (match == null) ThinkTagCandidate(ThinkTagState.INVALID, closing)
+            else ThinkTagCandidate(ThinkTagState.COMPLETE, match.groupValues[1].isNotEmpty())
+        }
+
+        if (candidate[index] == '>') return completed()
+        if (!candidate[index].isWhitespace())
+            return ThinkTagCandidate(ThinkTagState.INVALID, closing)
+        index++
+        while (index < candidate.length) {
+            if (candidate[index] == '>') return completed()
+            index++
+        }
+        return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+    }
+
+    private fun partialThinkTag(text: String): Pair<Int, Boolean>? {
+        var start = text.indexOf('<')
+        while (start >= 0) {
+            val candidate = thinkTagCandidate(text.substring(start))
+            if (candidate.state == ThinkTagState.PREFIX)
+                return Pair(start, candidate.closing)
+            start = text.indexOf('<', start + 1)
+        }
+        return null
+    }
+
+    /** Remove all complete or truncated reasoning blocks, failing closed. */
     fun stripThinking(text: String): String {
-        if (text.contains("</think>")) return text.substringAfterLast("</think>").trim()
-        if (text.contains("<think>")) return ""
-        return text.trim()
+        val visible = StringBuilder()
+        var cursor = 0
+        var depth = 0
+        for (tag in THINK_TAG.findAll(text)) {
+            val closing = tag.groupValues[1].isNotEmpty()
+            if (closing) {
+                if (depth > 0) {
+                    depth--
+                    if (depth == 0) cursor = tag.range.last + 1
+                } else {
+                    visible.clear()
+                    cursor = tag.range.last + 1
+                }
+                continue
+            }
+            if (depth == 0) visible.append(text.substring(cursor, tag.range.first))
+            depth++
+        }
+
+        if (depth == 0) {
+            val tail = text.substring(cursor)
+            val partial = partialThinkTag(tail)
+            when {
+                partial == null -> visible.append(tail)
+                partial.second -> visible.clear()
+                else -> visible.append(tail.substring(0, partial.first))
+            }
+        }
+        return visible.toString().trim()
     }
 
     /** llama-server is on loopback, so there is no circuit to isolate and one

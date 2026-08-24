@@ -239,10 +239,61 @@ def _brand_runtime_text(value: Any) -> str:
     return text
 
 
-_THINK_TAG = re.compile(r"<\s*(/?)\s*think(?:\s[^>]*)?>", re.IGNORECASE)
+_THINK_TAG_PATTERN = r"<\s*(/?)\s*think(?:\s[^>]*)?>"
+_THINK_TAG = re.compile(_THINK_TAG_PATTERN, re.IGNORECASE)
 _REASONING_FIELDS = frozenset(
     {"analysis", "reasoning", "reasoning_content", "thinking"}
 )
+
+
+def _think_tag_candidate(candidate: str) -> tuple[str, bool]:
+    """Classify text beginning with ``<`` against prefixes of _THINK_TAG."""
+    if not candidate.startswith("<"):
+        return "invalid", False
+    index, size = 1, len(candidate)
+    while index < size and candidate[index].isspace():
+        index += 1
+    if index == size:
+        return "prefix", False
+
+    closing = candidate[index] == "/"
+    if closing:
+        index += 1
+        while index < size and candidate[index].isspace():
+            index += 1
+        if index == size:
+            return "prefix", True
+
+    for expected in "think":
+        if index == size:
+            return "prefix", closing
+        if re.fullmatch(expected, candidate[index], re.IGNORECASE) is None:
+            return "invalid", closing
+        index += 1
+    if index == size:
+        return "prefix", closing
+    if candidate[index] == ">":
+        match = _THINK_TAG.fullmatch(candidate[:index + 1])
+        return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+    if not candidate[index].isspace():
+        return "invalid", closing
+    index += 1
+    while index < size:
+        if candidate[index] == ">":
+            match = _THINK_TAG.fullmatch(candidate[:index + 1])
+            return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+        index += 1
+    return "prefix", closing
+
+
+def _partial_think_tag(text: str) -> tuple[int, bool] | None:
+    start = text.find("<")
+    while start >= 0:
+        state, closing = _think_tag_candidate(text[start:])
+        if state == "prefix":
+            return start, closing
+        start = text.find("<", start + 1)
+    return None
 
 
 def _strip_thinking(text: Any) -> str:
@@ -268,8 +319,13 @@ def _strip_thinking(text: Any) -> str:
         depth += 1
     if depth == 0:
         tail = value[cursor:]
-        partial = tail.casefold().find("<think")
-        visible.append(tail[:partial] if partial >= 0 else tail)
+        partial = _partial_think_tag(tail)
+        if partial is None:
+            visible.append(tail)
+        elif partial[1]:
+            visible.clear()
+        else:
+            visible.append(tail[:partial[0]])
     return "".join(visible).strip()
 
 
@@ -330,7 +386,7 @@ def _conversation_markdown(
 
 
 class ThinkingStreamFilter:
-    """Hide ``<think>`` blocks without leaking split tag fragments.
+    """Hide reasoning blocks without leaking split or variant tag fragments.
 
     The model transport is free to divide text at any byte boundary.  Keep only
     the small amount of undecided tag text between calls; reasoning itself is
@@ -339,21 +395,35 @@ class ThinkingStreamFilter:
     ordinary answer text has already streamed.
     """
 
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
-
     def __init__(self) -> None:
-        self._state = "leading"
-        self._pending = ""
+        self._depth = 0
+        self._candidate = ""
+        self._leading = True
+        self._leading_space = ""
         self._finished = False
 
-    @staticmethod
-    def _trailing_marker_prefix(text: str, marker: str) -> str:
-        maximum = min(len(text), len(marker) - 1)
-        for length in range(maximum, 0, -1):
-            if text.endswith(marker[:length]):
-                return text[-length:]
-        return ""
+    def _emit_plain(self, text: str, visible: list[str]) -> None:
+        if self._depth:
+            return
+        for character in text:
+            if self._leading:
+                if character.isspace():
+                    self._leading_space += character
+                    continue
+                visible.append(self._leading_space + character)
+                self._leading_space = ""
+                self._leading = False
+            else:
+                visible.append(character)
+
+    def _accept_tag(self, closing: bool) -> None:
+        if closing:
+            if self._depth:
+                self._depth -= 1
+            return
+        if self._leading:
+            self._leading_space = ""
+        self._depth += 1
 
     def feed(self, chunk: Any) -> str:
         """Return only newly visible answer text from one transport chunk."""
@@ -363,59 +433,36 @@ class ThinkingStreamFilter:
         visible: list[str] = []
 
         while data:
-            if self._state == "visible":
-                combined = self._pending + data
-                self._pending = ""
-                open_at = combined.find(self._OPEN)
-                if open_at < 0:
-                    suffix = self._trailing_marker_prefix(combined, self._OPEN)
-                    if suffix:
-                        visible.append(combined[:-len(suffix)])
-                        self._pending = suffix
-                    else:
-                        visible.append(combined)
-                    break
-                visible.append(combined[:open_at])
-                data = combined[open_at + len(self._OPEN):]
-                self._state = "thinking"
+            character, data = data[0], data[1:]
+            if not self._candidate:
+                if character == "<":
+                    self._candidate = character
+                else:
+                    self._emit_plain(character, visible)
                 continue
 
-            if self._state == "leading":
-                self._pending += data
-                data = ""
-                content = self._pending.lstrip()
-                if not content:
-                    continue
-                if self._OPEN.startswith(content):
-                    if content == self._OPEN:
-                        self._pending = ""
-                        self._state = "thinking"
-                    continue
-                if content.startswith(self._OPEN):
-                    data = content[len(self._OPEN):]
-                    self._pending = ""
-                    self._state = "thinking"
-                    continue
-                data = self._pending
-                self._pending = ""
-                self._state = "visible"
+            self._candidate += character
+            state, closing = _think_tag_candidate(self._candidate)
+            if state == "prefix":
+                continue
+            if state == "complete":
+                self._candidate = ""
+                self._accept_tag(closing)
                 continue
 
-            combined = self._pending + data
-            self._pending = ""
-            close_at = combined.find(self._CLOSE)
-            if close_at < 0:
-                self._pending = self._trailing_marker_prefix(combined, self._CLOSE)
-                break
-            data = combined[close_at + len(self._CLOSE):]
-            self._state = "visible"
+            # The first ``<`` is now proven ordinary. Replay the rest so a
+            # second ``<`` can still begin a valid reasoning tag.
+            replay, self._candidate = self._candidate[1:] + data, ""
+            self._emit_plain("<", visible)
+            data = replay
 
         return "".join(visible)
 
     def finish(self) -> None:
         """Close a completed stream without exposing an undecided tag prefix."""
-        self._pending = ""
-        self._state = "finished"
+        self._candidate = ""
+        self._leading_space = ""
+        self._depth = 0
         self._finished = True
 
     def abort(self) -> None:
