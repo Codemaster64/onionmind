@@ -140,19 +140,19 @@ async function poll() {
   const setup = $('setup'), chat = $('chat'), form = $('form');
   if (status.model === 'none' && !status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
-    $('setup-text').textContent = 'Download the model? Everything stays on this phone.';
+    $('setup-text').textContent = 'Inference and local files stay on this phone. Model downloads use direct HTTPS, not Tor.';
     $('prog').style.width = '0%';
     renderModelPicker();
   } else if (status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
     $('setup-text').textContent = 'Downloading the ' + status.model.toUpperCase() +
-      ' model — resumable, leave the app open.';
+      ' model — resumable even when Onionmind is minimized.';
     $('prog').style.width = Math.round(status.progress * 100) + '%';
     const done = Number(status.downloadBytes || 0);
     const total = Number(status.downloadTotal || 0);
     const speed = Number(status.downloadSpeedBps || 0);
     $('device-note').textContent = downloadDetails(done, total, speed);
-    $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">You can leave the app open while it resumes.</div></div>';
+    $('model-list').innerHTML = '<div class="model-card"><strong>Download in progress…</strong><div class="model-meta">You can minimize Onionmind while it downloads.</div></div>';
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
     if (!ready) { add('bot', 'Ready. Local chat is private by default. Web search stays off unless you allow Tor search for one turn. Ask anything.'); ready = true; }
@@ -202,12 +202,17 @@ function renderModelPicker() {
 }
 
 async function install(id) {
+  if (!confirmModelDownload()) return;
   try {
     const r = await api('/api/install', form('id='+encodeURIComponent(id)));
     if (!r.ok) throw new Error('HTTP ' + r.status);
   } catch (err) {
     $('setup-text').textContent = 'Could not start the download. Please try again.';
   }
+}
+
+function confirmModelDownload() {
+  return confirm('This model download uses direct HTTPS, not Tor. Continuing exposes this phone’s network address to the model host. Inference and local files stay on this phone. Continue?');
 }
 
 function openManager() { $('manager').hidden = false; renderManager(); }
@@ -220,6 +225,7 @@ async function removeModel(id) { if (!confirm('Remove this model from the phone?
 async function addCustom() {
   const name=$('custom-name').value.trim(), url=$('custom-url').value.trim(), file=$('custom-file').value.trim(), bytes=$('custom-bytes').value;
   if (!name || !url || !file) return;
+  if (!confirmModelDownload()) return;
   const r=await api('/api/install', form(new URLSearchParams({name,url,file,bytes})));
   if (!r.ok) alert((await r.json()).error || 'Could not add model'); else { $('custom-name').value=$('custom-url').value=$('custom-file').value=$('custom-bytes').value=''; await poll(); renderManager(); }
 }

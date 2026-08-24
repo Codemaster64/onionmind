@@ -328,15 +328,22 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   circuit per query**, and the JVM's stock SOCKS support can't authenticate.
   The agent loop, DDG onion endpoint, per-block result parsing and
   thinking-strip mirror the Python line for line.
-- **Model:** downloaded on first launch into app storage (4B/9B by RAM),
-  resumable with HTTP Range. APK stays 14 MB; the 4B adds 2.5 GB on-device.
+- **Model:** a user-initiated download into app storage (4B/9B by RAM). A
+  foreground `dataSync` service and bounded wake lock keep it alive while the
+  app is minimized. Four independently resumable HTTP ranges are verified and
+  assembled only after all chunks finish; a single-stream resume path handles
+  servers without range support. APK stays 14 MB; the 4B adds 2.5 GB on-device.
 - **Verified:** `:core` runs live network tests against a real tor daemon
   inside the build image (`android/itest.sh`) — SOCKS auth handshake, circuit
   isolation, onion search, result parsing. The adapter logic has the same
   mock-server test as the desktop (`tests/test_backends.py`).
-- **Not verified: anything on a phone.** No device or emulator ran this APK;
-  it is debug-signed, first install is yours, and the Termux path is the
-  battle-tested fallback.
+- **Physical-device scope:** on an SM-S918B, one model download was observed
+  continuing after HOME (16 -> 130 MB) and with the screen off (130 -> 225 MB),
+  with the `dataSync` foreground-service type and wake lock active. That verifies
+  download persistence only. On-phone inference, chat, Tor search, and the
+  privacy/backend paths have not been device-verified; their current coverage is
+  the offline Kotlin/Python test suites. The APK is debug-signed, so the first
+  install is yours, and the Termux path remains the fallback.
 
 ### Termux
 
@@ -630,8 +637,9 @@ honest list.
 
 The llama-server backend adapter (the Android path) is exercised against a mock
 OpenAI server in `tests/test_backends.py` — translation, string-encoded tool
-arguments, positional tool ids, and a full search turn. Nothing has run on an
-actual phone yet.
+arguments, positional tool ids, and a full search turn. Physical-phone testing
+so far covers only the foreground model-download lifecycle described above, not
+inference or search.
 
 ## Notes
 

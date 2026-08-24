@@ -199,11 +199,75 @@ class AndroidPrivacyTests(unittest.TestCase):
 
     def test_android_startup_does_not_start_tor(self) -> None:
         app = self.text("android/app/src/main/java/org/onionmind/app/App.kt")
+        activity = self.text(
+            "android/app/src/main/java/org/onionmind/app/MainActivity.kt"
+        )
         manager = self.text(
             "android/app/src/main/java/org/onionmind/app/ProcessManager.kt"
         )
         self.assertNotIn("ensureTor", app)
+        self.assertNotIn("downloadModel", app)
+        self.assertNotIn("DownloadService", app)
+        self.assertNotIn("requestPermissions", activity)
         self.assertNotIn("torEnabled", manager)
+
+    def test_android_background_download_is_user_driven_and_crash_safe(self) -> None:
+        manifest = self.text("android/app/src/main/AndroidManifest.xml")
+        service = self.text(
+            "android/app/src/main/java/org/onionmind/app/DownloadService.kt"
+        )
+        manager = self.text(
+            "android/app/src/main/java/org/onionmind/app/ProcessManager.kt"
+        )
+
+        self.assertIn("android.permission.FOREGROUND_SERVICE_DATA_SYNC", manifest)
+        self.assertIn('android:name=".DownloadService"', manifest)
+        self.assertIn('android:exported="false"', manifest)
+        self.assertIn('android:foregroundServiceType="dataSync"', manifest)
+        self.assertIn("ProcessManager.runDownload(this, id)", service)
+        self.assertIn("PowerManager.PARTIAL_WAKE_LOCK", service)
+        self.assertIn("ctx.startForegroundService", manager)
+        self.assertIn("downloadClaimed.compareAndSet(false, true)", manager)
+
+        # Each HTTP range lands in its own exact-length file. The shared .part
+        # is assembled only after every chunk is complete, so a process kill
+        # can never promote a merely preallocated sparse file as a model.
+        self.assertIn("parallelPartFiles(part)", manager)
+        self.assertIn("range.file.length() != range.length", manager)
+        self.assertIn("output.fd.sync()", manager)
+        self.assertIn("part.length() != expected", manager)
+        self.assertIn("cleanupParallelParts(part)", manager)
+        self.assertNotIn('RandomAccessFile(part, "rw")', manager)
+        self.assertNotIn("setLength(expected)", manager)
+
+        # Installed models must be non-empty regular files, and known catalog
+        # sizes plus the GGUF magic must match before llama-server selects them.
+        self.assertIn("it.isFile && it.length() > 0", manager)
+        self.assertIn("it.length() == model.bytes", manager)
+        self.assertIn("hasGgufHeader(it)", manager)
+        self.assertIn("header.contentEquals(byteArrayOf(0x47, 0x47, 0x55, 0x46))", manager)
+
+    def test_android_discloses_and_confirms_direct_model_downloads(self) -> None:
+        page = self.text("android/app/src/main/assets/index.html")
+
+        self.assertIn("Model downloads use direct HTTPS, not Tor", page)
+        self.assertIn("exposes this phone’s network address to the model host", page)
+        self.assertIn("Inference and local files stay on this phone", page)
+        self.assertNotIn("leave the app open", page)
+        self.assertIn("resumable even when Onionmind is minimized", page)
+
+        install = page[page.index("async function install(id)") :]
+        install = install[: install.index("function confirmModelDownload")]
+        self.assertLess(
+            install.index("if (!confirmModelDownload()) return"),
+            install.index("api('/api/install'"),
+        )
+
+        custom = page[page.index("async function addCustom()") :]
+        self.assertLess(
+            custom.index("if (!confirmModelDownload()) return"),
+            custom.index("api('/api/install'"),
+        )
 
     def test_android_search_permission_is_consumed_per_chat_request(self) -> None:
         page = self.text("android/app/src/main/assets/index.html")

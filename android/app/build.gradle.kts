@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -13,6 +15,14 @@ android {
         versionCode = 5
         versionName = "1.4"
         ndk { abiFilters += listOf("arm64-v8a") }   // phones this app is for are all arm64
+        val modelMirrorBase = providers.gradleProperty("modelMirrorBase").orNull?.trimEnd('/') ?: ""
+        require(modelMirrorBase.isEmpty() || "https".equals(URI(modelMirrorBase).scheme, ignoreCase = true)) {
+            "modelMirrorBase must use HTTPS"
+        }
+        val escapedModelMirrorBase = modelMirrorBase
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "MODEL_MIRROR_BASE", "\"$escapedModelMirrorBase\"")
     }
     buildTypes {
         release {
@@ -20,6 +30,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
+    buildFeatures { buildConfig = true }
     // extractNativeLibs: llama-server and tor must be real files on disk to exec()
     packagingOptions { jniLibs { useLegacyPackaging = true } }
     compileOptions {
