@@ -207,11 +207,26 @@ model reasoning, answers, project snapshots, and session files remain local.
 Search queries go to DuckDuckGo through Tor. Model pulls and application updates
 also require direct downloads when explicitly requested.
 
-**Agent mode has a different boundary.** DeepSeek Harness can execute repository
-tools and network-capable commands. Ollama's current DSH launcher does not accept
-Onionmind's custom Tor-provider patch, so Harness network traffic is direct. The
-desktop and CLI label this boundary instead of implying that arbitrary agent
-traffic is anonymized.
+**Agent mode leaves over Tor or does not leave.** Every launcher - the workbench,
+`onionmind-code`, and the update scripts - goes through `onionmind.py --agent`,
+which is the one place a circuit is verified. `tor_check()` runs before anything
+starts and exits when no verified circuit exists, so "the agent ran while Tor was
+down" is not a reachable state. It then hands DeepSeek Harness the same
+containment `run_code()` gives Qwen Code: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+and `NODE_USE_ENV_PROXY` point at a loopback HTTP bridge that only knows how to
+dial out through Tor (an unroutable host gets a 502, never a direct connection),
+`NO_PROXY` is blanked, and a `sitecustomize.py` plus a Node `--require` shim
+refuse any socket or DNS lookup that is not loopback - so code that opens its own
+socket fails instead of leaving directly. Everything that leaves is logged to
+`~/.onionmind/agent-net.log`.
+
+Ollama's current DSH launcher rejects Onionmind's `--patch`, so the Harness keeps
+its own search provider rather than the Tor one; that provider is a Node HTTP
+client, so the proxy and the shims put it on Tor anyway. Set
+`ONIONMIND_DSH_PATCH=1` once the launcher accepts the patch. The remaining gap is
+the shell tool running a command that ignores proxies (`ping`, `nslookup`,
+`traceroute`) - refused for Qwen Code through its permissions file, and closable
+for the Harness only with an OS egress rule.
 
 ## GPU support on the live USB
 

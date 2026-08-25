@@ -195,8 +195,9 @@ if [ "\$NODE_MAJOR" -lt 24 ] && { [ "\$NODE_MAJOR" -ne 22 ] || [ "\$NODE_MINOR" 
   echo "DeepSeek Harness requires Node.js ^22.19 or 24+; found \$NODE_VERSION." >&2
   exit 1
 fi
-echo 'Agent network note: Harness traffic is direct; only Onionmind chat search uses Tor.' >&2
-exec ollama launch dsh --model "\$MODEL" -- --profile headless "\$*"
+# The agent's only way off this machine is Tor: onionmind.py verifies the
+# circuit, puts every child on it, and refuses to start without one.
+exec python3 "\$DIR/onionmind.py" --agent --model "\$MODEL" "\$*"
 AGENT
   $SUDO chmod 755 /usr/local/bin/onionmind-code
 

@@ -861,7 +861,8 @@ HARNESS_LIMITATION = (
     "Onionmind Agent is an early-access local coding workflow. It starts in the "
     "selected working directory, while its own tools govern what it can access. "
     "Interactive approval prompts are not available in this build, so protected "
-    "actions stop safely. Agent network access is separate from Tor search."
+    "actions stop safely. The agent reaches the web only through Tor: it verifies "
+    "a circuit before it starts and refuses to run without one."
 )
 
 
