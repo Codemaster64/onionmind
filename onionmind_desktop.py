@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -433,6 +435,33 @@ class SafeWorker:
             self._emit(self.signals.finished)
 
 
+# Tor Browser owns the SOCKS port on Windows/macOS; Linux usually has a tor daemon.
+# Same candidate list the installer walks, so the button starts what the installer set up.
+_TOR_BROWSER_PATHS = (
+    "{home}/Desktop/Tor Browser/Browser/firefox.exe",
+    "{home}/OneDrive/Desktop/Tor Browser/Browser/firefox.exe",
+    "{local}/Tor Browser/Browser/firefox.exe",
+    "{local}/Programs/Tor Browser/Browser/firefox.exe",
+    "C:/Program Files/Tor Browser/Browser/firefox.exe",
+    "C:/Program Files (x86)/Tor Browser/Browser/firefox.exe",
+    "/Applications/Tor Browser.app/Contents/MacOS/firefox",
+)
+
+
+def _tor_launch_command() -> Optional[list[str]]:
+    """The command that brings a SOCKS proxy up, or None if nothing is installed."""
+    daemon = shutil.which("tor")
+    if daemon and sys.platform not in ("win32", "darwin"):
+        return [daemon]
+    home = Path.home().as_posix()
+    local = Path(os.environ.get("LOCALAPPDATA", home)).as_posix()
+    for template in _TOR_BROWSER_PATHS:
+        candidate = Path(template.format(home=home, local=local))
+        if candidate.exists():
+            return [str(candidate)]
+    return [daemon] if daemon else None
+
+
 class StatusDot(QWidget):
     def __init__(self, color: str = "#a39b91", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -454,6 +483,8 @@ class StatusDot(QWidget):
 
 
 class StatusPill(QFrame):
+    clicked = Signal()
+
     COLORS = {
         "good": "#78b889",
         "warn": "#c9a36b",
@@ -483,6 +514,14 @@ class StatusPill(QFrame):
         self.label.setText(text)
         self.dot.set_color(self.COLORS.get(state, self.COLORS["idle"]))
         self.setAccessibleName(f"{self.prefix} status: {text}")
+
+    def make_clickable(self) -> None:
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class ComposerEdit(QTextEdit):
@@ -972,17 +1011,30 @@ class HarnessBridge:
     FALLBACK_LIMITATION = (
         "Onionmind Agent is an early-access local coding workflow. Interactive approval "
         "prompts are not available in this build, so protected actions stop safely. "
-        "Agent network access is separate from Tor search."
+        "The agent reaches the web only through Tor and does not start without it."
     )
 
-    def __init__(self, desktop_core: Any) -> None:
+    def __init__(self, desktop_core: Any, core: Any = None) -> None:
         self.desktop_core = desktop_core
+        self.core = core
         self.spec = None
         if desktop_core is not None and hasattr(desktop_core, "HarnessSpec"):
             try:
                 self.spec = desktop_core.HarnessSpec()
             except Exception:
                 self.spec = None
+
+    def _launcher(self, model: str, task: str) -> Optional[list[str]]:
+        """``onionmind.py --agent``: the one place Tor is verified and enforced.
+
+        Launching the harness directly would inherit this window's environment,
+        which has no proxy and no socket containment - the agent would have
+        direct web access whether Tor is up or not.
+        """
+        script = _as_text(getattr(self.core, "__file__", ""))
+        if not script or not callable(getattr(self.core, "run_agent", None)):
+            return None
+        return [sys.executable, os.path.abspath(script), "--agent", "--model", model, task]
 
     @property
     def limitation(self) -> str:
@@ -994,6 +1046,21 @@ class HarnessBridge:
         return self.FALLBACK_LIMITATION
 
     def check(self) -> tuple[bool, str]:
+        # The launcher IS the Tor boundary, so without one there is nothing to
+        # start: launching the harness ourselves would hand it this window's
+        # unproxied environment.
+        if self._launcher("model", "task") is None:
+            return False, (
+                "Onionmind Agent needs the Onionmind runtime to route it through Tor, "
+                "and that runtime is not loaded. Re-run Onionmind setup, then restart."
+            )
+        # A hint, not the gate: re-verifying Tor here would repeat the round trip
+        # the launcher makes anyway, on every task. The launcher is what refuses.
+        if not getattr(self.core, "_port", None):
+            return False, (
+                "Tor is not up. Onionmind Agent reaches the web only through Tor and "
+                "does not start without it. Start Tor from the toolbar, then try again."
+            )
         if self.spec is not None:
             availability = self.spec.check()
             return bool(_field(availability, "available", False)), _brand_runtime_text(
@@ -1007,11 +1074,12 @@ class HarnessBridge:
         )
 
     def build(self, *, model: str, task: str, cwd: str) -> tuple[list[str], str]:
-        if self.spec is not None:
-            command = self.spec.build(model=model, task=task, cwd=cwd)
-            return [_as_text(part) for part in _field(command, "argv", ())], _as_text(_field(command, "cwd", cwd))
-        executable = shutil.which("ollama") or "ollama"
-        return [executable, "launch", "dsh", "--model", model, "--", "--profile", "headless", task], cwd
+        launcher = self._launcher(model, task)
+        if launcher is None:                     # check() refuses first; belt and braces
+            raise RuntimeError(
+                "Onionmind Agent has no Tor-verified launcher, so it will not start."
+            )
+        return launcher, cwd
 
 
 class LeftRail(QWidget):
@@ -1392,7 +1460,7 @@ class InspectorPane(QWidget):
         privacy_title.addWidget(self.privacy_state)
         privacy_layout.addLayout(privacy_title)
         privacy_copy = QLabel(
-            "Prompts and model inference stay on this machine. Search queries are the explicit exception and use Tor when Chat invokes search. Agent network access is a separate boundary."
+            "Prompts and model inference stay on this machine. Anything that leaves it goes over Tor: Chat search, and the agent, which verifies a circuit before it starts and refuses to run without one."
         )
         privacy_copy.setObjectName("meta")
         privacy_copy.setWordWrap(True)
@@ -1640,7 +1708,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.setHorizontalSpacing(18)
         form.addRow("Inference", QLabel("Onionmind inference on this machine"))
-        tor = QLabel("Only Chat search queries use Tor; a failed Tor check never falls back to direct search.")
+        tor = QLabel("Chat search and the coding agent both leave over Tor; a failed Tor check never falls back to a direct request.")
         tor.setWordWrap(True)
         form.addRow("Tor", tor)
         agent = QLabel(_brand_runtime_text(agent_limitation))
@@ -1683,13 +1751,16 @@ class OnionmindWindow(QMainWindow):
         self.desktop_core = desktop_core
         self.demo = demo
         self._workers: set[SafeWorker] = set()
+        self._tor_process: Optional[subprocess.Popen[bytes]] = None
+        self._tor_ready = False
+        self._tor_busy = False
         data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
         self.data_root = Path(data_location or (Path.home() / ".onionmind")) / "desktop"
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.settings_bridge = SettingsBridge(desktop_core, self.data_root)
         self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions")
         self.workspace_bridge = WorkspaceBridge(desktop_core)
-        self.harness_bridge = HarnessBridge(desktop_core)
+        self.harness_bridge = HarnessBridge(desktop_core, core)
         self.settings_data = {} if demo else self.settings_bridge.load()
         self.workspace: Optional[str] = None
         self.current_snapshot: dict[str, Any] = {}
@@ -1794,10 +1865,13 @@ class OnionmindWindow(QMainWindow):
         self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         toolbar_layout.addWidget(self.model_combo)
+        toolbar_layout.addWidget(self._build_context_slider())
         self.model_status = StatusPill("Model", "Checking", "busy")
         toolbar_layout.addWidget(self.model_status)
         self.tor_status = StatusPill("Tor", "Checking", "busy")
-        self.tor_status.setToolTip("Tor search state is separate from Onionmind inference")
+        self.tor_status.make_clickable()
+        self.tor_status.clicked.connect(self.toggle_tor)
+        self.tor_status.setToolTip("Click to start or stop Tor. Tor search state is separate from Onionmind inference")
         toolbar_layout.addWidget(self.tor_status)
 
         terminal_toggle = QToolButton()
@@ -1869,6 +1943,85 @@ class OnionmindWindow(QMainWindow):
         self.scope_status = QLabel("No project selected")
         self.scope_status.setObjectName("meta")
         self.statusBar().addPermanentWidget(self.scope_status)
+
+    def _build_context_slider(self) -> QWidget:
+        """The agent's context budget, as a slider.
+
+        This is the number that decides whether a complex job is possible, and
+        it is also the number that decides whether the model still fits in VRAM
+        - so it is the one knob worth reaching for often enough to deserve a
+        place in the toolbar rather than a settings page.
+
+        Stops are powers of two because the KV cache is sized from this; the
+        values in between buy nothing and make the control fiddly. The core
+        clamps to the same range, so a hand-edited file cannot push it out.
+        """
+        steps = list(getattr(self.core, "CODE_STEPS", (8192, 16384, 32768, 65536, 131072)))
+        self.context_steps = steps
+
+        box = QWidget()
+        box.setFixedWidth(150)
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setMinimum(0)
+        slider.setMaximum(len(steps) - 1)
+        slider.setPageStep(1)
+        slider.setAccessibleName("Agent context budget")
+        self.context_slider = slider
+
+        label = QLabel()
+        label.setObjectName("meta")
+        label.setFixedWidth(38)
+        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.context_label = label
+
+        reader = getattr(self.core, "code_ctx", None)
+        current = reader() if callable(reader) else steps[len(steps) // 2]
+        # Nearest stop, not exact match: an env override or an older saved value
+        # can sit between two of them, and the slider still has to land somewhere.
+        index = min(range(len(steps)), key=lambda i: abs(steps[i] - current))
+        slider.setValue(index)
+        self._sync_context_label(index)
+        # valueChanged fires for every pixel of a drag; sliderReleased would miss
+        # the arrow keys, which is how the control is reachable without a mouse.
+        slider.valueChanged.connect(self._context_changed)
+
+        layout.addWidget(slider)
+        layout.addWidget(label)
+        return box
+
+    def _sync_context_label(self, index: int) -> None:
+        value = self.context_steps[index]
+        self.context_label.setText(f"{value // 1024}k")
+        locked = _as_text(os.environ.get("ONIONMIND_CODE_CTX", ""))
+        if locked:
+            # The env var wins in the core, so a slider that silently disagreed
+            # with the running agent would be a lie. Say so instead.
+            self.context_slider.setEnabled(False)
+            self.context_slider.setToolTip(
+                f"Context budget is pinned to {locked} by ONIONMIND_CODE_CTX"
+            )
+            return
+        self.context_slider.setToolTip(
+            f"Agent context budget: {value:,} tokens. Bigger fits more of the job "
+            "in one session; too big and the model spills out of VRAM onto the CPU. "
+            "Takes effect on the next agent run."
+        )
+
+    def _context_changed(self, index: int) -> None:
+        self._sync_context_label(index)
+        value = self.context_steps[index]
+        writer = getattr(self.core, "set_code_ctx", None)
+        if callable(writer) and not self.demo:
+            try:
+                writer(value)
+            except OSError as exc:
+                self.set_status(f"Could not save the context budget: {exc}")
+                return
+        self.set_status(f"Agent context budget {value:,} tokens · applies to the next run")
 
     def _build_composer(self) -> QFrame:
         frame = QFrame()
@@ -2004,7 +2157,7 @@ class OnionmindWindow(QMainWindow):
 
         checker = getattr(self.core, "tor_check", None)
         if not callable(checker):
-            self.tor_status.set_status("Not checked", "idle")
+            self._set_tor_state("Not checked", "idle")
             return
 
         def tor_probe(signals: WorkerSignals) -> Any:
@@ -2013,15 +2166,20 @@ class OnionmindWindow(QMainWindow):
             return getattr(self.core, "_port", None)
 
         tor_worker = self._start_worker(tor_probe)
-        tor_worker.signals.result.connect(
-            lambda port: self.tor_status.set_status(f"Ready · {port}" if port else "Ready", "good")
-        )
+        tor_worker.signals.result.connect(self._tor_probe_complete)
         tor_worker.signals.result.connect(lambda _: self.inspector.append_activity("Tor readiness verified separately"))
         tor_worker.signals.error.connect(lambda message: self._tor_probe_failed(message))
 
-    def _start_worker(self, fn: Callable[[WorkerSignals], Any]) -> SafeWorker:
+    def _start_worker(
+        self,
+        fn: Callable[[WorkerSignals], Any],
+        setup: Optional[Callable[[SafeWorker], None]] = None,
+    ) -> SafeWorker:
         worker = SafeWorker(fn, self.core)
         self._workers.add(worker)
+        if setup is not None:
+            # A fast job can finish before the caller connects, so wire it up first.
+            setup(worker)
 
         def forget() -> None:
             self._workers.discard(worker)
@@ -2047,10 +2205,87 @@ class OnionmindWindow(QMainWindow):
         self.set_status(message)
         self.inspector.append_activity(f"Onionmind inference unavailable: {message}")
 
+    def _tor_probe_complete(self, port: Any) -> None:
+        self._set_tor_state(f"Ready · {port}" if port else "Ready", "good")
+        self.tor_status.setToolTip("Tor is up. Click to stop it. Search runs through Tor or not at all.")
+
     def _tor_probe_failed(self, message: str) -> None:
-        self.tor_status.set_status("Not ready", "bad")
-        self.tor_status.setToolTip(message + " Search fails closed and does not fall back to a direct request.")
+        self._set_tor_state("Not ready", "bad")
+        self.tor_status.setToolTip(
+            message + " Search fails closed and does not fall back to a direct request. Click to start Tor."
+        )
         self.inspector.append_activity("Tor not ready; Chat search will fail closed")
+
+    def _set_tor_state(self, text: str, state: str) -> None:
+        self._tor_ready = state == "good"
+        self._tor_busy = state == "busy"
+        self.tor_status.set_status(text, state)
+
+    def toggle_tor(self) -> None:
+        if self.demo or self._tor_busy:
+            return
+        if self._tor_ready:
+            self.stop_tor()
+        else:
+            self.start_tor()
+
+    def start_tor(self) -> None:
+        checker = getattr(self.core, "tor_check", None)
+        if not callable(checker):
+            return
+        if self._tor_process is None or self._tor_process.poll() is not None:
+            command = _tor_launch_command()
+            if command is None:
+                self._set_tor_state("Not installed", "bad")
+                self.tor_status.setToolTip("No tor daemon or Tor Browser found. Install one, then click again.")
+                self.set_status("No Tor daemon or Tor Browser found on this machine.")
+                return
+            try:
+                self._tor_process = subprocess.Popen(command)
+            except OSError as exc:
+                self._set_tor_state("Not ready", "bad")
+                self.set_status(f"Could not start Tor: {exc}")
+                return
+        self._set_tor_state("Starting", "busy")
+        self.inspector.append_activity("Starting Tor")
+
+        def wait_for_tor(signals: WorkerSignals) -> Any:
+            del signals
+            deadline = time.monotonic() + 150
+            while time.monotonic() < deadline:
+                try:
+                    checker()
+                    return getattr(self.core, "_port", None)
+                except KeyboardInterrupt:
+                    raise
+                except BaseException:  # tor_check exits rather than raising when the proxy is down
+                    time.sleep(3)
+            raise RuntimeError("Tor did not come up in time.")
+
+        def wire(worker: SafeWorker) -> None:
+            worker.signals.result.connect(self._tor_probe_complete)
+            worker.signals.result.connect(lambda _: self.inspector.append_activity("Tor started"))
+            worker.signals.error.connect(self._tor_probe_failed)
+
+        self._start_worker(wait_for_tor, wire)
+
+    def stop_tor(self) -> None:
+        process = self._tor_process
+        if process is None or process.poll() is not None:
+            self._tor_process = None
+            self.set_status("Tor is running outside Onionmind; stop it where you started it.")
+            return
+        process.terminate()
+        self._tor_process = None
+        # Clear the pinned port so a search after this fails closed instead of
+        # dialling a proxy that is on its way down.
+        try:
+            self.core._port = None
+        except AttributeError:
+            pass
+        self._set_tor_state("Stopped", "idle")
+        self.tor_status.setToolTip("Tor is stopped. Click to start it. Search fails closed until it is up.")
+        self.inspector.append_activity("Tor stopped")
 
     def _describe_model(self, raw_id: str) -> str:
         helper = getattr(self.desktop_core, "describe_model", None) if self.desktop_core else None
@@ -2116,7 +2351,7 @@ class OnionmindWindow(QMainWindow):
             self.composer.setPlaceholderText("Ask Onionmind anything…")
         else:
             self.approval_state.show()
-            self.disclosure.setText("Early access · Agent network access is separate from Tor search")
+            self.disclosure.setText("Early access · Agent web access is Tor-only and refuses to run without it")
             self.composer.setPlaceholderText("Describe what you want Onionmind Agent to change…")
         self.settings_data["mode"] = mode
         if not self.demo:
@@ -2925,7 +3160,7 @@ class OnionmindWindow(QMainWindow):
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
         self.model_status.set_status("Local · Ready", "good")
-        self.tor_status.set_status("Connected", "good")
+        self._set_tor_state("Connected", "good")
         self.workspace = str(Path.home() / "onion" / "leaflink")
         self.repo_label.setText("leaflink")
         self.repo_label.setToolTip(self.workspace)
@@ -3031,6 +3266,8 @@ class OnionmindWindow(QMainWindow):
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        if self._tor_process is not None and self._tor_process.poll() is None:
+            self._tor_process.terminate()
         event.accept()
 
 

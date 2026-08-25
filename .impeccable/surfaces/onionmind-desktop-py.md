@@ -31,7 +31,7 @@ The balanced workbench keeps the transcript primary, with projects and sessions 
 | Inspector | 292px default with Context, Changes, Activity; changes show real git data | Qt tab widget, lists, and monospace diff viewer |
 | Terminal drawer | Compact command runner scoped to the selected workspace; output remains selectable | `QProcess` plus a monospace plain-text view |
 | Composer | Multiline, attachment affordance, Chat/Agent, permission disclosure, model, Stop/Send | Qt input and standard controls |
-| Privacy boundary | Onionmind inference and Tor are separate status facts; Agent network access is never described as Tor-confined | Semantic labels and status indicators |
+| Privacy boundary | Onionmind inference and Tor are separate status facts; Agent web access is described as Tor-only and fail-closed | Semantic labels and status indicators |
 | Onionmind identity | Existing onion icon, product name, and named model tiers | Existing `.ico`/SVG assets and text |
 
 ## Interaction and responsive behavior

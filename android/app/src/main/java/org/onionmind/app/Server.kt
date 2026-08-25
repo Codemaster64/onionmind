@@ -82,7 +82,7 @@ object Server {
         val storage = StatFs(ctx.filesDir.path).availableBytes / (1024 * 1024)
         return json(buildJsonObject {
             put("torEnabled", ProcessManager.torEnabled(ctx))
-            put("tor", ProcessManager.torEnabled(ctx) && ProcessManager.torReady())
+            put("tor", ProcessManager.torEnabled(ctx) && ProcessManager.torReady(ctx))
             put("llama", ProcessManager.llamaReady())
             put("model", model?.id
                 ?: (if (ProcessManager.downloadProgress >= 0.0) ProcessManager.downloadId else "none"))

@@ -324,6 +324,47 @@ class DesktopUiTests(unittest.TestCase):
         window.left_rail.settings_button.click()
         self._close(window)
 
+    def test_tor_pill_click_starts_and_stops_tor(self) -> None:
+        window = self._window()
+        window.demo = False
+        core = window.core
+        core.tor_check = lambda: None
+        core._port = 9050
+        launched: list[list[str]] = []
+
+        class _Process:
+            def __init__(self) -> None:
+                self.alive = True
+                self.terminated = False
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self.alive = False
+
+        process = _Process()
+
+        def fake_popen(command, *args, **kwargs):
+            launched.append(list(command))
+            return process
+
+        with mock.patch.object(ui, "_tor_launch_command", return_value=["tor"]),                 mock.patch.object(ui.subprocess, "Popen", fake_popen):
+            window._set_tor_state("Not ready", "bad")
+            window.tor_status.clicked.emit()
+            self.assertEqual(launched, [["tor"]])
+            self.assertTrue(self._wait_until(lambda: window._tor_ready))
+            self.assertIn("Ready", window.tor_status.label.text())
+
+            window.tor_status.clicked.emit()
+
+        self.assertTrue(process.terminated)
+        self.assertFalse(window._tor_ready)
+        self.assertIsNone(core._port)
+        self.assertEqual(window.tor_status.label.text(), "Stopped")
+        self._close(window)
+
     def test_visible_copy_and_accessible_controls_use_onionmind_language(self) -> None:
         window = self._window()
         branded_error = ui._brand_runtime_text(
