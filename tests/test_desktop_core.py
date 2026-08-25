@@ -333,7 +333,7 @@ class HarnessAndTerminalTests(unittest.TestCase):
             self.assertEqual(command.cwd, cwd.resolve())
             self.assertNotIn("--patch", command.argv)
             self.assertIn("starts in the selected working directory", core.HARNESS_LIMITATION)
-            self.assertIn("Agent network access is separate from Tor search", core.HARNESS_LIMITATION)
+            self.assertIn("reaches the web only through Tor", core.HARNESS_LIMITATION)
 
     def test_harness_availability_is_actionable_and_safe(self) -> None:
         spec = core.HarnessSpec()

@@ -25,7 +25,7 @@
 session history, and model inference stay on your computer. Optional network
 features have narrower boundaries: Tor search sends its query to DuckDuckGo's
 onion service, model installation downloads weights, and DeepSeek Harness agent
-traffic is direct rather than Tor-routed. The wrapper code is MIT-licensed;
+traffic is routed through Tor or refused. The wrapper code is MIT-licensed;
 model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md`.
 
 On desktop, Onionmind is a standalone PySide6 application—not a browser shell,
@@ -76,10 +76,15 @@ onionmind-code "inspect this repository and explain the failing tests"
 It starts DeepSeek Harness in its public headless profile using the selected raw
 Ollama model name. Agent mode currently requires Node.js `^22.19` or `24+` and
 reports an actionable setup message when that runtime is missing. DeepSeek
-Harness is currently a developer preview. This agent
-path is intentionally labelled **direct network**: Ollama's launcher does not
-currently accept Onionmind's custom Tor-provider patch. Tor routing applies to
-Onionmind chat search, not arbitrary Harness tools or shell commands.
+Harness is currently a developer preview.
+
+The agent's only way off the machine is Tor. `onionmind-code` hands over to
+`onionmind.py --agent`, which verifies a circuit first and exits if there is
+none, then runs the Harness with every proxy variable pointed at a loopback
+bridge that exits through Tor, and with its Python and Node children refused any
+socket that is not loopback. Commands that ignore proxies entirely (`ping`,
+`nslookup`, `traceroute`) are the remaining gap; closing that needs an OS egress
+rule rather than an environment variable.
 
 Inside the workbench, switch the composer from **Chat** to **Agent** to run the
 same repository-aware path without opening a browser. Output, cancellation, and

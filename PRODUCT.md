@@ -20,7 +20,7 @@ Onionmind combines local Ollama inference with Tor-routed search and a DeepSeek 
 
 ## Operating Context
 
-Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama; the current official launcher rejects Onionmind's optional Tor-provider patch, so agent network traffic is direct. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
+Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama by `onionmind.py --agent`, which verifies a Tor circuit before starting it and refuses to run without one; the agent's proxy and socket shims put everything it runs on Tor. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
 
 ## Capabilities and Constraints
 

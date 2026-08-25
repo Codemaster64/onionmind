@@ -218,8 +218,30 @@ if (-not ($nodeVersion.Major -ge 24 -or ($nodeVersion.Major -eq 22 -and $nodeVer
   exit 1
 }
 $task = $Arguments -join ' '
-Write-Host 'Agent network note: Harness traffic is direct; only Onionmind chat search uses Tor.' -ForegroundColor DarkYellow
-& ollama launch dsh --model $Model -- --profile headless $task
+# The agent's only way off this machine is Tor, so bring Tor up before handing
+# over: onionmind.py verifies the circuit and refuses to start without one.
+$tor = Get-Process firefox -ErrorAction SilentlyContinue |
+       Where-Object { $_.Path -like '*Tor Browser*' } | Select-Object -First 1
+if (-not $tor) {
+  foreach ($c in @("$([Environment]::GetFolderPath('Desktop'))\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:USERPROFILE\OneDrive\Desktop\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Tor Browser\Browser\firefox.exe",
+                   "$env:LOCALAPPDATA\Programs\Tor Browser\Browser\firefox.exe",
+                   "$env:PROGRAMFILES\Tor Browser\Browser\firefox.exe",
+                   "${env:ProgramFiles(x86)}\Tor Browser\Browser\firefox.exe")) {
+    if (Test-Path $c) { Start-Process $c; break }
+  }
+}
+for ($i = 0; $i -lt 45; $i++) {
+  if (Get-NetTCPConnection -LocalPort 9150 -State Listen -ErrorAction SilentlyContinue) { break }
+  if (Get-NetTCPConnection -LocalPort 9050 -State Listen -ErrorAction SilentlyContinue) { break }
+  Start-Sleep 1
+}
+$desktopPython = Join-Path $PSScriptRoot 'desktop-env\Scripts\python.exe'
+$onionmindPython = Join-Path $PSScriptRoot 'onionmind.py'
+if (Test-Path -LiteralPath $desktopPython -PathType Leaf) { $python = $desktopPython } else { $python = 'python' }
+& $python $onionmindPython --agent --model $Model $task
 exit $LASTEXITCODE
 '@.Replace('@ONIONMIND_MODEL@', $model) |
   Set-Content (Join-Path $InstallDir 'onionmind-code-launch.ps1') -Encoding UTF8
