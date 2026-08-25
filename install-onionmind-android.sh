@@ -113,6 +113,9 @@ def tor_check():
             print(f"[tor] active, exit {r.get('IP')} (port {port})", file=sys.stderr)
             return
         print(f"[tor] port {port} responded but is NOT Tor - refusing", file=sys.stderr)
+    if os.name == "nt":
+        sys.exit("No Tor proxy on 9050/9150. Start Tor Browser and click "
+                 "Connect - its bundled Tor binds 9150 - then try again.")
     sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
 
 
@@ -1020,7 +1023,7 @@ def run_code(workdir, ctx=None):
     # Both backends expose an OpenAI-compatible /v1; Android has no Ollama, so
     # pointing this at OLLAMA unconditionally sent the agent to a dead port there.
     base = (OLLAMA.rsplit("/api/", 1)[0] + "/v1" if BACKEND == "ollama"
-            else LLAMA.rsplit("/chat/", 1)[0])
+            else LLAMA.rsplit("/v1/", 1)[0] + "/v1")
 
     settings = {
         # The key is never checked but qwen-code will not select the provider
