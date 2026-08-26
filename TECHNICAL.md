@@ -473,6 +473,15 @@ It needed 5514 tokens to reach its first word of answer. The tools ship `16384` 
 headroom for longer reasoning runs. If you see empty responses, raise it — don't assume
 the model refused.
 
+Reaching that ceiling is recoverable rather than terminal. Onionmind keeps the cutoff
+reasoning for one bounded `4096`-token finalization pass, disables thinking and tools for
+that pass, and asks for a concise best-effort answer plus anything still unfinished. A
+successful result replaces the oversized reasoning in saved history, so the next turn
+continues from a compact checkpoint. If finalization also reaches its limit, any partial
+answer is retained and marked incomplete; if there is no answer at all, the unfinished
+reasoning state stays attached so a later `continue` can resume it. The recovery pass runs
+at most once.
+
 ### The model echoes your prompt, or leaks "You are a helpful assistant!"
 
 Missing chat template. Importing a bare GGUF gets you `TEMPLATE {{ .Prompt }}`, a raw

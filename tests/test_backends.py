@@ -25,6 +25,12 @@ ROUNDS = [
 captured = []
 
 
+def api_response(payload):
+    response = mock.Mock(status_code=200, ok=True)
+    response.json.return_value = payload
+    return response
+
+
 class Mock(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -63,12 +69,154 @@ def test_llama_backend():
 
 
 def test_ollama_reasoning_budget_exceeds_old_ceiling():
-    response = mock.Mock(status_code=200, ok=True)
-    response.json.return_value = {"message": {"role": "assistant", "content": "OK"}}
+    response = api_response({"message": {"role": "assistant", "content": "OK"}})
     with mock.patch.object(onionmind.requests, "post", return_value=response) as post:
         onionmind._ask_ollama([{"role": "user", "content": "hello"}])
     wire = post.call_args.kwargs["json"]
     assert wire["options"]["num_predict"] > 8192, wire["options"]["num_predict"]
+
+
+def test_ollama_exhaustion_is_compressed_and_preserved():
+    responses = [
+        api_response({
+            "message": {"role": "assistant", "content": "", "thinking": "worked out facts"},
+            "done_reason": "length",
+        }),
+        api_response({
+            "message": {"role": "assistant", "content": "The compact best-effort answer."},
+            "done_reason": "stop",
+        }),
+    ]
+    history = [{"role": "user", "content": "Solve this hard task"}]
+    with mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind.requests, "post", side_effect=responses) as post:
+        answer = onionmind.turn(history)
+
+    assert answer == "The compact best-effort answer.", answer
+    assert post.call_count == 2, post.call_count
+    retry = post.call_args_list[1].kwargs["json"]
+    assert retry["think"] is False, retry
+    assert retry["options"]["num_predict"] < onionmind.NUM_PREDICT, retry
+    assert any(m.get("thinking") == "worked out facts" for m in retry["messages"]), retry
+    assert "best-effort" in retry["messages"][-1]["content"].lower(), retry
+    assert history == [
+        {"role": "user", "content": "Solve this hard task"},
+        {"role": "assistant", "content": answer},
+    ], history
+
+
+def test_llama_exhaustion_continues_from_reasoning_content():
+    responses = [
+        api_response({"choices": [{
+            "finish_reason": "length",
+            "message": {"role": "assistant", "content": None,
+                        "reasoning_content": "derived the important state"},
+        }]}),
+        api_response({"choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "Recovered from the saved state."},
+        }]}),
+    ]
+    history = [{"role": "user", "content": "Continue carefully"}]
+    with mock.patch.object(onionmind, "BACKEND", "llama-server"), \
+         mock.patch.object(onionmind.requests, "post", side_effect=responses) as post:
+        answer = onionmind.turn(history)
+
+    assert answer == "Recovered from the saved state.", answer
+    assert post.call_count == 2, post.call_count
+    retry = post.call_args_list[1].kwargs["json"]
+    assert retry["max_tokens"] < onionmind.NUM_PREDICT, retry
+    assert retry["chat_template_kwargs"]["enable_thinking"] is False, retry
+    assert any(m.get("reasoning_content") == "derived the important state"
+               for m in retry["messages"]), retry
+    assert history[-1] == {"role": "assistant", "content": answer}, history
+
+
+def test_failed_recovery_keeps_a_marked_partial_answer():
+    responses = [
+        api_response({
+            "message": {"role": "assistant",
+                        "content": "<think>done</think>Useful partial result"},
+            "done_reason": "length",
+        }),
+        api_response({
+            "message": {"role": "assistant", "content": "", "thinking": "ran out again"},
+            "done_reason": "length",
+        }),
+    ]
+    history = [{"role": "user", "content": "Large request"}]
+    with mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind.requests, "post", side_effect=responses) as post:
+        answer = onionmind.turn(history)
+
+    assert post.call_count == 2, post.call_count
+    assert "Useful partial result" in answer, answer
+    assert "incomplete" in answer.lower(), answer
+    assert history[-1] == {"role": "assistant", "content": answer}, history
+
+
+def test_double_exhaustion_keeps_resume_state_for_next_turn():
+    responses = [
+        api_response({
+            "message": {"role": "assistant", "content": "", "thinking": "saved first-pass state"},
+            "done_reason": "length",
+        }),
+        api_response({
+            "message": {"role": "assistant", "content": "", "thinking": "retry also exhausted"},
+            "done_reason": "length",
+        }),
+    ]
+    history = [{"role": "user", "content": "Very large request"}]
+    with mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind.requests, "post", side_effect=responses):
+        answer = onionmind.turn(history)
+
+    assert "unfinished state is saved" in answer.lower(), answer
+    assert len(history) == 2, history
+    assert history[-1]["thinking"] == "saved first-pass state", history
+    assert onionmind._wire_messages(history)[-1]["thinking"] == "saved first-pass state"
+
+
+def test_stream_exhaustion_recovers_and_compacts_history():
+    seen = []
+
+    def stream_reply(messages, on_text, *_args, **kwargs):
+        seen.append((list(messages), kwargs))
+        if len(seen) == 1:
+            on_text("<think>unfinished work")
+            return {"role": "assistant", "content": "<think>unfinished work",
+                    "_done_reason": "length"}
+        on_text("Streamed compact answer.")
+        return {"role": "assistant", "content": "Streamed compact answer.",
+                "_done_reason": "stop"}
+
+    history = [{"role": "user", "content": "Long streaming task"}]
+    with mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind, "_ask_ollama_stream", side_effect=stream_reply) as ask:
+        answer = onionmind.turn_stream(history, lambda _chunk: None)
+
+    assert answer == "Streamed compact answer.", answer
+    assert ask.call_count == 2, ask.call_count
+    assert seen[1][1]["think"] is False, seen
+    assert history == [
+        {"role": "user", "content": "Long streaming task"},
+        {"role": "assistant", "content": answer},
+    ], history
+
+
+def test_ollama_stream_retains_cutoff_reasoning_and_reason():
+    response = mock.Mock(status_code=200, ok=True)
+    response.iter_lines.return_value = [
+        json.dumps({"message": {"thinking": "saved "}, "done": False}),
+        json.dumps({"message": {"thinking": "state"}, "done": True,
+                    "done_reason": "length"}),
+    ]
+    with mock.patch.object(onionmind.requests, "post", return_value=response):
+        message = onionmind._ask_ollama_stream(
+            [{"role": "user", "content": "hard task"}], lambda _chunk: None)
+    assert message["thinking"] == "saved state", message
+    assert message["_done_reason"] == "length", message
+    response.close.assert_called_once_with()
 
 
 def test_stream_reports_tool_activity():
@@ -113,6 +261,12 @@ def test_old_python_uses_legacy_ui_without_importing_native_module():
 if __name__ == "__main__":
     test_llama_backend()
     test_ollama_reasoning_budget_exceeds_old_ceiling()
+    test_ollama_exhaustion_is_compressed_and_preserved()
+    test_llama_exhaustion_continues_from_reasoning_content()
+    test_failed_recovery_keeps_a_marked_partial_answer()
+    test_double_exhaustion_keeps_resume_state_for_next_turn()
+    test_stream_exhaustion_recovers_and_compacts_history()
+    test_ollama_stream_retains_cutoff_reasoning_and_reason()
     test_stream_reports_tool_activity()
     test_old_python_uses_legacy_ui_without_importing_native_module()
     print("DONE_BACKEND_OK")
