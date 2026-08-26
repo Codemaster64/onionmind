@@ -33,7 +33,7 @@ ENDPOINTS = ("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.o
 # Reasoning models spend the budget thinking BEFORE answering. A 9B needed 5514 tokens
 # to reach its first word; capped lower it returns an empty string, which reads as a
 # refusal but is just truncation.
-NUM_PREDICT = 8192
+NUM_PREDICT = 16384
 
 _port = None
 _bridge_port = None
