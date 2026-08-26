@@ -31,6 +31,14 @@ object Agent {
     )
 
     const val NUM_PREDICT = 16384  // reasoning models spend the budget thinking first
+    const val FINAL_NUM_PREDICT = 4096
+    private const val FINALIZE_PROMPT =
+        "The previous response reached its generation limit. Using the work already present " +
+        "above, answer the user's request now. Give the most useful concise best-effort answer, " +
+        "include any partial result, and state what remains unfinished. Do not output analysis, " +
+        "do not start over, and do not call tools."
+    private const val INCOMPLETE_NOTE =
+        "[Incomplete: generation limit reached. Continue to resume from this checkpoint.]"
 
     val TOOLS = """[{"type":"function","function":{
         "name":"web_search",
@@ -207,41 +215,56 @@ object Agent {
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(1800, TimeUnit.SECONDS).build()
     }
 
-    /** One full user turn against llama-server: chat, tool calls, search, repeat. */
-    fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
-             search: (String) -> String = { q -> webSearch(q) }): String {
-        val http = localHttp
-        for (round in 0 until 6) {
-            val body = buildJsonObject {
-                put("messages", JsonArray(messages))
-                put("tools", Json.parseToJsonElement(TOOLS))
-                put("stream", false)
-                put("max_tokens", NUM_PREDICT)
+    private data class ChatReply(
+        val assistant: JsonObject? = null,
+        val finishReason: String = "",
+        val error: String? = null,
+    )
+
+    private fun chat(llamaUrl: String, messages: List<JsonObject>, maxTokens: Int,
+                     finalOnly: Boolean = false): ChatReply {
+        val body = buildJsonObject {
+            put("messages", JsonArray(messages))
+            if (!finalOnly) put("tools", Json.parseToJsonElement(TOOLS))
+            put("stream", false)
+            put("max_tokens", maxTokens)
+            if (finalOnly) {
+                put("chat_template_kwargs", buildJsonObject { put("enable_thinking", false) })
+                put("reasoning_effort", "none")
             }
-            val r = try {
-                http.newCall(
-                    Request.Builder().url("$llamaUrl/v1/chat/completions")
-                        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-                        .build()
-                ).execute()
+        }
+        val response = try {
+            localHttp.newCall(
+                Request.Builder().url("$llamaUrl/v1/chat/completions")
+                    .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+            ).execute()
+        } catch (e: Exception) {
+            return ChatReply(error = "(local model request failed: ${e.message ?: e.javaClass.simpleName})")
+        }
+        response.use {
+            if (!it.isSuccessful) return ChatReply(error = "(llama-server returned HTTP ${it.code})")
+            val wire = try {
+                json.parseToJsonElement(it.body?.string().orEmpty()).jsonObject
             } catch (e: Exception) {
-                return "(local model request failed: ${e.message ?: e.javaClass.simpleName})"
+                return ChatReply(error = "(llama-server returned invalid JSON: ${e.message ?: "parse error"})")
             }
-            r.use { response ->
-                if (!response.isSuccessful) return "(llama-server returned HTTP ${response.code})"
-                val wire = try {
-                    json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
-                } catch (e: Exception) {
-                    return "(llama-server returned invalid JSON: ${e.message ?: "parse error"})"
-                }
+            val choice = try {
+                wire["choices"]!!.jsonArray[0].jsonObject
+            } catch (e: Exception) {
+                return ChatReply(error = "(llama-server response missing a chat message: ${e.message ?: "invalid response"})")
+            }
             val msg = try {
-                wire["choices"]!!.jsonArray[0].jsonObject["message"]!!.jsonObject
+                choice["message"]!!.jsonObject
             } catch (e: Exception) {
-                return "(llama-server response missing a chat message: ${e.message ?: "invalid response"})"
+                return ChatReply(error = "(llama-server response missing a chat message: ${e.message ?: "invalid response"})")
             }
             val assistant = buildJsonObject {
                 put("role", "assistant")
                 put("content", msg["content"] ?: JsonNull)
+                msg["reasoning_content"]?.let { reasoning ->
+                    if (reasoning !is JsonNull) put("reasoning_content", reasoning)
+                }
                 val calls = msg["tool_calls"]?.jsonArray
                 if (calls != null) {
                     put("tool_calls", JsonArray(calls.mapIndexed { i, c ->
@@ -266,12 +289,81 @@ object Agent {
                     }))
                 }
             }
+            val reason = (choice["finish_reason"] as? JsonPrimitive)?.content ?: ""
+            return ChatReply(assistant, reason)
+        }
+    }
+
+    private fun limited(reason: String): Boolean =
+        reason.equals("length", ignoreCase = true) || reason.equals("max_tokens", ignoreCase = true)
+
+    private fun markIncomplete(answer: String): String =
+        if (answer.isBlank()) INCOMPLETE_NOTE else "${answer.trim()}\n\n$INCOMPLETE_NOTE"
+
+    private fun reasoningState(assistant: JsonObject): String {
+        val separate = (assistant["reasoning_content"] as? JsonPrimitive)?.content.orEmpty()
+        if (separate.isNotBlank()) return separate
+        val raw = (assistant["content"] as? JsonPrimitive)?.content.orEmpty()
+        return if (raw.contains("<think>") && !raw.contains("</think>"))
+            raw.substringAfter("<think>") else ""
+    }
+
+    private fun compact(messages: MutableList<JsonObject>, answer: String) {
+        messages[messages.lastIndex] = buildJsonObject {
+            put("role", "assistant")
+            put("content", answer)
+        }
+    }
+
+    private fun recover(llamaUrl: String, messages: MutableList<JsonObject>,
+                        firstAnswer: String): String {
+        val recoveryHistory = messages.toMutableList()
+        recoveryHistory.add(buildJsonObject {
+            put("role", "user")
+            put("content", FINALIZE_PROMPT)
+        })
+        val recovered = chat(llamaUrl, recoveryHistory, FINAL_NUM_PREDICT, finalOnly = true)
+        val recoveredAnswer = recovered.assistant?.let {
+            stripThinking((it["content"] as? JsonPrimitive)?.content.orEmpty())
+        }.orEmpty()
+        if (recoveredAnswer.isNotEmpty()) {
+            val answer = if (limited(recovered.finishReason))
+                markIncomplete(recoveredAnswer) else recoveredAnswer
+            compact(messages, answer)
+            return answer
+        }
+        if (firstAnswer.isNotEmpty()) {
+            val answer = markIncomplete(firstAnswer)
+            compact(messages, answer)
+            return answer
+        }
+
+        val first = messages.last()
+        val answer = "[Incomplete: both local generation passes ended before a final answer. " +
+            "The unfinished state is saved; send 'continue' to resume.]"
+        messages[messages.lastIndex] = buildJsonObject {
+            put("role", "assistant")
+            put("content", answer)
+            val reasoning = reasoningState(first)
+            if (reasoning.isNotBlank()) put("reasoning_content", reasoning)
+        }
+        return answer
+    }
+
+    /** One full user turn against llama-server: chat, tool calls, search, repeat. */
+    fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
+             search: (String) -> String = { q -> webSearch(q) }): String {
+        for (round in 0 until 6) {
+            val reply = chat(llamaUrl, messages, NUM_PREDICT)
+            if (reply.error != null) return reply.error
+            val assistant = reply.assistant!!
             messages.add(assistant)
             val calls = assistant["tool_calls"]?.jsonArray ?: run {
                 val answer = stripThinking((assistant["content"] as? JsonPrimitive)?.content ?: "")
-                return if (answer.isEmpty())
-                    "(the model spent its whole token budget thinking and never answered)"
-                else answer
+                if (answer.isEmpty() || limited(reply.finishReason))
+                    return recover(llamaUrl, messages, answer)
+                compact(messages, answer)
+                return answer
             }
             for (c in calls) {
                 val f = c.jsonObject["function"]!!.jsonObject
@@ -285,7 +377,6 @@ object Agent {
                     put("tool_call_id", c.jsonObject["id"]!!.jsonPrimitive.content)
                     put("content", result)
                 })
-            }
             }
         }
         return "(gave up after 6 tool rounds)"
