@@ -49,6 +49,7 @@ def test_llama_backend():
 
     answer = onionmind.turn([{"role": "user", "content": "search something"}])
     assert "All over it." in answer, answer
+    assert captured[0]["max_tokens"] > 8192, captured[0]["max_tokens"]
 
     # the second request must carry the history translated to OpenAI shape
     wire = captured[1]
@@ -59,6 +60,15 @@ def test_llama_backend():
     assistant = wire["messages"][1]
     assert assistant["tool_calls"][0]["function"]["arguments"] == '{"query": "test q"}'
     print("llama-server adapter OK: translation, string-args, positional ids, full turn")
+
+
+def test_ollama_reasoning_budget_exceeds_old_ceiling():
+    response = mock.Mock(status_code=200, ok=True)
+    response.json.return_value = {"message": {"role": "assistant", "content": "OK"}}
+    with mock.patch.object(onionmind.requests, "post", return_value=response) as post:
+        onionmind._ask_ollama([{"role": "user", "content": "hello"}])
+    wire = post.call_args.kwargs["json"]
+    assert wire["options"]["num_predict"] > 8192, wire["options"]["num_predict"]
 
 
 def test_stream_reports_tool_activity():
@@ -102,6 +112,7 @@ def test_old_python_uses_legacy_ui_without_importing_native_module():
 
 if __name__ == "__main__":
     test_llama_backend()
+    test_ollama_reasoning_budget_exceeds_old_ceiling()
     test_stream_reports_tool_activity()
     test_old_python_uses_legacy_ui_without_importing_native_module()
     print("DONE_BACKEND_OK")

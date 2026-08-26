@@ -30,7 +30,7 @@ object Agent {
         "https://html.duckduckgo.com/html/",
     )
 
-    const val NUM_PREDICT = 8192   // reasoning models spend the budget thinking first
+    const val NUM_PREDICT = 16384  // reasoning models spend the budget thinking first
 
     val TOOLS = """[{"type":"function","function":{
         "name":"web_search",
