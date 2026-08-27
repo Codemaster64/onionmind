@@ -185,6 +185,21 @@ class SessionStoreTests(unittest.TestCase):
             store = core.SessionStore(temporary)
             with self.assertRaises(ValueError):
                 store.load("../settings")
+            with self.assertRaises(ValueError):
+                store.delete("../settings")
+
+    def test_session_delete_permanently_removes_active_and_archived_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = core.SessionStore(temporary)
+            active = store.create(title="Active")
+            archived = store.create(title="Archived")
+            store.archive(archived.id)
+
+            self.assertTrue(store.delete(active.id))
+            self.assertTrue(store.delete(archived.id))
+            self.assertIsNone(store.load(active.id))
+            self.assertIsNone(store.load(archived.id, archived=True))
+            self.assertFalse(store.delete(active.id))
 
 
 class WorkspaceInspectorTests(unittest.TestCase):

@@ -468,6 +468,19 @@ class SessionStore:
             pass
         return session
 
+    def delete(self, session_id: str) -> bool:
+        """Permanently remove every stored copy of a session from this machine."""
+
+        deleted = False
+        for archived in (False, True):
+            path = self._path(session_id, archived=archived)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            deleted = True
+        return deleted
+
 
 @dataclass(frozen=True)
 class WorkspaceChange:
