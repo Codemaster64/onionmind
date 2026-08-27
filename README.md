@@ -4,7 +4,7 @@
 
 # Onionmind
 
-**A native, local-first coding workbench with Ollama models and Tor search.**
+**A native, local-first coding workbench with Onionmind models and Tor search.**
 
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/inference-local--first-black)
@@ -24,14 +24,15 @@
 **No Onionmind account · no Onionmind telemetry.** Local chat, project context,
 session history, and model inference stay on your computer. Optional network
 features have narrower boundaries: Tor search sends its query to DuckDuckGo's
-onion service, model installation downloads weights, and DeepSeek Harness agent
-traffic is direct rather than Tor-routed. The wrapper code is MIT-licensed;
+onion service, while model installation and application updates download files
+directly. Onionmind Agent talks only to the local model service and has no shell
+or web tools. The wrapper code is MIT-licensed;
 model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md`.
 
 On desktop, Onionmind is a standalone PySide6 application—not a browser shell,
 WebView, or localhost website. Its three-pane workbench combines project and
 session navigation, a streaming conversation, integrated terminal, Git changes,
-context inspection, model management, and a one-shot DeepSeek Harness agent mode.
+context inspection, model management, and an Onionmind Agent file-editing mode.
 The interaction model is informed by the public Claude Code and Codex workflows,
 while the product identity, model tiers, storage, and implementation remain
 Onionmind's own. The project uses published documentation and open-source
@@ -47,9 +48,8 @@ product code.
 ## Get it in 60 seconds
 
 Every desktop install gives you **`onionmind`** and a desktop icon for the native
-workbench. **`onionmind-code "task"`** runs a one-shot repository-aware DeepSeek
-Harness task through Ollama. **`onionmind-chat`** is retained as an alias for the
-workbench.
+workbench. **`onionmind-code "task"`** runs a one-shot Onionmind Agent task in
+the current project. **`onionmind-chat`** is retained as an alias for the workbench.
 
 **Windows** — one download, one double-click:
 **[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)**
@@ -73,17 +73,15 @@ For repository-aware coding work from a terminal:
 onionmind-code "inspect this repository and explain the failing tests"
 ```
 
-It starts DeepSeek Harness in its public headless profile using the selected raw
-Ollama model name. Agent mode currently requires Node.js `^22.19` or `24+` and
-reports an actionable setup message when that runtime is missing. DeepSeek
-Harness is currently a developer preview. This agent
-path is intentionally labelled **direct network**: Ollama's launcher does not
-currently accept Onionmind's custom Tor-provider patch. Tor routing applies to
-Onionmind chat search, not arbitrary Harness tools or shell commands.
+It starts Onionmind Agent with the selected local model and the current folder as
+its workspace. Setup pins the coding runtime to version `0.22.0` and provisions
+Node.js 22 or newer. Agent mode may create and modify files inside that project
+without asking for each edit; shell, web, cloud, persistence, and sub-agent tools
+are disabled, and the model endpoint is restricted to loopback.
 
 Inside the workbench, switch the composer from **Chat** to **Agent** to run the
 same repository-aware path without opening a browser. Output, cancellation, and
-the network boundary remain visible in the transcript and activity inspector.
+the permission boundary remain visible in the transcript and activity inspector.
 
 After the first setup, update the installed code without touching the model:
 
@@ -121,14 +119,13 @@ export a conversation; the classic CLI still supports `/save notes.txt`.
 - Stream model output, stop generation, inspect tool activity, and attach images to vision-capable models.
 - Run a real shell in the selected project with command history and cancel support.
 - Inspect the bounded project tree, Git status and diff, and recent activity beside the conversation.
-- Discover installed Ollama models, see their Onionmind tier names, switch models, and pull another model.
-- Run DeepSeek Harness headlessly in **Agent** mode; no browser window or embedded web UI is involved.
+- Discover installed local models, see their Onionmind tier names, switch models in the Models dialog, and pull another model.
+- Run **Onionmind Agent** in the selected project; no browser window or embedded web UI is involved.
 
-Stop requests terminate the managed shell or Harness launcher process. A command
-that deliberately starts detached or background child processes may require
-manual cleanup in the operating system. In the stock DSH headless profile,
-interactive approval requests fail closed; custom DSH profiles can change that
-composition.
+Stop requests terminate the managed terminal or Agent process. Agent file edits
+use automatic edit approval inside the selected project, while its shell and web
+capabilities remain disabled. The separate integrated terminal runs only commands
+the user enters directly.
 
 For source development, install `requirements-desktop.txt` and run
 `python onionmind_desktop.py`. `tools/build-desktop.ps1` builds the standalone
@@ -276,8 +273,8 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 - What you *search for*, and how you *write*, can identify you regardless of any
   technology.
 - No GPU? It still runs — on the CPU. Fine for the small models, painful for the 27B.
-- DeepSeek Harness Agent mode is a direct-network developer tool. Its web and
-  shell activity is not covered by Onionmind Chat's Tor-search boundary.
+- Onionmind Agent can modify files inside the selected project automatically.
+  Review the Changes inspector or Git diff before keeping its work.
 - On a phone: expect phone speeds — roughly 5–15 tokens/second on recent
   chipsets — and disable battery optimisation for Termux, or Android will kill
   it mid-chat.
@@ -301,7 +298,8 @@ definitive legal conclusion.
 The maintainers do not operate a service and do not collect, store, or process
 user prompts or outputs. Local chat processing happens on the user's device.
 Chat search queries are sent to DuckDuckGo over Tor and are visible to
-DuckDuckGo; optional Harness tools may contact other services directly. Tor and
+DuckDuckGo; Onionmind Agent uses the loopback model endpoint and disables its
+network-capable tools. Tor and
 privacy tooling are generally lawful, but lawful use depends on what you do with
 them and on applicable law.
 

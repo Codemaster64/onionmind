@@ -123,7 +123,7 @@ def strip_tag(name):
 
 def _clean(x):
     # Collapse ALL whitespace, newlines included. web_search emits three lines
-    # per result and dsh-onionmind-tor-search.js strides through them 3 at a
+    # per result and the local search formatter strides through them 3 at a
     # time; one wrapped snippet used to shift every later result onto the wrong
     # title - the same silent mis-citation parse_results exists to prevent,
     # reintroduced at the serialisation boundary.
@@ -442,6 +442,7 @@ def run_legacy_ui():
     """Run the Windows desktop chat without putting conversation in a console."""
     import base64
     import os
+    import shutil
     import subprocess
     import threading
     import tkinter as tk
@@ -734,22 +735,55 @@ def run_legacy_ui():
             messagebox.showerror("Could not save", str(exc))
 
     def launch_coding_agent():
-        """Open DeepSeek Harness in its own agent session via Ollama."""
+        """Open an Onionmind Agent task in a selected local project."""
+        workspace = filedialog.askdirectory(
+            title="Choose a project for Onionmind Agent",
+            initialdir=os.path.expanduser("~"),
+            parent=root,
+        )
+        if not workspace:
+            return
+        task = simpledialog.askstring(
+            "Onionmind Agent",
+            "What should Onionmind change in this project?",
+            parent=root,
+        )
+        if not task or not task.strip():
+            return
         try:
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            env = os.environ.copy()
-            env["ONIONMIND_PY"] = os.path.abspath(__file__)
-            env["ONIONMIND_PYTHON"] = "python"
-            patch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "dsh-onionmind-tor.patch.yml")
-            subprocess.Popen(["ollama", "launch", "dsh", "--model", MODEL,
-                              "--", "--patch", patch],
-                             creationflags=flags, env=env)
-            set_status("coding agent launching…", "#9ef0b0")
+            install_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.name == "nt":
+                launcher = os.path.join(install_dir, "onionmind-code-launch.ps1")
+                if not os.path.isfile(launcher):
+                    raise FileNotFoundError("Onionmind Agent launcher is not installed")
+                argv = [
+                    shutil.which("powershell.exe") or "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    launcher,
+                    task.strip(),
+                ]
+                flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            else:
+                launcher = shutil.which("onionmind-code")
+                if not launcher:
+                    raise FileNotFoundError("Onionmind Agent launcher is not installed")
+                argv = [launcher, task.strip()]
+                flags = 0
+            subprocess.Popen(
+                argv,
+                cwd=workspace,
+                stdin=subprocess.DEVNULL,
+                shell=False,
+                creationflags=flags,
+            )
+            set_status("Onionmind Agent launched", "#9ef0b0")
         except (OSError, ValueError) as exc:
             messagebox.showerror(
-                "Coding agent unavailable",
-                "Could not start DeepSeek Harness through Ollama:\n\n" + str(exc))
+                "Onionmind Agent unavailable",
+                "Could not start Onionmind Agent:\n\n" + str(exc))
 
     send.configure(command=ask)
     stop.configure(command=stop_event.set)

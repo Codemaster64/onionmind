@@ -306,86 +306,180 @@ class WorkspaceInspectorTests(unittest.TestCase):
             self.assertNotIn("creationflags", keywords)
 
 
-class HarnessAndTerminalTests(unittest.TestCase):
-    def test_harness_command_preserves_model_prompt_and_cwd(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="onion mind harness ") as temporary:
-            cwd = Path(temporary)
-            prompt = "Fix parser.py, run its tests, and explain the diff."
-            command = core.HarnessSpec().build(
-                model="registry.local/deepseek-r1:8b",
+class AgentAndTerminalTests(unittest.TestCase):
+    def test_agent_command_is_local_workspace_scoped_and_edit_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="onion mind agent ") as temporary:
+            root = Path(temporary)
+            cwd = root / "project with spaces"
+            cwd.mkdir()
+            state_root = root / "agent state"
+            prompt = "Fix parser.py and explain the diff."
+            spec = core.AgentSpec(
+                state_root=state_root,
+                launcher=("node", "qwen-cli-entry.js"),
+            )
+
+            command = spec.build(
+                model="inferno:latest",
                 task=prompt,
                 cwd=cwd,
             )
-            self.assertEqual(
-                command.argv,
-                (
-                    "ollama",
-                    "launch",
-                    "dsh",
-                    "--model",
-                    "registry.local/deepseek-r1:8b",
-                    "--",
-                    "--profile",
-                    "headless",
-                    prompt,
-                ),
-            )
+
+            self.assertEqual(command.argv[:2], ("node", "qwen-cli-entry.js"))
             self.assertEqual(command.cwd, cwd.resolve())
-            self.assertNotIn("--patch", command.argv)
-            self.assertIn("starts in the selected working directory", core.HARNESS_LIMITATION)
-            self.assertIn("Agent network access is separate from Tor search", core.HARNESS_LIMITATION)
+            self.assertEqual(command.argv[command.argv.index("--prompt") + 1], prompt)
+            self.assertEqual(command.argv[command.argv.index("--model") + 1], "inferno:latest")
+            system_prompt = command.argv[command.argv.index("--system-prompt") + 1]
+            self.assertIn("Onionmind Agent", system_prompt)
+            self.assertIn("current project", system_prompt)
+            self.assertIn("file tools", system_prompt)
+            self.assertLess(len(system_prompt), 800)
+            self.assertIn("--output-format", command.argv)
+            self.assertIn("stream-json", command.argv)
+            self.assertIn("--include-partial-messages", command.argv)
+            self.assertIn("--approval-mode", command.argv)
+            self.assertIn("auto-edit", command.argv)
+            self.assertIn("--safe-mode", command.argv)
+            self.assertNotIn("yolo", command.argv)
+            excluded = command.argv[command.argv.index("--exclude-tools") + 1]
+            self.assertIn("run_shell_command", excluded)
+            self.assertIn("web_fetch", excluded)
+            self.assertIn("web_search", excluded)
+            self.assertIn("computer_use__click", excluded)
+            self.assertIn("computer_use__type_text", excluded)
+            self.assertIn("record_artifact", excluded)
+            self.assertIn("todo_write", excluded)
+            for allowed_file_tool in (
+                "edit",
+                "glob",
+                "grep_search",
+                "read_file",
+                "write_file",
+            ):
+                self.assertNotIn(allowed_file_tool, excluded.split(","))
+            self.assertEqual(
+                command.argv[command.argv.index("--openai-base-url") + 1],
+                "http://127.0.0.1:11434/v1",
+            )
+            environment = dict(command.environment)
+            self.assertEqual(environment["QWEN_USAGE_STATISTICS_ENABLED"], "false")
+            self.assertEqual(environment["QWEN_CODE_SKIP_UPDATE_CHECK_ONCE"], "1")
+            self.assertEqual(Path(environment["QWEN_HOME"]), state_root.resolve())
+            self.assertEqual(
+                Path(environment["QWEN_RUNTIME_DIR"]),
+                (state_root / "runtime").resolve(),
+            )
+            agent_settings = json.loads(
+                (state_root / "settings.json").read_text(encoding="utf-8")
+            )
+            generation = agent_settings["model"]["generationConfig"]
+            self.assertEqual(generation["contextWindowSize"], 32768)
+            self.assertEqual(generation["samplingParams"]["max_tokens"], 2048)
+            self.assertFalse(generation["reasoning"])
+            self.assertEqual(
+                generation["extra_body"]["reasoning_effort"],
+                "none",
+            )
+            self.assertIn("HTTPS_PROXY", command.unset_environment)
+            self.assertIn("HTTP_PROXY", command.unset_environment)
+            self.assertIn("selected project", core.AGENT_BOUNDARY)
+            self.assertIn("file edits", core.AGENT_BOUNDARY)
 
-    def test_harness_availability_is_actionable_and_safe(self) -> None:
-        spec = core.HarnessSpec()
-        with mock.patch.object(core.shutil, "which", return_value=None):
-            missing = spec.check()
-        self.assertFalse(missing.available)
-        self.assertIn("local engine is not ready", missing.reason)
-        self.assertEqual(missing.limitation, core.HARNESS_LIMITATION)
+            with self.assertRaisesRegex(ValueError, "INFERNO"):
+                spec.build(model="spark:latest", task=prompt, cwd=cwd)
 
-        completed = subprocess.CompletedProcess(
-            [r"C:\Program Files\Ollama\ollama.exe", "--version"],
-            0,
-            stdout=b"ollama version test",
-            stderr=b"",
-        )
-        node_completed = subprocess.CompletedProcess(
-            [r"C:\Program Files\nodejs\node.exe", "--version"],
-            0,
-            stdout=b"v24.6.0",
-            stderr=b"",
-        )
-        with mock.patch.object(
-            core.shutil,
-            "which",
-            side_effect=lambda name: (
-                r"C:\Program Files\Ollama\ollama.exe"
-                if name == "ollama"
-                else r"C:\Program Files\nodejs\node.exe"
-            ),
-        ), mock.patch.object(
-            core.subprocess, "run", side_effect=[completed, node_completed]
-        ) as run:
-            available = spec.check()
-        self.assertTrue(available.available)
-        self.assertEqual(run.call_count, 2)
-        for call in run.call_args_list:
-            positional, keywords = call
-            self.assertIsInstance(positional[0], list)
+    def test_agent_rejects_non_loopback_model_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "loopback"):
+                core.AgentSpec(
+                    state_root=temporary,
+                    base_url="https://api.example.com/v1",
+                    launcher=("qwen",),
+                )
+
+    def test_agent_availability_checks_current_cli_and_local_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            spec = core.AgentSpec(state_root=temporary)
+            with mock.patch.object(core.shutil, "which", return_value=None):
+                missing = spec.check()
+            self.assertFalse(missing.available)
+            self.assertIn("Agent runtime is not installed", missing.reason)
+            self.assertEqual(missing.boundary, core.AGENT_BOUNDARY)
+
+            completed = subprocess.CompletedProcess(
+                ["qwen", "--version"],
+                0,
+                stdout=b"0.22.0\n",
+                stderr=b"",
+            )
+            endpoint = mock.MagicMock()
+            endpoint.status = 200
+            endpoint.read.return_value = b'{"data":[{"id":"inferno:latest"}]}'
+            endpoint.__enter__.return_value = endpoint
+            with mock.patch.object(
+                core.AgentSpec,
+                "_resolve_launcher",
+                return_value=("node", "qwen-cli-entry.js"),
+            ), mock.patch.object(core.subprocess, "run", return_value=completed) as run, mock.patch.object(
+                core.urllib.request, "urlopen", return_value=endpoint
+            ) as urlopen:
+                available = spec.check()
+            self.assertTrue(available.available)
+            self.assertEqual(available.version, "0.22.0")
+            positional, keywords = run.call_args
+            self.assertEqual(positional[0][-1], "--version")
             self.assertIs(keywords["shell"], False)
             self.assertNotIn("creationflags", keywords)
+            request = urlopen.call_args.args[0]
+            self.assertEqual(request.full_url, "http://127.0.0.1:11434/v1/models")
 
-        old_node = subprocess.CompletedProcess(
-            ["node", "--version"], 0, stdout=b"v20.18.0", stderr=b""
+            missing_inferno_endpoint = mock.MagicMock()
+            missing_inferno_endpoint.status = 200
+            missing_inferno_endpoint.read.return_value = (
+                b'{"data":[{"id":"spark:latest"}]}'
+            )
+            missing_inferno_endpoint.__enter__.return_value = missing_inferno_endpoint
+            with mock.patch.object(
+                core.AgentSpec,
+                "_resolve_launcher",
+                return_value=("node", "qwen-cli-entry.js"),
+            ), mock.patch.object(
+                core.subprocess, "run", return_value=completed
+            ), mock.patch.object(
+                core.urllib.request,
+                "urlopen",
+                return_value=missing_inferno_endpoint,
+            ):
+                unavailable_model = spec.check()
+            self.assertFalse(unavailable_model.available)
+            self.assertIn("INFERNO", unavailable_model.reason)
+
+            old = subprocess.CompletedProcess(
+                ["qwen", "--version"], 0, stdout=b"0.21.0\n", stderr=b""
+            )
+            with mock.patch.object(
+                core.AgentSpec,
+                "_resolve_launcher",
+                return_value=("qwen",),
+            ), mock.patch.object(core.subprocess, "run", return_value=old):
+                unsupported = spec.check()
+            self.assertFalse(unsupported.available)
+            self.assertIn("update Onionmind Agent", unsupported.reason)
+
+    def test_agent_stream_parser_hides_protocol_and_streams_text(self) -> None:
+        parser = core.AgentStreamParser()
+        first = parser.feed(
+            '{"type":"stream_event","event":{"type":"content_block_delta",'
+            '"delta":{"type":"text_delta","text":"Updated "}}}\n'
+            '{"type":"stream_event","event":{"type":"content_block_delta",'
         )
-        with mock.patch.object(
-            core.shutil, "which", side_effect=lambda name: name
-        ), mock.patch.object(
-            core.subprocess, "run", side_effect=[completed, old_node]
-        ):
-            unsupported = spec.check()
-        self.assertFalse(unsupported.available)
-        self.assertIn("newer local runtime", unsupported.reason)
+        second = parser.feed(
+            '"delta":{"type":"text_delta","text":"parser.py"}}}\n'
+            '{"type":"result","subtype":"success"}\n'
+        )
+        self.assertEqual(first, ("Updated ",))
+        self.assertEqual(second, ("parser.py",))
+        self.assertEqual(parser.finish(), ())
 
     def test_terminal_parser_builds_argv_without_shell_true(self) -> None:
         if os.name == "nt":

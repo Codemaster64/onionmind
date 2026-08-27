@@ -8,6 +8,7 @@ small value-oriented interfaces that are straightforward to test.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,8 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any, Iterable, Mapping
+import urllib.parse
+import urllib.request
 from uuid import uuid4
 
 
@@ -33,10 +36,11 @@ __all__ = [
     "WorkspaceChange",
     "WorkspaceSnapshot",
     "WorkspaceInspector",
-    "HARNESS_LIMITATION",
-    "HarnessAvailability",
-    "HarnessCommand",
-    "HarnessSpec",
+    "AGENT_BOUNDARY",
+    "AgentAvailability",
+    "AgentCommand",
+    "AgentSpec",
+    "AgentStreamParser",
     "parse_terminal_command",
 ]
 
@@ -857,156 +861,468 @@ class WorkspaceInspector:
         return "".join(chunks)
 
 
-HARNESS_LIMITATION = (
-    "Onionmind Agent is an early-access local coding workflow. It starts in the "
-    "selected working directory, while its own tools govern what it can access. "
-    "Interactive approval prompts are not available in this build, so protected "
-    "actions stop safely. Agent network access is separate from Tor search."
+AGENT_BOUNDARY = (
+    "Onionmind Agent can read and make file edits inside the selected project. "
+    "Shell commands, web tools, external providers, telemetry, and background "
+    "update checks are disabled for this workflow. Stop ends the managed Agent "
+    "process, then Onionmind refreshes the actual files and Git state on disk."
+)
+
+_QWEN_CODE_MIN_VERSION = (0, 22, 0)
+_LOCAL_AGENT_BASE_URL = "http://127.0.0.1:11434/v1"
+_LOCAL_AGENT_KEY = "onionmind-local"
+_AGENT_SYSTEM_PROMPT = (
+    "You are Onionmind Agent, a local coding agent. Work only in the current "
+    "project. Complete the user task by inspecting and editing files with the "
+    "available file tools. Never use shell, web, network, cloud, persistence, "
+    "or subagents. Make minimal accurate changes. Do not merely describe an "
+    "edit: call a file-edit tool. Stop when the task is complete."
+)
+_AGENT_EXCLUDED_TOOLS = (
+    "run_shell_command",
+    "web_fetch",
+    "web_search",
+    "image_gen",
+    "save_memory",
+    "agent",
+    "skill",
+    "ask_user_question",
+    "cron_create",
+    "cron_list",
+    "cron_delete",
+    "loop_wakeup",
+    "create_sub_session",
+    "list_agents",
+    "task_create",
+    "task_update",
+    "task_stop",
+    "team_create",
+    "team_delete",
+    "send_message",
+    "monitor",
+    "tool_search",
+    "read_mcp_resource",
+    "enter_worktree",
+    "exit_worktree",
+    "workflow",
+    "computer_use__bring_to_front",
+    "computer_use__check_for_update",
+    "computer_use__check_permissions",
+    "computer_use__click",
+    "computer_use__double_click",
+    "computer_use__drag",
+    "computer_use__end_session",
+    "computer_use__get_accessibility_tree",
+    "computer_use__get_agent_cursor_state",
+    "computer_use__get_config",
+    "computer_use__get_cursor_position",
+    "computer_use__get_recording_state",
+    "computer_use__get_screen_size",
+    "computer_use__get_window_state",
+    "computer_use__hotkey",
+    "computer_use__kill_app",
+    "computer_use__launch_app",
+    "computer_use__list_apps",
+    "computer_use__list_windows",
+    "computer_use__move_cursor",
+    "computer_use__page",
+    "computer_use__press_key",
+    "computer_use__replay_trajectory",
+    "computer_use__right_click",
+    "computer_use__scroll",
+    "computer_use__set_agent_cursor_enabled",
+    "computer_use__set_agent_cursor_motion",
+    "computer_use__set_agent_cursor_style",
+    "computer_use__set_config",
+    "computer_use__set_value",
+    "computer_use__start_recording",
+    "computer_use__start_session",
+    "computer_use__stop_recording",
+    "computer_use__type_text",
+    "computer_use__zoom",
+    "get_goal",
+    "notebook_edit",
+    "record_artifact",
+    "todo_write",
+    "update_goal",
+    "zoom_image",
+)
+_AGENT_PROXY_VARIABLES = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
 )
 
 
 @dataclass(frozen=True)
-class HarnessAvailability:
+class AgentAvailability:
     available: bool
     executable: str | None
     reason: str
-    limitation: str = HARNESS_LIMITATION
+    version: str | None = None
+    boundary: str = AGENT_BOUNDARY
 
 
 @dataclass(frozen=True)
-class HarnessCommand:
+class AgentCommand:
     argv: tuple[str, ...]
     cwd: Path
+    environment: tuple[tuple[str, str], ...]
+    unset_environment: tuple[str, ...] = _AGENT_PROXY_VARIABLES
 
 
-class HarnessSpec:
-    """Build and preflight the public Ollama DeepSeek Harness launcher."""
+def _loopback_base_url(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Agent base URL must be non-empty")
+    parsed = urllib.parse.urlsplit(value.strip())
+    try:
+        address = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError as exc:
+        raise ValueError("Agent base URL must use a numeric loopback address") from exc
+    if (
+        parsed.scheme != "http"
+        or not address.is_loopback
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Agent base URL must be an HTTP loopback endpoint")
+    path = parsed.path.rstrip("/")
+    if path != "/v1":
+        raise ValueError("Agent base URL must end in /v1 on a loopback endpoint")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, "", "")
+    )
 
-    def __init__(self, executable: str = "ollama") -> None:
+
+def _is_inferno_model(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    model = value.strip().split("@", 1)[0].split(":", 1)[0]
+    return model.casefold() == "inferno"
+
+
+class AgentSpec:
+    """Deep Module for safe, local Qwen Code process construction.
+
+    The Interface exposes only readiness and command construction. Provider
+    selection, isolated state, disabled network-capable tools, and unattended
+    permission policy remain Local to this Implementation.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_root: PathInput | None = None,
+        base_url: str = _LOCAL_AGENT_BASE_URL,
+        executable: str = "qwen",
+        launcher: Iterable[str] | None = None,
+    ) -> None:
         if not isinstance(executable, str) or not executable.strip():
-            raise ValueError("harness executable must be non-empty")
-        self.executable = executable
+            raise ValueError("Agent executable must be non-empty")
+        self.executable = executable.strip()
+        self.base_url = _loopback_base_url(base_url)
+        self.state_root = Path(
+            state_root or (Path.home() / ".onionmind" / "agent")
+        ).expanduser().resolve()
+        explicit = tuple(launcher or ())
+        if launcher is not None and (not explicit or any(not part for part in explicit)):
+            raise ValueError("Agent launcher must contain non-empty arguments")
+        self._launcher: tuple[str, ...] | None = explicit or None
 
     @property
-    def limitation(self) -> str:
-        return HARNESS_LIMITATION
+    def boundary(self) -> str:
+        return AGENT_BOUNDARY
 
-    def build(self, *, model: str, task: str, cwd: PathInput) -> HarnessCommand:
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("harness model must be non-empty")
-        if not isinstance(task, str) or not task.strip():
-            raise ValueError("harness task must be non-empty")
-        if "\x00" in model or "\x00" in task:
-            raise ValueError("harness arguments cannot contain NUL")
-        working_directory = WorkspaceInspector._root(cwd)
-        return HarnessCommand(
-            argv=(
-                self.executable,
-                "launch",
-                "dsh",
-                "--model",
-                model,
-                "--",
-                "--profile",
-                "headless",
-                task,
-            ),
-            cwd=working_directory,
-        )
-
-    def check(self) -> HarnessAvailability:
+    def _resolve_launcher(self) -> tuple[str, ...] | None:
+        if self._launcher:
+            return self._launcher
         executable = shutil.which(self.executable)
         if executable is None:
-            return HarnessAvailability(
+            return None
+        path = Path(executable)
+        if os.name == "nt" and path.suffix.casefold() in {".cmd", ".bat"}:
+            node = shutil.which("node")
+            entrypoint = (
+                path.parent
+                / "node_modules"
+                / "@qwen-code"
+                / "qwen-code"
+                / "cli-entry.js"
+            )
+            if node is None or not entrypoint.is_file():
+                return None
+            return (node, str(entrypoint))
+        return (executable,)
+
+    def _prepare_settings(self) -> None:
+        """Keep Qwen's own budgeting aligned with Onionmind's local model."""
+
+        settings_path = self.state_root / "settings.json"
+        settings = _read_json_object(settings_path) or {}
+        model = settings.get("model")
+        if not isinstance(model, dict):
+            model = {}
+        generation = model.get("generationConfig")
+        if not isinstance(generation, dict):
+            generation = {}
+        sampling = generation.get("samplingParams")
+        if not isinstance(sampling, dict):
+            sampling = {}
+        sampling["max_tokens"] = 2048
+        generation["samplingParams"] = sampling
+        generation["contextWindowSize"] = 32768
+        generation["reasoning"] = False
+        extra_body = generation.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        extra_body["reasoning_effort"] = "none"
+        generation["extra_body"] = extra_body
+        model["generationConfig"] = generation
+        settings["model"] = model
+        _atomic_write_json(settings_path, settings)
+
+    def build(self, *, model: str, task: str, cwd: PathInput) -> AgentCommand:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Agent model must be non-empty")
+        if not _is_inferno_model(model):
+            raise ValueError("Onionmind Agent coding requires the INFERNO model")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("Agent task must be non-empty")
+        if "\x00" in model or "\x00" in task:
+            raise ValueError("Agent arguments cannot contain NUL")
+        working_directory = WorkspaceInspector._root(cwd)
+        launcher = self._launcher or self._resolve_launcher()
+        if launcher is None:
+            raise RuntimeError(
+                "Onionmind Agent runtime is not installed. Re-run Onionmind setup."
+            )
+        self._launcher = launcher
+        runtime_root = self.state_root / "runtime"
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        self._prepare_settings()
+        environment = (
+            ("QWEN_HOME", str(self.state_root)),
+            ("QWEN_RUNTIME_DIR", str(runtime_root)),
+            ("QWEN_USAGE_STATISTICS_ENABLED", "false"),
+            ("QWEN_CODE_SKIP_UPDATE_CHECK_ONCE", "1"),
+            ("OPENAI_API_KEY", _LOCAL_AGENT_KEY),
+            ("OPENAI_BASE_URL", self.base_url),
+            ("OPENAI_MODEL", model.strip()),
+            ("NO_PROXY", "127.0.0.1,::1"),
+            ("no_proxy", "127.0.0.1,::1"),
+        )
+        return AgentCommand(
+            argv=(
+                *launcher,
+                "--prompt",
+                task.strip(),
+                "--system-prompt",
+                _AGENT_SYSTEM_PROMPT,
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--approval-mode",
+                "auto-edit",
+                "--auth-type",
+                "openai",
+                "--model",
+                model.strip(),
+                "--openai-api-key",
+                _LOCAL_AGENT_KEY,
+                "--openai-base-url",
+                self.base_url,
+                "--telemetry=false",
+                "--chat-recording=false",
+                "--safe-mode",
+                "--exclude-tools",
+                ",".join(_AGENT_EXCLUDED_TOOLS),
+                "--max-wall-time",
+                "30m",
+                "--max-tool-calls",
+                "200",
+                "--channel",
+                "desktop",
+            ),
+            cwd=working_directory,
+            environment=environment,
+        )
+
+    def check(self) -> AgentAvailability:
+        launcher = self._resolve_launcher()
+        if launcher is None:
+            return AgentAvailability(
                 available=False,
                 executable=None,
                 reason=(
-                    "Onionmind's local engine is not ready. Re-run Onionmind setup "
-                    "or start its local model service, then try Agent mode again."
+                    "Onionmind Agent runtime is not installed. Re-run Onionmind "
+                    "setup, then restart the app."
                 ),
             )
         try:
             result = subprocess.run(
-                [executable, "--version"],
+                [*launcher, "--version"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 shell=False,
-                timeout=5,
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return HarnessAvailability(
+            return AgentAvailability(
                 available=False,
-                executable=executable,
-                reason=f"Onionmind's local engine could not be started: {exc}",
+                executable=launcher[0],
+                reason=f"Onionmind Agent runtime could not be checked: {exc}",
             )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).decode(
-                "utf-8", errors="replace"
-            ).strip()
-            return HarnessAvailability(
-                available=False,
-                executable=executable,
-                reason=detail or "Onionmind's local engine did not pass its readiness check.",
-            )
-
-        node = shutil.which("node")
-        if node is None:
-            return HarnessAvailability(
-                available=False,
-                executable=executable,
-                reason=(
-                    "Onionmind Agent prerequisites are incomplete. Re-run Onionmind "
-                    "setup, then try Agent mode again."
-                ),
-            )
-        try:
-            node_result = subprocess.run(
-                [node, "--version"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                shell=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return HarnessAvailability(
-                available=False,
-                executable=executable,
-                reason=f"Onionmind Agent prerequisites could not be checked: {exc}",
-            )
-        node_text = (node_result.stdout or node_result.stderr).decode(
+        version_text = (result.stdout or result.stderr).decode(
             "utf-8", errors="replace"
         ).strip()
-        version_match = re.search(r"v?(\d+)\.(\d+)(?:\.\d+)?", node_text)
+        match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", version_text)
+        version = ".".join(match.groups()) if match else None
         supported = bool(
-            node_result.returncode == 0
-            and version_match is not None
-            and (
-                int(version_match.group(1)) >= 24
-                or (
-                    int(version_match.group(1)) == 22
-                    and int(version_match.group(2)) >= 19
-                )
-            )
+            result.returncode == 0
+            and match is not None
+            and tuple(int(part) for part in match.groups()) >= _QWEN_CODE_MIN_VERSION
         )
         if not supported:
-            shown = node_text or "unknown version"
-            return HarnessAvailability(
+            shown = version_text or "unknown version"
+            return AgentAvailability(
                 available=False,
-                executable=executable,
+                executable=launcher[0],
+                version=version,
                 reason=(
-                    f"Onionmind Agent needs a newer local runtime; found {shown}. "
-                    "Re-run Onionmind setup, then try Agent mode again."
+                    f"Onionmind Agent runtime is out of date ({shown}). Re-run "
+                    "Onionmind setup to update Onionmind Agent."
                 ),
             )
-        return HarnessAvailability(
-            available=True,
-            executable=executable,
-            reason="Onionmind Agent is ready and will start on demand.",
+
+        request = urllib.request.Request(
+            f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {_LOCAL_AGENT_KEY}"},
+            method="GET",
         )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                payload = json.loads(response.read(1_048_577).decode("utf-8"))
+                status = getattr(response, "status", 200)
+            if status != 200 or not isinstance(payload, dict) or not isinstance(
+                payload.get("data"), list
+            ):
+                raise ValueError("unexpected readiness response")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            return AgentAvailability(
+                available=False,
+                executable=launcher[0],
+                version=version,
+                reason=(
+                    "Onionmind's local model service is not ready for Agent mode. "
+                    f"Start Onionmind's local engine and try again ({exc})."
+                ),
+            )
+        model_records = payload["data"]
+        if not any(
+            isinstance(record, dict)
+            and _is_inferno_model(
+                record.get("id") or record.get("model") or record.get("name")
+            )
+            for record in model_records
+        ):
+            return AgentAvailability(
+                available=False,
+                executable=launcher[0],
+                version=version,
+                reason=(
+                    "INFERNO is required for Onionmind Agent coding but is not "
+                    "installed. Re-run Onionmind setup with the INFERNO model."
+                ),
+            )
+        self._launcher = launcher
+        return AgentAvailability(
+            available=True,
+            executable=launcher[0],
+            version=version,
+            reason="Onionmind Agent is ready for local project edits.",
+        )
+
+
+class AgentStreamParser:
+    """Turn Qwen Code's JSONL protocol into concise, user-facing text deltas."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._saw_partial_text = False
+
+    @staticmethod
+    def _content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in {"text", "output_text"}:
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+
+    def _parse_line(self, line: str) -> tuple[str, ...]:
+        stripped = line.strip()
+        if not stripped:
+            return ()
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return (line.rstrip("\r") + "\n",)
+        if not isinstance(event, dict):
+            return ()
+        if event.get("type") == "stream_event":
+            stream_event = event.get("event")
+            if not isinstance(stream_event, dict):
+                return ()
+            if stream_event.get("type") == "content_block_delta":
+                delta = stream_event.get("delta")
+                if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        self._saw_partial_text = True
+                        return (text,)
+            return ()
+        if event.get("type") == "assistant" and not self._saw_partial_text:
+            message = event.get("message")
+            if isinstance(message, dict):
+                text = self._content_text(message.get("content"))
+                return (text,) if text else ()
+        if event.get("type") == "result" and event.get("subtype") not in {
+            None,
+            "success",
+        }:
+            detail = event.get("error") or event.get("message")
+            if isinstance(detail, str) and detail:
+                return (f"\nAgent stopped: {detail}\n",)
+        return ()
+
+    def feed(self, chunk: str) -> tuple[str, ...]:
+        if not isinstance(chunk, str):
+            raise TypeError("Agent stream chunk must be text")
+        self._buffer += chunk
+        output: list[str] = []
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            output.extend(self._parse_line(line))
+        return tuple(output)
+
+    def finish(self) -> tuple[str, ...]:
+        if not self._buffer:
+            return ()
+        line, self._buffer = self._buffer, ""
+        return self._parse_line(line)
 
 
 def _split_windows_commandline(command: str) -> tuple[str, ...]:

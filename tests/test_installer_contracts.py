@@ -37,7 +37,15 @@ class InstallerContractTests(unittest.TestCase):
                 self.assertIn(".onionmind-desktop-ready", text)
                 self.assertIn("PySide6.QtWidgets", text)
 
-    def test_network_asset_sets_are_pinned_to_one_resolved_revision(self) -> None:
+    def test_updater_source_sets_are_pinned_to_one_resolved_revision(self) -> None:
+        for name in ("update-onionmind.ps1", "update-onionmind.sh"):
+            with self.subTest(name=name):
+                text = self.text(name)
+                self.assertIn("api.github.com/repos/Codemaster64/onionmind/commits/main", text)
+                self.assertIn("40", text)
+                self.assertNotIn("/onionmind/main/onionmind.py", text)
+
+    def test_agent_runtime_is_current_pinned_and_replaces_legacy_launcher(self) -> None:
         for name in (
             "install-onionmind.ps1",
             "install-onionmind.sh",
@@ -46,18 +54,17 @@ class InstallerContractTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 text = self.text(name)
-                self.assertIn("api.github.com/repos/Codemaster64/onionmind/commits/main", text)
-                self.assertIn("40", text)
-                self.assertNotIn(
-                    "onionmind/main/dsh-onionmind-tor-search.js", text
-                )
-                self.assertNotIn("onionmind/main/dsh-onionmind-tor.patch.yml", text)
+                self.assertIn("@qwen-code/qwen-code@0.22.0", text)
+                self.assertIn("qwen --version", text)
+                self.assertNotIn("ollama launch dsh", text)
+                self.assertNotIn("DeepSeek Harness", text)
 
-    def test_dsh_yaml_paths_escape_single_quotes(self) -> None:
-        self.assertIn("replace(\"'\", \"''\")", self.text("install-onionmind.sh"))
-        self.assertIn(".Replace(\"'\", \"''\")", self.text("install-onionmind.ps1"))
-        self.assertIn("replace(\"'\", \"''\")", self.text("update-onionmind.sh"))
-        self.assertIn(".Replace(\"'\", \"''\")", self.text("update-onionmind.ps1"))
+        self.assertNotIn(
+            "dsh-onionmind-tor-search.js", self.text("update-onionmind.ps1")
+        )
+        self.assertNotIn(
+            "dsh-onionmind-tor.patch.yml", self.text("update-onionmind.sh")
+        )
 
     def test_one_click_windows_bootstrap_reads_itself_as_utf8(self) -> None:
         setup = self.text("onionmind-setup.cmd")
@@ -80,7 +87,7 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("previous files were restored", shell)
         self.assertIn("py_compile", shell)
 
-    def test_agent_launchers_preflight_the_supported_node_runtime(self) -> None:
+    def test_agent_launchers_preflight_the_supported_runtime(self) -> None:
         for name in (
             "install-onionmind.ps1",
             "install-onionmind.sh",
@@ -89,7 +96,26 @@ class InstallerContractTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 text = self.text(name)
-                self.assertIn("Node.js ^22.19 or 24+", text)
+                self.assertIn("Node.js 22 or newer", text)
+                self.assertIn("Onionmind Agent", text)
+
+    def test_desktop_models_reserve_a_coding_agent_context_window(self) -> None:
+        for name in ("install-onionmind.ps1", "install-onionmind.sh"):
+            with self.subTest(name=name):
+                self.assertIn("PARAMETER num_ctx 32768", self.text(name))
+        for name in ("update-onionmind.ps1", "update-onionmind.sh"):
+            with self.subTest(name=name):
+                text = self.text(name)
+                self.assertIn("PARAMETER num_ctx 32768", text)
+                self.assertIn("Modelfile", text)
+
+    def test_one_shot_coding_launchers_use_inferno(self) -> None:
+        for name in ("install-onionmind.ps1", "update-onionmind.ps1"):
+            with self.subTest(name=name):
+                self.assertIn("$Model = 'inferno'", self.text(name))
+        for name in ("install-onionmind.sh", "update-onionmind.sh"):
+            with self.subTest(name=name):
+                self.assertIn("MODEL=inferno", self.text(name))
 
 
 if __name__ == "__main__":

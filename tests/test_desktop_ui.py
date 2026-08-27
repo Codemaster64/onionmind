@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
@@ -133,14 +134,26 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(terminal.command.isEnabled())
         self._close(terminal)
 
-    def test_model_manager_add_and_close_controls(self) -> None:
+    def test_model_manager_select_add_and_close_controls(self) -> None:
         dialog = ui.ModelManagerDialog(
             ["inferno", "deepseek-r1:8b"],
             "inferno",
             lambda raw: "INFERNO" if "inferno" in raw else "ONIONMIND CUSTOM · 8B",
         )
         requested: list[str] = []
+        selected: list[str] = []
         dialog.pullRequested.connect(requested.append)
+        dialog.modelSelected.connect(selected.append)
+        self.assertEqual(dialog.models.currentRow(), 0)
+        use_button = next(
+            button
+            for button in dialog.findChildren(QPushButton)
+            if button.accessibleName() == "Use selected Onionmind model"
+        )
+        dialog.models.setCurrentRow(1)
+        self.assertTrue(use_button.isEnabled())
+        use_button.click()
+        self.assertEqual(selected, ["deepseek-r1:8b"])
         self.assertFalse(dialog.pull_button.isEnabled())
         self.assertNotIn("deepseek", " ".join(dialog.models.item(i).text() for i in range(dialog.models.count())).lower())
 
@@ -180,7 +193,7 @@ class DesktopUiTests(unittest.TestCase):
     def test_settings_storage_and_close_buttons_report_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             storage = Path(temporary) / "onionmind-storage"
-            dialog = ui.SettingsDialog(storage, desktop_core.HARNESS_LIMITATION)
+            dialog = ui.SettingsDialog(storage, desktop_core.AGENT_BOUNDARY)
             dialog.show()
             open_button = next(
                 button
@@ -204,6 +217,15 @@ class DesktopUiTests(unittest.TestCase):
 
     def test_window_actions_modes_and_responsive_toggles(self) -> None:
         window = self._window()
+        self.assertFalse(hasattr(window, "model_combo"))
+        self.assertEqual(window.onionmind_status.prefix, "Onionmind")
+        self.assertEqual(window.onionmind_status.label.text(), "Ready")
+        window.set_model_options(
+            ["spark:latest", "inferno:latest"], "spark:latest"
+        )
+        self.assertEqual(window.current_model_id(), "spark:latest")
+        self.assertEqual(window.agent_model_id(), "inferno:latest")
+        self.assertIn("INFERNO", window.approval_state.text())
         window.resize(1420, 900)
         self.app.processEvents()
         self.assertTrue(window.rail_toggle.isChecked())
@@ -293,7 +315,7 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(window.workspace, str(Path(temporary).resolve()))
 
             agent_tasks: list[str] = []
-            window._start_harness = lambda task: (
+            window._start_agent = lambda task: (
                 agent_tasks.append(task),
                 window._set_active(None),
             )
@@ -324,17 +346,49 @@ class DesktopUiTests(unittest.TestCase):
         window.left_rail.settings_button.click()
         self._close(window)
 
+    def test_agent_process_is_workspace_scoped_streamed_and_refreshed(self) -> None:
+        window = self._window()
+        with tempfile.TemporaryDirectory(prefix="onionmind agent ui ") as temporary:
+            refreshed: list[bool] = []
+            window.workspace = temporary
+            window.refresh_workspace = lambda: refreshed.append(True)
+            window._set_active("agent")
+            window.agent_generation = 1
+            window.stream_block = window.transcript.add_message(
+                "assistant", "", "Onionmind Agent"
+            )
+            script = (
+                "import os; "
+                "print(os.environ.get('ONIONMIND_AGENT_TEST', 'missing'), flush=True)"
+            )
+            window._agent_prepared(
+                1,
+                {
+                    "available": True,
+                    "argv": [sys.executable, "-u", "-c", script],
+                    "cwd": temporary,
+                    "environment": {"ONIONMIND_AGENT_TEST": "workspace-only"},
+                    "unset_environment": ["HTTPS_PROXY", "HTTP_PROXY"],
+                },
+            )
+            self.assertTrue(
+                self._wait_until(lambda: window.active_kind is None, timeout_ms=8000)
+            )
+            self.assertIn("workspace-only", window.terminal.output.toPlainText())
+            self.assertEqual(refreshed, [True])
+        self._close(window)
+
     def test_visible_copy_and_accessible_controls_use_onionmind_language(self) -> None:
         window = self._window()
         branded_error = ui._brand_runtime_text(
-            "DeepSeek Harness via Ollama, llama.cpp, DSH, and Node.js"
+            "Qwen Code and DeepSeek Harness via Ollama, llama.cpp, DSH, and Node.js"
         ).lower()
-        for term in ("ollama", "deepseek", "harness", "dsh", "llama.cpp", "node.js"):
+        for term in ("qwen", "ollama", "deepseek", "harness", "dsh", "llama.cpp", "node.js"):
             self.assertNotIn(term, branded_error)
         self.assertEqual(ui._brand_runtime_text("test harness"), "test harness")
         window.set_model_options(["deepseek-r1:8b", "inferno:latest"], "deepseek-r1:8b")
         self.assertEqual(window.current_model_id(), "deepseek-r1:8b")
-        forbidden = ("ollama", "deepseek", "harness", " dsh", "llama.cpp", "node.js")
+        forbidden = ("qwen", "ollama", "deepseek", "harness", " dsh", "llama.cpp", "node.js")
         visible: list[str] = [window.windowTitle()]
         for widget in window.findChildren(QWidget):
             for getter_name in (
@@ -350,14 +404,10 @@ class DesktopUiTests(unittest.TestCase):
                         visible.append(str(getter()))
                     except TypeError:
                         pass
-        visible.extend(
-            window.model_combo.itemText(index)
-            for index in range(window.model_combo.count())
-        )
         copy = "\n".join(visible).lower()
         for term in forbidden:
             self.assertNotIn(term, copy)
-        self.assertIn("onionmind custom · 8b", copy)
+        self.assertNotIn("onionmind custom · 8b", copy)
         buttons = [
             *window.findChildren(QPushButton),
             *window.findChildren(QToolButton),

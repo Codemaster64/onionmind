@@ -16,22 +16,22 @@ Onionmind is a local AI workbench powered by models served on the user's machine
 
 ## Positioning
 
-Onionmind combines local Ollama inference with Tor-routed search and a DeepSeek Harness coding path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Chat search sends its query to DuckDuckGo's onion service through Tor; model downloads, updates, and Harness network-capable tools have separately disclosed direct-network boundaries.
+Onionmind combines local inference, Tor-routed search, and a local Onionmind Agent file-editing path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Chat search sends its query to DuckDuckGo's onion service through Tor; model downloads and updates remain separately disclosed direct downloads.
 
 ## Operating Context
 
-Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama; the current official launcher rejects Onionmind's optional Tor-provider patch, so agent network traffic is direct. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
+Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with a model served on the local machine. Coding sessions start in a chosen project folder. Onionmind Agent uses automatic edit approval there, core file tools reject paths outside that workspace, and shell, web, cloud, persistence, and sub-agent tools are disabled. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Agent work, and `onionmind-chat` as a compatibility alias for the workbench.
 
 ## Capabilities and Constraints
 
 - Preserve the existing CLI, streaming chat, Ollama and llama.cpp backends, model discovery and download, image input, conversation export, stop control, and Tor search behavior.
 - The desktop surface must be a standalone native program, not a hosted site or a browser-only wrapper.
-- Repository-changing agent work is delegated to the public DeepSeek Harness integration; the UI must not imply a file was changed when it only chatted about it.
+- Repository-changing work runs through Onionmind Agent; the UI must refresh disk and Git state and must not imply a file changed until it observes that change.
 - Model display keeps Onionmind's named tiers: SPARK, EMBER, BLAZE, INFERNO, CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, and PYRE. Backend identifiers remain available internally, while the normal UI uses Onionmind model names.
 - The product UI names the coding path **Onionmind Agent**. Backend vendor names belong in technical/legal documentation and internal diagnostics, not ordinary interface copy.
 - Installers provision the isolated PySide6 runtime and mark it ready only after an import check; if provisioning fails, the legacy local chat UI remains available as a fallback.
 - Tor readiness and local model-server readiness are separate states and must be shown honestly.
-- DeepSeek Harness is a developer-preview dependency and may not be installed yet; the app needs an actionable unavailable state.
+- Onionmind Agent depends on a pinned Qwen Code `0.22.0` Adapter and Node.js 22 or newer; the app needs an actionable unavailable state without exposing backend vendor names in ordinary copy.
 
 ## Brand Commitments
 
@@ -42,7 +42,7 @@ The product name is **Onionmind**. Keep the supplied onion logo and the existing
 - Product and feature claims: `README.md`, `TECHNICAL.md`, and `LEGAL.md`.
 - Existing native desktop implementation and local inference/search core: `onionmind.py`.
 - Brand assets: `logo.svg`, `logo-small.svg`, and `onionmind.ico`.
-- DeepSeek Harness Tor integration: `dsh-onionmind-tor-search.js` and `dsh-onionmind-tor.patch.yml`.
+- Agent safety contracts and stream parsing: `onionmind_desktop_core.py` and `tests/test_desktop_core.py`.
 - Install and update flows: `onionmind-setup.cmd`, `install-onionmind.ps1`, `install-onionmind.sh`, `update-onionmind.ps1`, and `update-onionmind.sh`.
 - No customer, benchmark, or feature-parity claims beyond the repository evidence should be fabricated.
 

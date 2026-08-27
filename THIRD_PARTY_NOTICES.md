@@ -60,11 +60,12 @@ the dynamically linked community wheel and does not modify Qt. Full license and
 third-party attribution details:
 https://doc.qt.io/qtforpython-6/licenses.html
 
-## DeepSeek Harness (MIT)
+## Qwen Code (Apache-2.0)
 
-https://github.com/deepseek-ai/deepseek-harness — the optional repository-aware
-agent runtime launched through Ollama. Copyright (c) 2026 DeepSeek. Full text:
-https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE
+https://github.com/QwenLM/qwen-code — the open-source coding runtime used by
+Onionmind Agent. Installers pin npm package `@qwen-code/qwen-code` to version
+`0.22.0`. Full license text:
+https://github.com/QwenLM/qwen-code/blob/main/LICENSE
 
 ## Android APK dependencies
 

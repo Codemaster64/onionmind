@@ -76,16 +76,16 @@ means running it again.
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | local chat/search engine and compatibility CLI, written next to the weights |
 | `onionmind_desktop.py` | native PySide6 presentation and process orchestration |
-| `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Harness command construction |
+| `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Agent command construction |
 | `onionmind` + desktop icon | native project/session workbench |
 | `onionmind-chat` | compatibility alias for the same native workbench |
-| `onionmind-code "task"` | one-shot DeepSeek Harness headless task through Ollama |
+| `onionmind-code "task"` | one-shot Onionmind Agent task using the local model service |
 | `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
 | Isolated desktop runtime | `requests`, `PySocks`, and `PySide6-Essentials` in `desktop-env` |
 
-Agent mode additionally requires a Node.js version accepted by the current DSH
-package (`^22.19` or `24+`). Both the native preflight and generated CLI launcher
-check this before claiming Harness is ready.
+Agent mode requires Node.js 22 or newer and the pinned Qwen Code `0.22.0`
+Adapter. The installers provision both; the native preflight and generated CLI
+launcher verify them before claiming Onionmind Agent is ready.
 
 ## Native desktop architecture
 
@@ -96,10 +96,10 @@ The desktop rewrite keeps three deliberately narrow seams:
   paths continue to use this core.
 - `onionmind_desktop_core.py` has no Qt dependency. It owns atomic JSON settings
   and sessions, Onionmind tier/display names, bounded workspace and Git snapshots,
-  terminal parsing, and the exact DeepSeek Harness command. This layer is covered
+  terminal parsing, and the exact Onionmind Agent command. This layer is covered
   by unit tests without starting a GUI.
 - `onionmind_desktop.py` owns the Qt widget tree and asynchronous workers. Model
-  generation, terminal commands, Git refreshes, model pulls, and Harness tasks
+  generation, terminal commands, Git refreshes, model pulls, and Agent tasks
   stay off the UI thread; cancel actions terminate the corresponding operation.
 
 The application window is a native, resizable three-pane workbench: projects and
@@ -108,23 +108,28 @@ changes, and activity on the right. Narrow windows collapse inspectors before th
 conversation. Keyboard focus, tooltips, visible selection, and standard controls
 remain available without a mouse.
 
-Ollama remains the model seam: discovery and pulls use its public local API and
-inference continues through `onionmind.py`. Harness remains the agent seam:
+The loopback model service remains the inference Seam: discovery and pulls use
+its local API and inference continues through `onionmind.py`. `AgentSpec` is a
+deep Module whose small Interface owns readiness and command construction while
+its Implementation keeps provider setup, state isolation, and permissions Local:
 
 ```text
-ollama launch dsh --model <raw-ollama-name> -- --profile headless "<task>"
+qwen --prompt "<task>" --output-format stream-json --approval-mode auto-edit \
+  --auth-type openai --openai-base-url http://127.0.0.1:11434/v1 \
+  --safe-mode --exclude-tools <shell,web,cloud,persistence,sub-agent-tools>
 ```
 
-The raw Ollama model name is always passed to external tools; labels such as
-SPARK, EMBER, BLAZE, and INFERNO are presentation metadata only. Harness output
-is streamed into the native transcript, and its working directory is the active
-project rather than the user's home directory.
+The raw local model identifier remains internal; labels such as SPARK, EMBER,
+BLAZE, and INFERNO are presentation metadata only. `AgentStreamParser` adapts
+the runtime's JSONL events into branded transcript deltas. The process working
+directory is the active project rather than the user's home directory.
 
-The stock DSH headless profile has no interactive approval answerer, so approval
-requests fail closed. Custom DSH profiles can alter that composition. Stop
-terminates the shell or Harness launcher managed by Onionmind; deliberately
-detached/background child processes can outlive their launcher and may need
-manual termination.
+`auto-edit` permits core file edits without repeated prompts. Qwen's workspace
+checks reject core file-tool paths outside the project, and Onionmind also
+enables safe mode, isolates runtime state, disables telemetry and update checks,
+unsets proxy variables, and excludes shell, web, cloud, persistence, workflow,
+and sub-agent tools. Stop terminates the managed Agent process. The separate
+integrated terminal executes only commands entered directly by the user.
 
 ## Which build you get
 
@@ -207,11 +212,11 @@ model reasoning, answers, project snapshots, and session files remain local.
 Search queries go to DuckDuckGo through Tor. Model pulls and application updates
 also require direct downloads when explicitly requested.
 
-**Agent mode has a different boundary.** DeepSeek Harness can execute repository
-tools and network-capable commands. Ollama's current DSH launcher does not accept
-Onionmind's custom Tor-provider patch, so Harness network traffic is direct. The
-desktop and CLI label this boundary instead of implying that arbitrary agent
-traffic is anonymized.
+**Agent mode has a different boundary.** It can read, create, and modify files in
+the selected project automatically. Its model endpoint is validated as an HTTP
+loopback `/v1` URL, proxy variables are removed, and shell and network-capable
+tools are excluded. This is local project access, not Tor search; the desktop and
+CLI state that permission plainly and refresh disk and Git state after each run.
 
 ## GPU support on the live USB
 
@@ -290,18 +295,10 @@ auto-detects its backend — ollama on `:11434`, llama-server on `:8080` — wit
 the tool-calling format translation living in the script.
 
 On desktop, `onionmind` opens the native workbench. `onionmind-code "task"`
-launches Ollama's official DSH integration with the public `headless` profile,
-so it returns output in the current terminal and never opens DSH's browser UI.
-The native workbench uses the same command in Agent mode and sets the selected
-project as the working directory.
-
-`dsh-onionmind-tor-search.js` remains a current DSH search-provider adapter for
-direct Harness configurations that support patches. It invokes
-`onionmind.py --tor-search`, which verifies Tor and creates the same fresh circuit
-used by Onionmind Chat. Ollama's current `ollama launch dsh` wrapper rejects a
-custom `--patch`, so the shipped wrapper does not claim to load it. Arbitrary
-Harness shell/network tools are outside the Tor-search provider boundary in all
-configurations.
+launches the same constrained Agent Adapter in the current project and returns
+plain output in the terminal. The native workbench requests JSONL streaming,
+sets the selected project as the working directory, supports cancellation, and
+refreshes workspace and Git inspection after completion.
 
 **Phone realities, honestly:** community figures (not our measurements) put
 the 4B Q4 at roughly 5–15 tok/s depending on chipset. Android will kill
@@ -406,7 +403,7 @@ gateway makes leaks architectural rather than a matter of configuring things cor
 |---|---|---|
 | `ONIONMIND_DIR` | env var | Where weights live. **Keep it on an NVMe.** |
 | `num_gpu` | Modelfile | `99` = all layers on GPU. Lower it if speed swings. |
-| `num_ctx` | Modelfile | `8192`. Each doubling costs ~1.5GB of KV cache. |
+| `num_ctx` | Modelfile | `32768`. This fits the coding-agent prompt while keeping INFERNO usable on a 12GB GPU. |
 | `num_predict` | `onionmind.py` | `8192`. **Do not lower.** See *empty response* below. |
 | `MODEL` | `onionmind.py` | Which Ollama model the search agent talks to. |
 | `OLLAMA_MODELS` | env var | Blob store location. NVMe matters here too. |
@@ -525,7 +522,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `install-onionmind.ps1` | One-paste installer. Everything below is produced by it. |
 | `onionmind.py` | Local inference/search core, compatibility CLI, and legacy-UI fallback. |
 | `onionmind_desktop.py` | Native PySide6 workbench and asynchronous process/UI adapters. |
-| `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
+| `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Agent command spec. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |
 | `android/` | The standalone APK: Kotlin app + pure-Kotlin port of the search agent (`:core`), Docker build from source. |
@@ -571,7 +568,7 @@ actual phone yet.
   binds to any Qwen3.8-27B build. It shares the base blob, costing ~900MB rather than a second
   full model. Verified reading shapes, colours and text from a test image.
 - **Function calling** works; that's what the search agent is built on.
-- **Context** is 8192 here against a native 262144. That's a RAM ceiling, not a config one.
+- **Context** is 32768 here against a native 262144. That's a tested GPU-memory ceiling, not a model limit. Agent runs also disable extended reasoning so file-edit actions remain responsive.
 - **Quantization honesty**: the 12GB build reports as `IQ2_S`. Mixed-precision builds report
   their lowest tier, so the 3.69bpw average is plausible — but quality loss is real, and it can
   be loose with numbers. The Q4_K_M build is steadier when precision matters.

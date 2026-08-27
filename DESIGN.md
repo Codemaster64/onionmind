@@ -187,7 +187,7 @@ The canonical review viewport is 1440×900; the window opens at 1420×900 and re
 
 The transcript uses 48px inline margins, 20px above, and 24px below. Messages target the measured width of 74 platform-font characters and tool cards target 78; both shrink to the available pane, and message height grows from the wrapped plain text so no transcript content clips. Tool rows are indented 44px to align with message copy. The terminal drawer is 135–200px tall and the composer is 148–178px tall.
 
-Responsive behavior is progressive. Below 1280px the redundant model-status pill hides while Tor remains visible. Below 1100px the branch hides and the model chooser becomes compact; below 1080px the inspector collapses; below 900px the brand block narrows; below 820px the rail collapses. Toolbar toggles keep both side panes reachable.
+Responsive behavior is progressive. The toolbar carries one Onionmind readiness state instead of a backend model selector; model choice lives in the Models dialog. Below 1100px the branch hides; below 1080px the inspector collapses; below 900px the brand block narrows; below 820px the rail collapses. Toolbar toggles keep both side panes reachable.
 
 Use the small spacing scale inside controls and cards, with the 10–12px steps for pane padding and grouped content. Preserve the broad transcript breathing room; do not apply card padding to the whole work area.
 
@@ -237,11 +237,11 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 ### Status and Privacy
 
 - **Status containers:** compact 4px radius, 4px × 8px padding, a 6px state dot inside a 10px indicator, and a textual prefix plus value.
-- **Privacy boundary:** present Onionmind inference, Tor-routed Chat search, and Agent networking as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
+- **Privacy boundary:** present Onionmind inference, Tor-routed Chat search, and Agent project-edit permissions as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
 
 **The Honest State Rule.** Onionmind model, Tor, Agent, permission, activity, and observed-change states are always named in text and never encoded by color alone.
 
-**The Separate Boundaries Rule.** Present Onionmind inference, Tor-routed Chat search, and Agent networking as separate facts; never imply Agent traffic is Tor-confined.
+**The Separate Boundaries Rule.** Present Onionmind inference, Tor-routed Chat search, and Agent file access as separate facts; Agent uses only the loopback model service and has no web or shell tools.
 
 ## Do's and Don'ts
 
@@ -251,7 +251,7 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 - **Do** keep the transcript largest, with a responsive 74-character message measure and 78-character tool measure.
 - **Do** use the authored monochrome icon set for actions and the supplied Onionmind asset for product identity.
 - **Do** provide visible keyboard focus, accessible names, selectable output, and textual state labels.
-- **Do** distinguish Onionmind inference, Tor search, and Agent networking wherever privacy boundaries appear.
+- **Do** distinguish Onionmind inference, Tor search, and Agent project-edit permissions wherever boundaries appear.
 - **Do** keep backend vendor names out of ordinary UI copy; use Onionmind model tiers, Onionmind Chat, and Onionmind Agent.
 
 ### Don't:
