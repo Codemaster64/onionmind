@@ -43,6 +43,7 @@ def run_code_into(root, backend="ollama"):
          mock.patch.object(onionmind, "start_tor_bridge", return_value=9999), \
          mock.patch.object(onionmind, "BACKEND", backend), \
          mock.patch.object(onionmind, "_code_model", lambda ctx: onionmind.MODEL), \
+         mock.patch.object(onionmind, "code_ctx", return_value=onionmind.CODE_CTX), \
          mock.patch("shutil.which", return_value="qwen"), \
          mock.patch("subprocess.call",
                     side_effect=lambda *a, **kw: seen.update(kw.get("env") or {}) or 0), \

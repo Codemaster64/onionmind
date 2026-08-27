@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -534,6 +535,162 @@ class DesktopUiTests(unittest.TestCase):
                 continue
             self.assertTrue(button.text() or button.accessibleName())
         self._close(window)
+
+
+class UpdatePermissionTests(unittest.TestCase):
+    """The updater is reachable at all times but networks only with permission."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        QStandardPaths.setTestModeEnabled(True)
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyle("Fusion")
+        cls.app.setStyleSheet(ui.STYLE_SHEET)
+
+    def _manifest(self):
+        return desktop_core.parse_update_manifest(
+            json.dumps(
+                {
+                    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "version": "1.0.1",
+                    "asset": "Onionmind-Windows-x64.zip",
+                    "asset_url": "https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip",
+                    "size": 10,
+                    "sha256": "a" * 64,
+                }
+            )
+        )
+
+    def _window_with_bridge(self, temporary: str):
+        window = ui.OnionmindWindow(_CoreStub(), desktop_core, demo=False)
+        window.save_current_session = lambda: True
+        # These windows share the test-mode settings file; a previous test or
+        # an earlier run may have persisted standing update permission or a
+        # recent check timestamp. Every test here starts from "no permission
+        # granted, nothing checked yet".
+        window.settings_data["updates_autocheck_enabled"] = False
+        window.settings_data.pop("updates_last_check", None)
+        window.settings_bridge.save(window.settings_data)
+        if window._update_timer is not None:
+            window._update_timer.stop()
+        bridge = ui.UpdateBridge(_CoreStub(), desktop_core)
+        bridge.install_dir = Path(temporary) / "Onionmind-Windows-x64"
+        bridge.work_dir = Path(temporary) / "onionmind-update"
+        bridge.install_dir.mkdir(parents=True, exist_ok=True)
+        (bridge.install_dir / desktop_core.UPDATE_REVISION_FILENAME).write_text(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        )
+        window.update_bridge = bridge
+        window.show()
+        self.app.processEvents()
+        return window, bridge
+
+    def _close(self, widget) -> None:
+        widget.close()
+        widget.deleteLater()
+        self.app.processEvents()
+
+    def _wait_until(self, predicate, timeout_ms: int = 4000) -> bool:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        self.app.processEvents()
+        return bool(predicate())
+
+    def test_updates_entry_is_always_present_and_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window, _bridge = self._window_with_bridge(temporary)
+            self.assertTrue(window.update_status.isVisible())
+            self.assertEqual(window.update_status.text(), "Updates…")
+            self.assertFalse(bool(window.update_status.property("attention")))
+            self.assertFalse(window.update_permission_enabled())
+            self._close(window)
+
+    def test_without_permission_no_network_and_timer_stays_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window, bridge = self._window_with_bridge(temporary)
+            window.settings_data["updates_autocheck_enabled"] = False
+            self.assertFalse(window.update_permission_enabled())
+
+            def refuse(*args, **kwargs):
+                raise AssertionError("update check ran without permission")
+
+            # Let the startup service probes drain first so the worker set
+            # below is uncontaminated by the model probe.
+            self.assertTrue(self._wait_until(lambda: len(window._workers) == 0))
+            with mock.patch.object(bridge, "check", side_effect=refuse):
+                window._maybe_autocheck_updates()
+                self.app.processEvents()
+                time.sleep(0.2)
+                self.app.processEvents()
+                self.assertEqual(len(window._workers), 0)
+                self.assertIsNone(window._update_timer)
+            self._close(window)
+
+    def test_granting_permission_checks_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window, bridge = self._window_with_bridge(temporary)
+            manifest = self._manifest()
+            with (
+                mock.patch.object(bridge, "check", return_value=manifest),
+                mock.patch.object(bridge, "tor_port", return_value=9150),
+                mock.patch.object(bridge, "housekeep"),
+            ):
+                window.set_update_permission(True)
+                self.assertTrue(window.update_permission_enabled())
+                self.assertIsNotNone(window._update_timer)
+                self.assertTrue(window._update_timer.isActive())
+                self.assertTrue(
+                    self._wait_until(
+                        lambda: window.update_status.property("attention") is True
+                        or window.update_status.property("attention") == True  # noqa: E712
+                    )
+                )
+                self.assertIn("Update available", window.update_status.text())
+                settings_path = window.settings_bridge.store.path
+                self.assertIn("updates_autocheck_enabled", settings_path.read_text(encoding="utf-8"))
+
+                window.set_update_permission(False)
+                self.assertFalse(window._update_timer.isActive())
+            self._close(window)
+
+    def test_manual_check_requires_tor_and_then_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            window, bridge = self._window_with_bridge(temporary)
+            dialog = ui.SettingsDialog(
+                Path(temporary), desktop_core.HARNESS_LIMITATION, bridge, window
+            )
+            dialog.show()
+            self.app.processEvents()
+            self.assertFalse(dialog.autocheck_box.isChecked())
+            self.assertTrue(dialog.check_updates_button.isEnabled())
+
+            window._tor_ready = False
+            with mock.patch.object(bridge, "check", side_effect=AssertionError("network without Tor")):
+                dialog.check_updates_button.click()
+                self.app.processEvents()
+                self.assertIn("tor is not up", dialog.update_feedback.text().lower())
+
+            manifest = self._manifest()
+            window._tor_ready = True
+            with (
+                mock.patch.object(bridge, "check", return_value=manifest),
+                mock.patch.object(bridge, "tor_port", return_value=9150),
+            ):
+                dialog.check_updates_button.click()
+                self.assertTrue(
+                    self._wait_until(
+                        lambda: "available" in dialog.update_feedback.text().lower()
+                    )
+                )
+                self.assertIsNotNone(getattr(dialog, "_download_button", None))
+                self.assertTrue(dialog._download_button.isEnabled())
+            self._close(dialog)
+            self._close(window)
+
 
 
 if __name__ == "__main__":

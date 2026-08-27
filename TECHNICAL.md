@@ -126,6 +126,40 @@ terminates the shell or Harness launcher managed by Onionmind; deliberately
 detached/background child processes can outlive their launcher and may need
 manual termination.
 
+### Self-update over Tor
+
+The standalone workbench updates itself without ever touching clearnet, and
+never without permission:
+
+- Every bundle carries a `.onionmind-source-revision` marker naming the exact
+  commit it was compiled from. CI republishes a rolling `desktop-latest`
+  GitHub release on each push to `main` with two assets: the bundle zip and a
+  small `onionmind-update.json` manifest (revision, size, SHA-256).
+- **Nothing is contacted until the user asks.** The updater opens no network
+  connection on its own: Settings → **Check for updates** is the permission,
+  and it fetches the manifest through the verified Tor SOCKS port with fresh
+  credentials — a dedicated circuit, like a search. When Tor is down the
+  button refuses rather than falling back. The status bar keeps an
+  **Updates…** entry available at all times; it opens the update controls
+  with one click.
+- **Check automatically over Tor** is an explicit opt-in (off by default).
+  Granted, Onionmind checks for as long as it stays open — not only at
+  startup — at most every 12 hours, always over a verified circuit, and a
+  newer published revision surfaces as a status-bar notice. The heavy
+  download still requires its own button.
+- **Download and install** streams the zip through Tor, verifies size and
+  SHA-256, unpacks it into a staging directory (zip-slip guarded, revision
+  marker re-checked), and only then offers **Restart and update**. A
+  generated PowerShell helper waits for the app to exit, renames the old
+  bundle to a dated `backup-before-<rev>` sibling (the installer's naming),
+  moves the staged bundle into place, relaunches, and keeps the two newest
+  backups. A failed move rolls the backup back into position first.
+
+The feed is deliberately a plain release-asset URL, not `api.github.com`:
+the API is heavily rate-limited per exit address, which is hostile to shared
+Tor exits. `onionmind-update` (the CLI command) remains the updater for
+source installs and leaves model weights untouched in both paths.
+
 ## Which build you get
 
 The installer reads your VRAM and picks accordingly. All three are the same abliterated

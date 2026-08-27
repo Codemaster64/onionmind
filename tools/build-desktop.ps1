@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Check,
-    [string]$PythonExecutable = ""
+    [string]$PythonExecutable = "",
+    [string]$Revision = ""
 )
 
 # This script intentionally works in Windows PowerShell 5.1 as well as pwsh.
@@ -12,6 +13,7 @@ $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $VenvRoot = Join-Path $RepoRoot ".desktop-build-venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $DistRoot = Join-Path $RepoRoot "dist"
+$RevisionFile = ".onionmind-source-revision"
 
 $PythonSources = @(
     "onionmind.py",
@@ -75,6 +77,28 @@ foreach ($RelativePath in $RequiredFiles) {
         throw "Required desktop-build input is empty: $RelativePath"
     }
 }
+
+# The revision marker is the bundle's update identity: the in-app updater
+# compares it against the manifest published with a release, so every build
+# must carry the exact commit it was compiled from (plus -dirty when local
+# edits are in play - an honest marker beats a wrong one).
+if (-not $Revision) { $Revision = $env:ONIONMIND_BUILD_REVISION }
+$GitCommand = Get-Command "git.exe" -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if (-not $Revision) {
+    if ($null -eq $GitCommand) {
+        throw "No revision given. Pass -Revision <sha>, set ONIONMIND_BUILD_REVISION, or install git."
+    }
+    $Revision = (& $GitCommand.Path -C $RepoRoot rev-parse HEAD | Out-String).Trim()
+}
+if ($Revision -notmatch '^[0-9a-f]{7,40}(-dirty)?$') {
+    throw "Revision '$Revision' does not look like a commit sha."
+}
+if ($null -ne $GitCommand -and $Revision -notmatch '-dirty$') {
+    $DirtyStatus = (& $GitCommand.Path -C $RepoRoot status --porcelain 2>$null | Out-String)
+    if ($DirtyStatus -and $DirtyStatus.Trim()) { $Revision = "$Revision-dirty" }
+}
+Write-Host "Building revision $Revision"
 
 $BasePythonCommand = @(Resolve-PythonLauncher)
 $BasePythonPath = $BasePythonCommand[0]
@@ -186,5 +210,13 @@ foreach ($Asset in $RuntimeAssets) {
     }
 }
 
+$RevisionMarker = Join-Path $ExpectedBundle $RevisionFile
+[IO.File]::WriteAllText($RevisionMarker, $Revision + "`n", (New-Object System.Text.UTF8Encoding($false)))
+$WrittenRevision = ([IO.File]::ReadAllText($RevisionMarker)).Trim()
+if ($WrittenRevision -ne $Revision) {
+    throw "The revision marker could not be written into the bundle."
+}
+
 Write-Host "Onionmind desktop bundle ready: $ExpectedBundle"
 Write-Host "Executable: $ExpectedExecutable"
+Write-Host "Update identity: $RevisionMarker ($Revision)"
