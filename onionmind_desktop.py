@@ -2570,7 +2570,10 @@ class OnionmindWindow(QMainWindow):
                 self.set_status("No Tor daemon or Tor Browser found on this machine.")
                 return
             try:
-                self._tor_process = subprocess.Popen(command)
+                self._tor_process = subprocess.Popen(
+                    command,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
             except OSError as exc:
                 self._set_tor_state("Not ready", "bad")
                 self.set_status(f"Could not start Tor: {exc}")

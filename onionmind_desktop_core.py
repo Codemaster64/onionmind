@@ -57,6 +57,12 @@ __all__ = [
 PathInput = str | os.PathLike[str]
 
 
+# The desktop app runs under pythonw.exe, which has no console; without this
+# flag Windows gives every helper process (git, node, the engine) its own
+# flashing cmd window.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
 ONIONMIND_TIERS: tuple[str, ...] = (
     "SPARK",
     "EMBER",
@@ -598,6 +604,7 @@ class WorkspaceInspector:
                 check=False,
                 shell=False,
                 timeout=15,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"could not run Git: {exc}") from exc
@@ -948,6 +955,7 @@ class HarnessSpec:
                 check=False,
                 shell=False,
                 timeout=5,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return HarnessAvailability(
@@ -984,6 +992,7 @@ class HarnessSpec:
                 check=False,
                 shell=False,
                 timeout=5,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return HarnessAvailability(

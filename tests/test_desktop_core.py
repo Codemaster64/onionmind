@@ -277,7 +277,7 @@ class WorkspaceInspectorTests(unittest.TestCase):
         snapshot = core.WorkspaceInspector(max_entries=100, max_depth=4).inspect(self.root)
         self.assertNotIn("linked-outside/private-name.txt", snapshot.file_tree)
 
-    def test_git_processes_use_argument_lists_without_hidden_windows_flags(self) -> None:
+    def test_git_processes_use_argument_lists_and_hide_helper_windows(self) -> None:
         real_run = subprocess.run
         calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -305,7 +305,7 @@ class WorkspaceInspectorTests(unittest.TestCase):
             if "ls-files" in argv:
                 self.assertIn("--exclude-standard", argv)
             self.assertIs(keywords.get("shell"), False)
-            self.assertNotIn("creationflags", keywords)
+            self.assertEqual(keywords.get("creationflags"), core._NO_WINDOW)
 
 
 class HarnessAndTerminalTests(unittest.TestCase):
@@ -375,7 +375,7 @@ class HarnessAndTerminalTests(unittest.TestCase):
             positional, keywords = call
             self.assertIsInstance(positional[0], list)
             self.assertIs(keywords["shell"], False)
-            self.assertNotIn("creationflags", keywords)
+            self.assertEqual(keywords.get("creationflags"), core._NO_WINDOW)
 
         old_node = subprocess.CompletedProcess(
             ["node", "--version"], 0, stdout=b"v20.18.0", stderr=b""
@@ -422,7 +422,7 @@ class HarnessAndTerminalTests(unittest.TestCase):
         )
 
         source = inspect.getsource(core)
-        self.assertNotIn("CREATE_NO_WINDOW", source)
+        self.assertNotIn("CREATE_NEW_CONSOLE", source)
         self.assertNotIn("shell=True", source)
         self.assertNotIn("PySide", source)
 
