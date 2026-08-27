@@ -203,10 +203,10 @@ QSplitter::handle { background: #37342f; }
 QSplitter::handle:hover { background: #71557c; }
 QStatusBar { background: #151412; border-top: 1px solid #35322d; color: #9f988f; }
 QStatusBar::item { border: none; }
-QPushButton#updateStatus { background: transparent; border: none; color: #9f988f; padding: 1px 6px; }
-QPushButton#updateStatus:hover { color: #eee8df; }
-QPushButton#updateStatus[attention="true"] { background: #2a2230; border: 1px solid #71557c; border-radius: 4px; color: #cfa9e0; padding: 1px 10px; }
-QPushButton#updateStatus[attention="true"]:hover { background: #372c40; }
+QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #b7b0a7; padding: 2px 8px; }
+QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
+QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
+QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
