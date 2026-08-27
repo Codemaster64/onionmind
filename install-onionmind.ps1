@@ -1763,6 +1763,12 @@ __all__ = [
 PathInput = str | os.PathLike[str]
 
 
+# The desktop app runs under pythonw.exe, which has no console; without this
+# flag Windows gives every helper process (git, node, the engine) its own
+# flashing cmd window.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
 ONIONMIND_TIERS: tuple[str, ...] = (
     "SPARK",
     "EMBER",
@@ -2304,6 +2310,7 @@ class WorkspaceInspector:
                 check=False,
                 shell=False,
                 timeout=15,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"could not run Git: {exc}") from exc
@@ -2654,6 +2661,7 @@ class HarnessSpec:
                 check=False,
                 shell=False,
                 timeout=5,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return HarnessAvailability(
@@ -2690,6 +2698,7 @@ class HarnessSpec:
                 check=False,
                 shell=False,
                 timeout=5,
+                creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return HarnessAvailability(
@@ -3514,10 +3523,10 @@ QSplitter::handle { background: #37342f; }
 QSplitter::handle:hover { background: #71557c; }
 QStatusBar { background: #151412; border-top: 1px solid #35322d; color: #9f988f; }
 QStatusBar::item { border: none; }
-QPushButton#updateStatus { background: transparent; border: none; color: #9f988f; padding: 1px 6px; }
-QPushButton#updateStatus:hover { color: #eee8df; }
-QPushButton#updateStatus[attention="true"] { background: #2a2230; border: 1px solid #71557c; border-radius: 4px; color: #cfa9e0; padding: 1px 10px; }
-QPushButton#updateStatus[attention="true"]:hover { background: #372c40; }
+QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #b7b0a7; padding: 2px 8px; }
+QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
+QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
+QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
@@ -5881,7 +5890,10 @@ class OnionmindWindow(QMainWindow):
                 self.set_status("No Tor daemon or Tor Browser found on this machine.")
                 return
             try:
-                self._tor_process = subprocess.Popen(command)
+                self._tor_process = subprocess.Popen(
+                    command,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
             except OSError as exc:
                 self._set_tor_state("Not ready", "bad")
                 self.set_status(f"Could not start Tor: {exc}")
