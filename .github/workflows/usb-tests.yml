@@ -56,9 +56,13 @@ jobs:
       - name: ollama bake + blob GC + read-only store
         run: |
           mkdir -p usb/cache
-          curl -L --fail -o usb/cache/ollama-linux-amd64.tar.zst \
+          # huggingface.co answers 429 to bursty runner IPs; retry instead of
+          # failing the whole kit over a rate limit that clears in seconds.
+          curl -L --fail --retry 5 --retry-delay 15 --retry-all-errors \
+            -o usb/cache/ollama-linux-amd64.tar.zst \
             https://ollama.com/download/ollama-linux-amd64.tar.zst
-          curl -L --fail -o usb/cache/Qwen3-0.6B.Q4_K_M.gguf \
+          curl -L --fail --retry 5 --retry-delay 15 --retry-all-errors \
+            -o usb/cache/Qwen3-0.6B.Q4_K_M.gguf \
             "https://huggingface.co/mradermacher/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B.Q4_K_M.gguf"
           docker run --rm --privileged \
             -v "$PWD/usb/cache:/cache" -v "$PWD/usb/tests:/t" \
