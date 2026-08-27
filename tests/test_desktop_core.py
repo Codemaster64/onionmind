@@ -7,6 +7,7 @@ Run with::
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 
@@ -423,6 +425,251 @@ class HarnessAndTerminalTests(unittest.TestCase):
         self.assertNotIn("CREATE_NO_WINDOW", source)
         self.assertNotIn("shell=True", source)
         self.assertNotIn("PySide", source)
+
+
+class UpdateFeedTests(unittest.TestCase):
+    """The Tor-routed self-update path: manifest validation, staging, swap."""
+
+    def _manifest_dict(self, **overrides):
+        payload = {
+            "revision": "2301ddffb6978cb07e495a0bb2b98a0e85583f8b",
+            "version": "1.0.0",
+            "asset": "Onionmind-Windows-x64.zip",
+            "asset_url": "https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip",
+            "size": 1024,
+            "sha256": "a" * 64,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_manifest_round_trip_and_short_revision(self):
+        manifest = core.parse_update_manifest(json.dumps(self._manifest_dict()))
+        self.assertEqual(manifest.revision, self._manifest_dict()["revision"])
+        self.assertEqual(core.short_revision(manifest.revision), "2301ddf")
+        self.assertEqual(core.short_revision(None), "unknown")
+        self.assertEqual(core.short_revision("2301ddf-dirty"), "2301ddf-dirt")
+
+    def test_manifest_rejects_tampering(self):
+        cases = [
+            self._manifest_dict(revision="not-a-sha"),
+            self._manifest_dict(revision=123),
+            self._manifest_dict(asset="../evil.zip"),
+            self._manifest_dict(asset="bundle/inner.zip"),
+            self._manifest_dict(asset_url="http://github.com/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(asset_url="https://evil.example.com/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(size=0),
+            self._manifest_dict(size="1024"),
+            self._manifest_dict(sha256="A" * 64),
+            self._manifest_dict(sha256="short"),
+        ]
+        for payload in cases:
+            with self.assertRaises(core.BundleUpdateError):
+                core.parse_update_manifest(json.dumps(payload))
+        with self.assertRaises(core.BundleUpdateError):
+            core.parse_update_manifest("not json at all")
+
+    def test_update_state_is_the_honest_tri_state(self):
+        manifest = core.parse_update_manifest(json.dumps(self._manifest_dict()))
+        self.assertEqual(core.update_state(manifest.revision, manifest), "current")
+        self.assertEqual(
+            core.update_state("1111111111111111111111111111111111111111", manifest), "available"
+        )
+        self.assertEqual(core.update_state(None, manifest), "development")
+        self.assertEqual(core.update_state("2301ddf", None), "unavailable")
+
+    def test_installed_revision_reads_the_marker_honestly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertIsNone(core.installed_revision(root))
+            (root / core.UPDATE_REVISION_FILENAME).write_text("\n")
+            self.assertIsNone(core.installed_revision(root))
+            (root / core.UPDATE_REVISION_FILENAME).write_text("abc1234\n")
+            self.assertEqual(core.installed_revision(root), "abc1234")
+
+
+class BundleUpdaterTests(unittest.TestCase):
+    def _updater(self, root: Path) -> core.BundleUpdater:
+        return core.BundleUpdater(
+            root / "bundle",
+            root / "work",
+            lambda port: {"http": f"socks5h://x:{port}", "https": f"socks5h://x:{port}"},
+            "Onionmind-test-agent",
+        )
+
+    def _manifest(self, revision="2301ddffb6978cb07e495a0bb2b98a0e85583f8b") -> core.UpdateManifest:
+        return core.parse_update_manifest(
+            json.dumps(
+                {
+                    "revision": revision,
+                    "version": "1.0.0",
+                    "asset": "Onionmind-Windows-x64.zip",
+                    "asset_url": "https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip",
+                    "size": 1024,
+                    "sha256": "a" * 64,
+                }
+            )
+        )
+
+    def _bundle_zip(self, destination: Path, revision: str, slip_member: str | None = None) -> Path:
+        with tempfile.TemporaryDirectory() as source:
+            inner = Path(source)
+            (inner / "Onionmind.exe").write_bytes(b"MZ fake")
+            (inner / core.UPDATE_REVISION_FILENAME).write_text(revision + "\n")
+            with zipfile.ZipFile(destination, "w") as archive:
+                for path in sorted(inner.rglob("*")):
+                    archive.write(path, path.relative_to(inner).as_posix())
+                if slip_member:
+                    archive.writestr(slip_member, "escaped")
+        return destination
+
+    def test_stage_verifies_revision_and_executable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            updater = self._updater(root)
+            manifest = self._manifest()
+            archive = self._bundle_zip(root / "bundle.zip", manifest.revision)
+            staging = updater.stage(manifest, archive)
+            self.assertTrue((staging / "Onionmind.exe").is_file())
+            self.assertEqual(core.installed_revision(staging), manifest.revision)
+
+            wrong = self._bundle_zip(root / "wrong.zip", "1111111111111111111111111111111111111111")
+            with self.assertRaises(core.BundleUpdateError):
+                updater.stage(manifest, wrong)
+
+    def test_stage_refuses_zip_slip_and_bare_archives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            updater = self._updater(root)
+            manifest = self._manifest()
+            slipped = self._bundle_zip(
+                root / "slip.zip", manifest.revision, slip_member="../escape.txt"
+            )
+            with self.assertRaises(core.BundleUpdateError):
+                updater.stage(manifest, slipped)
+            self.assertFalse((root / "escape.txt").exists())
+
+            with zipfile.ZipFile(root / "empty.zip", "w") as archive:
+                archive.writestr("readme.txt", "no executable here")
+            with self.assertRaises(core.BundleUpdateError):
+                updater.stage(manifest, root / "empty.zip")
+
+    def test_download_verifies_size_and_digest(self):
+        payload = bytes(range(256)) * 4
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def iter_content(self, chunk_size):
+                for start in range(0, len(payload), chunk_size):
+                    yield payload[start : start + chunk_size]
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict]] = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method, url, kwargs))
+                return FakeResponse()
+
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            updater = self._updater(root)
+            base = self._manifest()
+            manifest = core.UpdateManifest(
+                revision=base.revision,
+                version=base.version,
+                asset_name=base.asset_name,
+                asset_url=base.asset_url,
+                size=len(payload),
+                sha256=digest,
+            )
+            session = FakeSession()
+            updater._session = session
+            notes: list[tuple[object, str]] = []
+            downloaded = updater.download(9150, manifest, progress=lambda f, n: notes.append((f, n)))
+            self.assertEqual(downloaded.read_bytes(), payload)
+            self.assertTrue(notes)
+            method, url, kwargs = session.calls[0]
+            self.assertEqual(method, "GET")
+            self.assertEqual(url, manifest.asset_url)
+            self.assertTrue(kwargs["proxies"]["https"].startswith("socks5h://"))
+
+            tampered = core.UpdateManifest(
+                revision=base.revision,
+                version=base.version,
+                asset_name=base.asset_name,
+                asset_url=base.asset_url,
+                size=len(payload),
+                sha256="0" * 64,
+            )
+            with self.assertRaises(core.BundleUpdateError):
+                updater.download(9150, tampered)
+
+            truncated = core.UpdateManifest(
+                revision=base.revision,
+                version=base.version,
+                asset_name=base.asset_name,
+                asset_url=base.asset_url,
+                size=len(payload) + 1,
+                sha256=digest,
+            )
+            with self.assertRaises(core.BundleUpdateError):
+                updater.download(9150, truncated)
+
+    def test_fetch_manifest_without_a_proxy_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            updater = core.BundleUpdater(
+                Path(temporary),
+                Path(temporary) / "work",
+                lambda port: {},
+                "Onionmind-test-agent",
+            )
+            with self.assertRaises(core.BundleUpdateError):
+                updater.fetch_manifest(9150)
+
+    def test_apply_script_carries_paths_and_safety(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            updater = self._updater(root)
+            staging = root / "work" / "staging-2301ddffb697"
+            staging.mkdir(parents=True)
+            command = updater.apply_command(staging)
+            self.assertEqual(command[0], "powershell.exe")
+            self.assertIn("-ExecutionPolicy", command)
+            # Paths ride on the command line, so the script stays generic.
+            self.assertIn(str(root / "bundle"), command)
+            self.assertIn(str(staging), command)
+            self.assertIn(str(root / "work" / "apply.log"), command)
+            script = Path(command[command.index("-File") + 1])
+            self.assertTrue(script.is_file())
+            body = script.read_text(encoding="utf-8-sig")
+            self.assertIn("$ParentPid", body)
+            self.assertIn("$InstallDir", body)
+            self.assertIn(core.UPDATE_REVISION_FILENAME, body)
+            self.assertNotIn("@MARKER@", body)
+            self.assertNotIn("@EXE_NAME@", body)
+            self.assertIn("backup-before-", body)
+            self.assertIn("throw", body)
+
+    def test_pending_and_prune_keep_only_live_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            updater = self._updater(root)
+            manifest = self._manifest()
+            staging = updater.stage(manifest, self._bundle_zip(root / "b.zip", manifest.revision))
+            self.assertEqual(core.pending_staging_dir(work), staging)
+
+            empty = work / "staging-00000000000"
+            empty.mkdir()
+            self.assertEqual(core.pending_staging_dir(work), staging)
+
+            core.prune_update_workdir(work, running_revision=manifest.revision)
+            self.assertFalse(staging.exists())
+            self.assertTrue(empty.exists())
+            self.assertEqual(core.pending_staging_dir(work), None)
 
 
 if __name__ == "__main__":

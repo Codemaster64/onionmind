@@ -96,6 +96,15 @@ After the first setup, update the installed code without touching the model:
 onionmind-update
 ```
 
+The desktop workbench also updates itself in place: **Settings → Check for
+updates** (the status bar keeps an **Updates…** entry reachable at all
+times). Nothing is contacted until you press it — and if you want it fully
+automatic, tick **Check automatically over Tor** in Settings and Onionmind
+will look for updates for as long as it runs. The check and the ~50 MB bundle
+download both travel over Tor — a fresh circuit each, verified size and
+SHA-256, staged swap with an automatic backup — and never fall back to a
+direct connection.
+
 **Android (light models)**
 
 **[⬇ Onionmind-1.3 APK](https://github.com/Codemaster64/onionmind/releases/download/v1.3/Onionmind-1.3.apk)**
