@@ -71,31 +71,157 @@ class DesktopUiTests(unittest.TestCase):
         rail = ui.LeftRail()
         events: list[tuple[str, str]] = []
         rail.newTaskRequested.connect(lambda: events.append(("new", "")))
+        rail.addSessionRequested.connect(lambda: events.append(("add-session", "")))
         rail.openFolderRequested.connect(lambda: events.append(("folder", "")))
+        rail.removeProjectRequested.connect(
+            lambda value: events.append(("remove-project", value))
+        )
+        rail.deleteProjectRequested.connect(
+            lambda value: events.append(("delete-project", value))
+        )
         rail.modelsRequested.connect(lambda: events.append(("models", "")))
         rail.settingsRequested.connect(lambda: events.append(("settings", "")))
         rail.exportRequested.connect(lambda: events.append(("export", "")))
         rail.archiveRequested.connect(lambda value: events.append(("archive", value)))
+        rail.deleteSessionRequested.connect(
+            lambda value: events.append(("delete-session", value))
+        )
 
         self.assertFalse(rail.export_button.isEnabled())
         self.assertFalse(rail.archive_button.isEnabled())
+        self.assertFalse(rail.delete_session_button.isEnabled())
+        self.assertFalse(rail.remove_project_button.isEnabled())
+        self.assertFalse(rail.delete_project_button.isEnabled())
         rail.new_button.click()
         rail.folder_button.click()
         rail.add_project_button.click()
+        rail.add_session_button.click()
         rail.models_button.click()
         rail.settings_button.click()
         rail.set_conversation_available(True)
         rail.export_button.click()
         rail.set_sessions([{"id": "session-1", "title": "Polish UI"}], "session-1")
         rail.archive_button.click()
+        rail.delete_session_button.click()
+        rail.add_project("C:/projects/onionmind")
+        rail.remove_project_button.click()
+        rail.delete_project_button.click()
 
-        self.assertEqual(events.count(("folder", "")), 2)
+        # The same scoped actions remain available from each list's context menu.
+        rail.project_add_action.trigger()
+        rail.session_remove_action.trigger()
+        rail.session_delete_action.trigger()
+        rail.session_add_action.trigger()
+        rail.project_remove_action.trigger()
+        rail.project_delete_action.trigger()
+
+        self.assertEqual(events.count(("folder", "")), 3)
         self.assertIn(("new", ""), events)
+        self.assertEqual(events.count(("add-session", "")), 2)
         self.assertIn(("models", ""), events)
         self.assertIn(("settings", ""), events)
         self.assertIn(("export", ""), events)
-        self.assertIn(("archive", "session-1"), events)
+        self.assertEqual(events.count(("archive", "session-1")), 2)
+        self.assertEqual(events.count(("delete-session", "session-1")), 2)
+        self.assertEqual(
+            events.count(("remove-project", "C:/projects/onionmind")), 2
+        )
+        self.assertEqual(
+            events.count(("delete-project", "C:/projects/onionmind")), 2
+        )
         self._close(rail)
+
+    def test_left_rail_can_remove_project_rows_without_deleting_the_folder(self) -> None:
+        rail = ui.LeftRail()
+        path = "C:/projects/kept-on-disk"
+        rail.add_project(path)
+
+        self.assertEqual(rail.projects.count(), 1)
+        self.assertTrue(rail.remove_project(path))
+        self.assertEqual(rail.projects.count(), 0)
+        self.assertFalse(rail.remove_project(path))
+        self.assertFalse(rail.remove_project_button.isEnabled())
+        self._close(rail)
+
+    def test_window_adds_and_permanently_deletes_saved_sessions(self) -> None:
+        window = self._window()
+        with tempfile.TemporaryDirectory() as temporary:
+            window.session_bridge = ui.SessionBridge(
+                desktop_core, Path(temporary) / "sessions"
+            )
+            window.session_objects = {}
+            window.current_session = None
+            window.chat_messages = []
+
+            window.add_session()
+            sessions = window.session_bridge.list()
+            self.assertEqual(len(sessions), 1)
+            session_id = sessions[0].id
+            self.assertEqual(window.left_rail.sessions.count(), 1)
+            self.assertEqual(window.current_session.id, session_id)
+
+            with mock.patch.object(
+                window, "_confirm_permanent_deletion", return_value=True
+            ):
+                window.delete_session_from_machine(session_id)
+
+            self.assertEqual(window.session_bridge.list(), [])
+            self.assertEqual(window.left_rail.sessions.count(), 0)
+            self.assertIsNone(window.current_session)
+        self._close(window)
+
+    def test_project_remove_keeps_folder_and_machine_delete_removes_it(self) -> None:
+        window = self._window()
+        window.left_rail.projects.clear()
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "delete-me"
+            project.mkdir()
+            (project / "work.txt").write_text("local work", encoding="utf-8")
+            path = str(project.resolve())
+            window.workspace = path
+            window.terminal.set_workspace(path)
+            window.settings_data.update(
+                workspace=path,
+                recent_projects=[path],
+            )
+            window.left_rail.add_project(path)
+
+            window.remove_project_from_menu(path)
+            self.assertTrue(project.is_dir())
+            self.assertEqual(window.left_rail.projects.count(), 0)
+            self.assertEqual(window.workspace, path)
+            self.assertEqual(window.settings_data["workspace"], "")
+
+            window.settings_data.update(workspace=path, recent_projects=[path])
+            window.left_rail.add_project(path)
+            with mock.patch.object(
+                window, "_confirm_permanent_deletion", return_value=True
+            ):
+                window.delete_project_from_machine(path)
+            self.assertTrue(
+                self._wait_until(
+                    lambda: window._project_delete_pending is None
+                    and not project.exists()
+                )
+            )
+            self.assertEqual(window.left_rail.projects.count(), 0)
+            self.assertIsNone(window.workspace)
+            self.assertEqual(window.repo_label.text(), "No project")
+        self._close(window)
+
+    def test_project_machine_delete_refuses_protected_broad_paths(self) -> None:
+        window = self._window()
+        protected = (
+            Path(Path.home().anchor),
+            Path.home(),
+            window.data_root,
+            ui.MODULE_DIR,
+        )
+        for path in protected:
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    window._validated_project_delete_target(str(path))
+        self._close(window)
 
     def test_terminal_stop_clear_close_and_command_states(self) -> None:
         terminal = ui.TerminalPane(desktop_core)

@@ -456,7 +456,7 @@ gateway makes leaks architectural rather than a matter of configuring things cor
 | `ONIONMIND_DIR` | env var | Where weights live. **Keep it on an NVMe.** |
 | `num_gpu` | Modelfile | `99` = all layers on GPU. Lower it if speed swings. |
 | `num_ctx` | Modelfile | `8192`. Each doubling costs ~1.5GB of KV cache. |
-| `num_predict` | `onionmind.py` | `8192`. **Do not lower.** See *empty response* below. |
+| `num_predict` | `onionmind.py` | `16384`. **Do not lower.** See *empty response* below. |
 | `MODEL` | `onionmind.py` | Which Ollama model the search agent talks to. |
 | `OLLAMA_MODELS` | env var | Blob store location. NVMe matters here too. |
 
@@ -503,8 +503,18 @@ Measured on the 9B with the same prompt:
 | 4096 | empty |
 | **-1 (unlimited)** | **full answer, 5514 tokens, `done_reason: stop`** |
 
-It needed 5514 tokens to reach its first word of answer. The tools ship `8192` for this
-reason. If you see empty responses, raise it — don't assume the model refused.
+It needed 5514 tokens to reach its first word of answer. The tools ship `16384` to leave
+headroom for longer reasoning runs. If you see empty responses, raise it — don't assume
+the model refused.
+
+Reaching that ceiling is recoverable rather than terminal. Onionmind keeps the cutoff
+reasoning for one bounded `4096`-token finalization pass, disables thinking and tools for
+that pass, and asks for a concise best-effort answer plus anything still unfinished. A
+successful result replaces the oversized reasoning in saved history, so the next turn
+continues from a compact checkpoint. If finalization also reaches its limit, any partial
+answer is retained and marked incomplete; if there is no answer at all, the unfinished
+reasoning state stays attached so a later `continue` can resume it. The recovery pass runs
+at most once.
 
 ### The model echoes your prompt, or leaks "You are a helpful assistant!"
 

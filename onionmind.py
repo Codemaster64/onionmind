@@ -33,7 +33,15 @@ ENDPOINTS = ("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.o
 # Reasoning models spend the budget thinking BEFORE answering. A 9B needed 5514 tokens
 # to reach its first word; capped lower it returns an empty string, which reads as a
 # refusal but is just truncation.
-NUM_PREDICT = 8192
+NUM_PREDICT = 16384
+FINAL_NUM_PREDICT = 4096
+FINALIZE_PROMPT = (
+    "The previous response reached its generation limit. Using the work already present "
+    "above, answer the user's request now. Give the most useful concise best-effort answer, "
+    "include any partial result, and state what remains unfinished. Do not output analysis, "
+    "do not start over, and do not call tools."
+)
+INCOMPLETE_NOTE = "[Incomplete: generation limit reached. Continue to resume from this checkpoint.]"
 
 _port = None
 _bridge_port = None
@@ -158,26 +166,47 @@ TOOLS = [{"type": "function", "function": {
                    "properties": {"query": {"type": "string", "description": "search terms"}}}}}]
 
 
-def _ask_ollama(messages):
+def _wire_messages(messages):
+    """Remove client-only metadata before sending saved history to Ollama."""
+    return [{key: value for key, value in message.items() if not key.startswith("_")}
+            for message in messages]
+
+
+def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_tools=True):
+    body = {"model": MODEL, "messages": _wire_messages(messages), "stream": False,
+            "options": {"num_predict": num_predict}}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is not None:
+        body["think"] = think
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": False, "options": {"num_predict": NUM_PREDICT}})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
         sys.exit(f"Ollama returned {r.status_code}: {r.text[:200]}")
-    return r.json()["message"]
+    payload = r.json()
+    message = dict(payload["message"])
+    if payload.get("done_reason"):
+        message["_done_reason"] = payload["done_reason"]
+    return message
 
 
-def _ask_ollama_stream(messages, on_text, stop_event=None):
+def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDICT,
+                       think=None, allow_tools=True):
     """Stream one Ollama response while retaining tool-call compatibility."""
+    body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
+            "options": {"num_predict": num_predict}}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is not None:
+        body["think"] = think
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": True, "options": {"num_predict": NUM_PREDICT}})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
@@ -200,9 +229,14 @@ def _ask_ollama_stream(messages, on_text, stop_event=None):
             if content:
                 message["content"] += content
                 on_text(content)
+            thinking = chunk.get("thinking") or ""
+            if thinking:
+                message["thinking"] = message.get("thinking", "") + thinking
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
+                if event.get("done_reason"):
+                    message["_done_reason"] = event["done_reason"]
                 break
     finally:
         r.close()
@@ -309,27 +343,44 @@ def _to_openai(messages):
         calls = m.get("tool_calls")
         if calls:
             slot = 0
-            out.append({"role": "assistant", "content": m.get("content") or None,
-                        "tool_calls": [{"id": f"tc{i}", "type": "function",
-                                        "function": {"name": f["function"]["name"],
-                                                     "arguments": json.dumps(f["function"].get("arguments") or {})}}
-                                       for i, f in enumerate(calls)]})
+            translated = {"role": "assistant", "content": m.get("content") or None,
+                          "tool_calls": [{"id": f"tc{i}", "type": "function",
+                                          "function": {"name": f["function"]["name"],
+                                                       "arguments": json.dumps(f["function"].get("arguments") or {})}}
+                                         for i, f in enumerate(calls)]}
+            if m.get("reasoning_content"):
+                translated["reasoning_content"] = m["reasoning_content"]
+            out.append(translated)
         else:
-            out.append({"role": m["role"], "content": m.get("content") or ""})
+            translated = {"role": m["role"], "content": m.get("content") or ""}
+            if m.get("reasoning_content"):
+                translated["reasoning_content"] = m["reasoning_content"]
+            out.append(translated)
     return out
 
 
-def _ask_llama(messages):
+def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_tools=True):
+    body = {"messages": _to_openai(messages), "stream": False,
+            "max_tokens": num_predict}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is False:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+        body["reasoning_effort"] = "none"
     try:
         r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"messages": _to_openai(messages), "tools": TOOLS,
-                                "stream": False, "max_tokens": NUM_PREDICT})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit("llama-server is not running on 127.0.0.1:8080. Start it, then retry.")
     if not r.ok:
         sys.exit(f"llama-server returned {r.status_code}: {r.text[:200]}")
-    m = r.json()["choices"][0]["message"]
+    choice = r.json()["choices"][0]
+    m = choice["message"]
     msg = {"role": "assistant", "content": m.get("content") or ""}
+    if m.get("reasoning_content"):
+        msg["reasoning_content"] = m["reasoning_content"]
+    if choice.get("finish_reason"):
+        msg["_done_reason"] = choice["finish_reason"]
     calls = []
     for c in m.get("tool_calls") or []:
         args = c["function"].get("arguments")
@@ -344,6 +395,71 @@ def _ask_llama(messages):
     return msg
 
 
+def _limited(msg):
+    return str(msg.get("_done_reason") or "").lower() in ("length", "max_tokens")
+
+
+def _mark_incomplete(answer):
+    answer = (answer or "").strip()
+    return f"{answer}\n\n{INCOMPLETE_NOTE}" if answer else INCOMPLETE_NOTE
+
+
+def _checkpoint_reasoning(msg):
+    reasoning = msg.get("thinking") or msg.get("reasoning_content") or ""
+    if reasoning:
+        return reasoning
+    raw = msg.get("content") or ""
+    if "<think>" in raw and "</think>" not in raw:
+        return raw.split("<think>", 1)[1]
+    return ""
+
+
+def _compact_answer(messages, answer):
+    messages[-1] = {"role": "assistant", "content": answer}
+
+
+def _recover_answer(messages, first_answer, stop_event=None, on_text=None):
+    """Use the exhausted response once, then persist only a compact checkpoint."""
+    if stop_event is not None and stop_event.is_set():
+        return "(stopped)"
+    recovery_history = [*messages, {"role": "user", "content": FINALIZE_PROMPT}]
+    if BACKEND == "llama-server":
+        recovered = _ask_llama(recovery_history, num_predict=FINAL_NUM_PREDICT,
+                               think=False, allow_tools=False)
+    elif on_text is not None:
+        recovered = _ask_ollama_stream(
+            recovery_history, on_text, stop_event, num_predict=FINAL_NUM_PREDICT,
+            think=False, allow_tools=False)
+    else:
+        recovered = _ask_ollama(recovery_history, num_predict=FINAL_NUM_PREDICT,
+                                think=False, allow_tools=False)
+
+    if recovered.get("stopped"):
+        return "(stopped)"
+    answer = strip_thinking(recovered.get("content") or "")
+    if answer:
+        if _limited(recovered):
+            answer = _mark_incomplete(answer)
+        _compact_answer(messages, answer)
+        return answer
+
+    if first_answer:
+        answer = _mark_incomplete(first_answer)
+        _compact_answer(messages, answer)
+        return answer
+
+    answer = ("[Incomplete: both local generation passes ended before a final answer. "
+              "The unfinished state is saved; send 'continue' to resume.]")
+    first = messages[-1]
+    checkpoint = {"role": "assistant", "content": answer}
+    reasoning = _checkpoint_reasoning(first)
+    if reasoning:
+        key = "reasoning_content" if BACKEND == "llama-server" else "thinking"
+        checkpoint[key] = reasoning
+    messages[-1] = checkpoint
+    return answer
+
+
 def turn(messages, stop_event=None):
     """Run one user turn to completion, letting the model search as often as it needs."""
     for _ in range(6):                            # ponytail: hard cap, not a retry policy
@@ -354,9 +470,9 @@ def turn(messages, stop_event=None):
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
-            if not answer:
-                return ("(the model used its whole token budget thinking and never reached "
-                        f"an answer - raise NUM_PREDICT above {NUM_PREDICT} in this script)")
+            if not answer or _limited(msg):
+                return _recover_answer(messages, answer, stop_event)
+            _compact_answer(messages, answer)
             return answer
         for c in calls:
             if stop_event is not None and stop_event.is_set():
@@ -388,9 +504,10 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None):
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
-            return answer or ("(the model used its whole token budget thinking and never "
-                              f"reached an answer - raise NUM_PREDICT above {NUM_PREDICT} "
-                              "in this script)")
+            if not answer or _limited(msg):
+                return _recover_answer(messages, answer, stop_event, on_text)
+            _compact_answer(messages, answer)
+            return answer
         for c in calls:
             if stop_event is not None and stop_event.is_set():
                 return "(stopped)"
