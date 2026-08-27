@@ -113,12 +113,12 @@ jobs:
         run: |
           set -euo pipefail
           test -f "bundle/Onionmind.exe"
-          test -f "bundle/.onionmind-source-revision"
-          revision="$(tr -d '[:space:]' < bundle/.onionmind-source-revision)"
-          if [ "$revision" != "${{ github.sha }}" ]; then
-            echo "bundle revision $revision != ${{ github.sha }}" >&2
-            exit 1
-          fi
+          # upload-artifact drops dotfiles at the artifact root, so the bundle's
+          # revision marker never survives the trip between jobs. The Windows
+          # job already verified the built marker equals this sha; write it back
+          # before zipping so installed copies carry their update identity.
+          revision="${{ github.sha }}"
+          printf '%s\n' "$revision" > bundle/.onionmind-source-revision
           (cd bundle && zip -qr "../${BUNDLE_ASSET}" .)
           size="$(stat -c%s "${BUNDLE_ASSET}")"
           sha256="$(sha256sum "${BUNDLE_ASSET}" | cut -d' ' -f1)"
