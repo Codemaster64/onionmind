@@ -285,7 +285,15 @@ ENDPOINTS = ("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.o
 # Reasoning models spend the budget thinking BEFORE answering. A 9B needed 5514 tokens
 # to reach its first word; capped lower it returns an empty string, which reads as a
 # refusal but is just truncation.
-NUM_PREDICT = 8192
+NUM_PREDICT = 16384
+FINAL_NUM_PREDICT = 4096
+FINALIZE_PROMPT = (
+    "The previous response reached its generation limit. Using the work already present "
+    "above, answer the user's request now. Give the most useful concise best-effort answer, "
+    "include any partial result, and state what remains unfinished. Do not output analysis, "
+    "do not start over, and do not call tools."
+)
+INCOMPLETE_NOTE = "[Incomplete: generation limit reached. Continue to resume from this checkpoint.]"
 
 _port = None
 _bridge_port = None
@@ -410,26 +418,47 @@ TOOLS = [{"type": "function", "function": {
                    "properties": {"query": {"type": "string", "description": "search terms"}}}}}]
 
 
-def _ask_ollama(messages):
+def _wire_messages(messages):
+    """Remove client-only metadata before sending saved history to Ollama."""
+    return [{key: value for key, value in message.items() if not key.startswith("_")}
+            for message in messages]
+
+
+def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_tools=True):
+    body = {"model": MODEL, "messages": _wire_messages(messages), "stream": False,
+            "options": {"num_predict": num_predict}}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is not None:
+        body["think"] = think
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": False, "options": {"num_predict": NUM_PREDICT}})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
         sys.exit(f"Ollama returned {r.status_code}: {r.text[:200]}")
-    return r.json()["message"]
+    payload = r.json()
+    message = dict(payload["message"])
+    if payload.get("done_reason"):
+        message["_done_reason"] = payload["done_reason"]
+    return message
 
 
-def _ask_ollama_stream(messages, on_text, stop_event=None):
+def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDICT,
+                       think=None, allow_tools=True):
     """Stream one Ollama response while retaining tool-call compatibility."""
+    body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
+            "options": {"num_predict": num_predict}}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is not None:
+        body["think"] = think
     try:
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
-                          json={"model": MODEL, "messages": messages, "tools": TOOLS,
-                                "stream": True, "options": {"num_predict": NUM_PREDICT}})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
     if r.status_code == 404:
@@ -452,9 +481,14 @@ def _ask_ollama_stream(messages, on_text, stop_event=None):
             if content:
                 message["content"] += content
                 on_text(content)
+            thinking = chunk.get("thinking") or ""
+            if thinking:
+                message["thinking"] = message.get("thinking", "") + thinking
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
+                if event.get("done_reason"):
+                    message["_done_reason"] = event["done_reason"]
                 break
     finally:
         r.close()
@@ -561,27 +595,44 @@ def _to_openai(messages):
         calls = m.get("tool_calls")
         if calls:
             slot = 0
-            out.append({"role": "assistant", "content": m.get("content") or None,
-                        "tool_calls": [{"id": f"tc{i}", "type": "function",
-                                        "function": {"name": f["function"]["name"],
-                                                     "arguments": json.dumps(f["function"].get("arguments") or {})}}
-                                       for i, f in enumerate(calls)]})
+            translated = {"role": "assistant", "content": m.get("content") or None,
+                          "tool_calls": [{"id": f"tc{i}", "type": "function",
+                                          "function": {"name": f["function"]["name"],
+                                                       "arguments": json.dumps(f["function"].get("arguments") or {})}}
+                                         for i, f in enumerate(calls)]}
+            if m.get("reasoning_content"):
+                translated["reasoning_content"] = m["reasoning_content"]
+            out.append(translated)
         else:
-            out.append({"role": m["role"], "content": m.get("content") or ""})
+            translated = {"role": m["role"], "content": m.get("content") or ""}
+            if m.get("reasoning_content"):
+                translated["reasoning_content"] = m["reasoning_content"]
+            out.append(translated)
     return out
 
 
-def _ask_llama(messages):
+def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_tools=True):
+    body = {"messages": _to_openai(messages), "stream": False,
+            "max_tokens": num_predict}
+    if allow_tools:
+        body["tools"] = TOOLS
+    if think is False:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+        body["reasoning_effort"] = "none"
     try:
         r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800,
-                          json={"messages": _to_openai(messages), "tools": TOOLS,
-                                "stream": False, "max_tokens": NUM_PREDICT})
+                          json=body)
     except requests.exceptions.ConnectionError:
         sys.exit("llama-server is not running on 127.0.0.1:8080. Start it, then retry.")
     if not r.ok:
         sys.exit(f"llama-server returned {r.status_code}: {r.text[:200]}")
-    m = r.json()["choices"][0]["message"]
+    choice = r.json()["choices"][0]
+    m = choice["message"]
     msg = {"role": "assistant", "content": m.get("content") or ""}
+    if m.get("reasoning_content"):
+        msg["reasoning_content"] = m["reasoning_content"]
+    if choice.get("finish_reason"):
+        msg["_done_reason"] = choice["finish_reason"]
     calls = []
     for c in m.get("tool_calls") or []:
         args = c["function"].get("arguments")
@@ -596,6 +647,71 @@ def _ask_llama(messages):
     return msg
 
 
+def _limited(msg):
+    return str(msg.get("_done_reason") or "").lower() in ("length", "max_tokens")
+
+
+def _mark_incomplete(answer):
+    answer = (answer or "").strip()
+    return f"{answer}\n\n{INCOMPLETE_NOTE}" if answer else INCOMPLETE_NOTE
+
+
+def _checkpoint_reasoning(msg):
+    reasoning = msg.get("thinking") or msg.get("reasoning_content") or ""
+    if reasoning:
+        return reasoning
+    raw = msg.get("content") or ""
+    if "<think>" in raw and "</think>" not in raw:
+        return raw.split("<think>", 1)[1]
+    return ""
+
+
+def _compact_answer(messages, answer):
+    messages[-1] = {"role": "assistant", "content": answer}
+
+
+def _recover_answer(messages, first_answer, stop_event=None, on_text=None):
+    """Use the exhausted response once, then persist only a compact checkpoint."""
+    if stop_event is not None and stop_event.is_set():
+        return "(stopped)"
+    recovery_history = [*messages, {"role": "user", "content": FINALIZE_PROMPT}]
+    if BACKEND == "llama-server":
+        recovered = _ask_llama(recovery_history, num_predict=FINAL_NUM_PREDICT,
+                               think=False, allow_tools=False)
+    elif on_text is not None:
+        recovered = _ask_ollama_stream(
+            recovery_history, on_text, stop_event, num_predict=FINAL_NUM_PREDICT,
+            think=False, allow_tools=False)
+    else:
+        recovered = _ask_ollama(recovery_history, num_predict=FINAL_NUM_PREDICT,
+                                think=False, allow_tools=False)
+
+    if recovered.get("stopped"):
+        return "(stopped)"
+    answer = strip_thinking(recovered.get("content") or "")
+    if answer:
+        if _limited(recovered):
+            answer = _mark_incomplete(answer)
+        _compact_answer(messages, answer)
+        return answer
+
+    if first_answer:
+        answer = _mark_incomplete(first_answer)
+        _compact_answer(messages, answer)
+        return answer
+
+    answer = ("[Incomplete: both local generation passes ended before a final answer. "
+              "The unfinished state is saved; send 'continue' to resume.]")
+    first = messages[-1]
+    checkpoint = {"role": "assistant", "content": answer}
+    reasoning = _checkpoint_reasoning(first)
+    if reasoning:
+        key = "reasoning_content" if BACKEND == "llama-server" else "thinking"
+        checkpoint[key] = reasoning
+    messages[-1] = checkpoint
+    return answer
+
+
 def turn(messages, stop_event=None):
     """Run one user turn to completion, letting the model search as often as it needs."""
     for _ in range(6):                            # ponytail: hard cap, not a retry policy
@@ -606,9 +722,9 @@ def turn(messages, stop_event=None):
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
-            if not answer:
-                return ("(the model used its whole token budget thinking and never reached "
-                        f"an answer - raise NUM_PREDICT above {NUM_PREDICT} in this script)")
+            if not answer or _limited(msg):
+                return _recover_answer(messages, answer, stop_event)
+            _compact_answer(messages, answer)
             return answer
         for c in calls:
             if stop_event is not None and stop_event.is_set():
@@ -640,9 +756,10 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None):
         calls = msg.get("tool_calls")
         if not calls:
             answer = strip_thinking(msg.get("content") or "")
-            return answer or ("(the model used its whole token budget thinking and never "
-                              f"reached an answer - raise NUM_PREDICT above {NUM_PREDICT} "
-                              "in this script)")
+            if not answer or _limited(msg):
+                return _recover_answer(messages, answer, stop_event, on_text)
+            _compact_answer(messages, answer)
+            return answer
         for c in calls:
             if stop_event is not None and stop_event.is_set():
                 return "(stopped)"
@@ -2200,6 +2317,19 @@ class SessionStore:
             pass
         return session
 
+    def delete(self, session_id: str) -> bool:
+        """Permanently remove every stored copy of a session from this machine."""
+
+        deleted = False
+        for archived in (False, True):
+            path = self._path(session_id, archived=archived)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            deleted = True
+        return deleted
+
 
 @dataclass(frozen=True)
 class WorkspaceChange:
@@ -3398,6 +3528,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -3486,6 +3617,11 @@ QToolButton#bareButton:disabled { background: transparent; border-color: transpa
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: #262421; border: 1px solid #4a453f; selection-background-color: #46384b; selection-color: #f5efe7; outline: 0; }
+QMenu { background: #24221f; border: 1px solid #4a453f; padding: 4px; }
+QMenu::item { border-radius: 3px; padding: 6px 26px 6px 9px; }
+QMenu::item:selected { background: #3a3040; color: #f5edf8; }
+QMenu::item:disabled { color: #746e67; }
+QMenu::separator { height: 1px; background: #403c36; margin: 4px 7px; }
 QListWidget, QTreeWidget {
     background: transparent;
     border: none;
@@ -3550,6 +3686,28 @@ def _now_iso() -> str:
 
 def _as_text(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _path_key(value: Any) -> str:
+    """Return a stable comparison key without requiring the path to still exist."""
+
+    text = _as_text(value).strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(text))))
+
+
+def _path_is_within(value: Any, directory: Any) -> bool:
+    """Return whether value is the directory itself or one of its descendants."""
+
+    path = _path_key(value)
+    parent = _path_key(directory)
+    if not path or not parent:
+        return False
+    try:
+        return os.path.commonpath((path, parent)) == parent
+    except ValueError:  # Different drives on Windows.
+        return False
 
 
 _BRAND_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -4166,6 +4324,32 @@ class SessionBridge:
             self.fallback.setValue("archived_sessions", json.dumps(archive_items[:80]))
         return archived
 
+    def delete(self, session_id: str) -> bool:
+        """Permanently remove a session instead of moving it to local archive storage."""
+
+        if self.store is not None:
+            deleter = getattr(self.store, "delete", None)
+            if not callable(deleter):
+                return False
+            try:
+                return bool(deleter(session_id))
+            except Exception:
+                return False
+
+        deleted = False
+        for key in ("sessions", "archived_sessions"):
+            try:
+                items = list(json.loads(self.fallback.value(key, "[]")))
+            except (TypeError, ValueError):
+                items = []
+            remaining = [
+                item for item in items if _as_text(_field(item, "id")) != session_id
+            ]
+            if len(remaining) != len(items):
+                deleted = True
+                self.fallback.setValue(key, json.dumps(remaining[:80]))
+        return deleted
+
 
 class SettingsBridge:
     def __init__(self, desktop_core: Any, root: Path) -> None:
@@ -4517,13 +4701,17 @@ class UpdateBridge:
 
 class LeftRail(QWidget):
     newTaskRequested = Signal()
+    addSessionRequested = Signal()
     openFolderRequested = Signal()
     sessionSelected = Signal(str)
     projectSelected = Signal(str)
+    removeProjectRequested = Signal(str)
+    deleteProjectRequested = Signal(str)
     modelsRequested = Signal()
     settingsRequested = Signal()
     exportRequested = Signal()
     archiveRequested = Signal(str)
+    deleteSessionRequested = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -4562,9 +4750,35 @@ class LeftRail(QWidget):
         add_project.setAccessibleName("Open another project")
         add_project.clicked.connect(self.openFolderRequested)
         self.add_project_button = add_project
+        remove_project = QToolButton()
+        remove_project.setObjectName("bareButton")
+        remove_project.setIcon(_icon("close"))
+        remove_project.setToolTip(
+            "Remove selected project from this list; its folder stays on this machine"
+        )
+        remove_project.setAccessibleName(
+            "Remove selected project from Projects and keep its folder"
+        )
+        remove_project.clicked.connect(self._remove_selected_project)
+        remove_project.setEnabled(False)
+        self.remove_project_button = remove_project
+        delete_project = QToolButton()
+        delete_project.setObjectName("bareButton")
+        delete_project.setIcon(_icon("clear"))
+        delete_project.setToolTip(
+            "Permanently delete the selected project folder from this machine"
+        )
+        delete_project.setAccessibleName(
+            "Permanently delete selected project folder from this machine"
+        )
+        delete_project.clicked.connect(self._delete_selected_project)
+        delete_project.setEnabled(False)
+        self.delete_project_button = delete_project
         project_header.addWidget(project_label)
         project_header.addStretch(1)
         project_header.addWidget(add_project)
+        project_header.addWidget(remove_project)
+        project_header.addWidget(delete_project)
         layout.addLayout(project_header)
 
         self.projects = QListWidget()
@@ -4573,6 +4787,28 @@ class LeftRail(QWidget):
         self.projects.itemClicked.connect(
             lambda item: self.projectSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
+        self.projects.itemActivated.connect(
+            lambda item: self.projectSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
+        )
+        self.projects.currentItemChanged.connect(self._project_current_changed)
+        self.projects.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.projects.customContextMenuRequested.connect(self._show_project_menu)
+        self.project_menu = QMenu(self)
+        self.project_add_action = self.project_menu.addAction(
+            _icon("folder_plus"), "Add project…"
+        )
+        self.project_add_action.triggered.connect(self.openFolderRequested)
+        self.project_menu.addSeparator()
+        self.project_remove_action = self.project_menu.addAction(
+            _icon("close"), "Remove from Projects (keep folder)"
+        )
+        self.project_remove_action.triggered.connect(self._remove_selected_project)
+        self.project_remove_action.setEnabled(False)
+        self.project_delete_action = self.project_menu.addAction(
+            _icon("clear"), "Delete folder from machine…"
+        )
+        self.project_delete_action.triggered.connect(self._delete_selected_project)
+        self.project_delete_action.setEnabled(False)
         layout.addWidget(self.projects)
 
         divider = QFrame()
@@ -4582,26 +4818,70 @@ class LeftRail(QWidget):
         session_header = QHBoxLayout()
         session_label = QLabel("SESSIONS")
         session_label.setObjectName("sectionTitle")
+        add_session = QToolButton()
+        add_session.setObjectName("bareButton")
+        add_session.setIcon(_icon("new_task"))
+        add_session.setToolTip("Add a saved session")
+        add_session.setAccessibleName("Add saved session")
+        add_session.clicked.connect(self.addSessionRequested)
+        self.add_session_button = add_session
         archive = QToolButton()
         archive.setObjectName("bareButton")
         archive.setIcon(_icon("archive"))
-        archive.setToolTip("Archive selected session")
-        archive.setAccessibleName("Archive selected session")
+        archive.setToolTip(
+            "Remove selected session from this list; keep it in local archive storage"
+        )
+        archive.setAccessibleName(
+            "Remove selected session from Sessions and keep an archived copy"
+        )
         archive.clicked.connect(self._archive_selected)
         archive.setEnabled(False)
         self.archive_button = archive
+        delete_session = QToolButton()
+        delete_session.setObjectName("bareButton")
+        delete_session.setIcon(_icon("clear"))
+        delete_session.setToolTip(
+            "Permanently delete the selected session from this machine"
+        )
+        delete_session.setAccessibleName(
+            "Permanently delete selected session from this machine"
+        )
+        delete_session.clicked.connect(self._delete_selected_session)
+        delete_session.setEnabled(False)
+        self.delete_session_button = delete_session
         session_header.addWidget(session_label)
         session_header.addStretch(1)
+        session_header.addWidget(add_session)
         session_header.addWidget(archive)
+        session_header.addWidget(delete_session)
         layout.addLayout(session_header)
         self.sessions = QListWidget()
         self.sessions.setAccessibleName("Saved sessions")
         self.sessions.itemClicked.connect(
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
-        self.sessions.currentItemChanged.connect(
-            lambda current, previous: self.archive_button.setEnabled(current is not None)
+        self.sessions.itemActivated.connect(
+            lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
+        self.sessions.currentItemChanged.connect(self._session_current_changed)
+        self.sessions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sessions.customContextMenuRequested.connect(self._show_session_menu)
+        self.session_menu = QMenu(self)
+        self.session_add_action = self.session_menu.addAction(
+            _icon("new_task"), "Add session"
+        )
+        self.session_add_action.triggered.connect(self.addSessionRequested)
+        self.session_menu.addSeparator()
+        self.session_remove_action = self.session_menu.addAction(
+            _icon("archive"), "Remove from Sessions (keep archived copy)"
+        )
+        self.session_remove_action.triggered.connect(self._archive_selected)
+        self.session_remove_action.setEnabled(False)
+        self.session_delete_action = self.session_menu.addAction(
+            _icon("clear"), "Delete session from machine…"
+        )
+        self.session_delete_action.triggered.connect(self._delete_selected_session)
+        self.session_delete_action.setEnabled(False)
         layout.addWidget(self.sessions, 1)
 
         export = QPushButton("Export conversation")
@@ -4633,16 +4913,69 @@ class LeftRail(QWidget):
         if item is not None:
             self.archiveRequested.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
 
+    def _delete_selected_session(self) -> None:
+        item = self.sessions.currentItem()
+        if item is not None:
+            self.deleteSessionRequested.emit(
+                _as_text(item.data(Qt.ItemDataRole.UserRole))
+            )
+
+    def _remove_selected_project(self) -> None:
+        item = self.projects.currentItem()
+        if item is not None:
+            self.removeProjectRequested.emit(
+                _as_text(item.data(Qt.ItemDataRole.UserRole))
+            )
+
+    def _delete_selected_project(self) -> None:
+        item = self.projects.currentItem()
+        if item is not None:
+            self.deleteProjectRequested.emit(
+                _as_text(item.data(Qt.ItemDataRole.UserRole))
+            )
+
+    def _project_current_changed(
+        self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]
+    ) -> None:
+        del previous
+        available = current is not None
+        self.remove_project_button.setEnabled(available)
+        self.delete_project_button.setEnabled(available)
+        self.project_remove_action.setEnabled(available)
+        self.project_delete_action.setEnabled(available)
+
+    def _session_current_changed(
+        self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]
+    ) -> None:
+        del previous
+        available = current is not None
+        self.archive_button.setEnabled(available)
+        self.delete_session_button.setEnabled(available)
+        self.session_remove_action.setEnabled(available)
+        self.session_delete_action.setEnabled(available)
+
+    def _show_project_menu(self, position: Any) -> None:
+        item = self.projects.itemAt(position)
+        if item is not None:
+            self.projects.setCurrentItem(item)
+        self.project_menu.popup(self.projects.viewport().mapToGlobal(position))
+
+    def _show_session_menu(self, position: Any) -> None:
+        item = self.sessions.itemAt(position)
+        if item is not None:
+            self.sessions.setCurrentItem(item)
+        self.session_menu.popup(self.sessions.viewport().mapToGlobal(position))
+
     def set_conversation_available(self, available: bool) -> None:
         self.export_button.setEnabled(bool(available))
 
     def add_project(self, path: str, select: bool = True) -> None:
         if not path:
             return
-        normalized = os.path.normcase(os.path.abspath(path))
+        normalized = _path_key(path)
         for index in range(self.projects.count()):
             item = self.projects.item(index)
-            if os.path.normcase(_as_text(item.data(Qt.ItemDataRole.UserRole))) == normalized:
+            if _path_key(item.data(Qt.ItemDataRole.UserRole)) == normalized:
                 if select:
                     self.projects.setCurrentItem(item)
                 return
@@ -4654,6 +4987,22 @@ class LeftRail(QWidget):
         self.projects.insertItem(0, item)
         if select:
             self.projects.setCurrentItem(item)
+
+    def remove_project(self, path: str) -> bool:
+        normalized = _path_key(path)
+        for index in range(self.projects.count()):
+            item = self.projects.item(index)
+            item_path = _as_text(item.data(Qt.ItemDataRole.UserRole))
+            if _path_key(item_path) == normalized:
+                self.projects.takeItem(index)
+                self.projects.clearSelection()
+                self.projects.setCurrentRow(-1)
+                return True
+        return False
+
+    def clear_session_selection(self) -> None:
+        self.sessions.clearSelection()
+        self.sessions.setCurrentRow(-1)
 
     def set_sessions(self, sessions: Iterable[Any], current_id: Optional[str] = None) -> None:
         self.sessions.clear()
@@ -5416,6 +5765,7 @@ class OnionmindWindow(QMainWindow):
         self.harness_process: Optional[QProcess] = None
         self.harness_output = ""
         self.harness_generation = 0
+        self._project_delete_pending: Optional[str] = None
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -5549,13 +5899,17 @@ class OnionmindWindow(QMainWindow):
         self.main_splitter.setHandleWidth(1)
         self.left_rail = LeftRail()
         self.left_rail.newTaskRequested.connect(self.new_task)
+        self.left_rail.addSessionRequested.connect(self.add_session)
         self.left_rail.openFolderRequested.connect(self.open_folder)
         self.left_rail.projectSelected.connect(self.select_workspace)
+        self.left_rail.removeProjectRequested.connect(self.remove_project_from_menu)
+        self.left_rail.deleteProjectRequested.connect(self.delete_project_from_machine)
         self.left_rail.sessionSelected.connect(self.load_session)
         self.left_rail.modelsRequested.connect(self.open_model_manager)
         self.left_rail.settingsRequested.connect(self.open_settings)
         self.left_rail.exportRequested.connect(self.export_conversation)
         self.left_rail.archiveRequested.connect(self.archive_session)
+        self.left_rail.deleteSessionRequested.connect(self.delete_session_from_machine)
         self.main_splitter.addWidget(self.left_rail)
 
         center = QWidget()
@@ -6102,6 +6456,191 @@ class OnionmindWindow(QMainWindow):
         self.attachment_row.show()
         self._sync_action_states()
 
+    def _confirm_permanent_deletion(
+        self,
+        *,
+        title: str,
+        text: str,
+        detail: str,
+        confirm_label: str,
+    ) -> bool:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle(title)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(text)
+        dialog.setInformativeText(detail)
+        confirm = dialog.addButton(
+            confirm_label, QMessageBox.ButtonRole.DestructiveRole
+        )
+        confirm.setAccessibleName(confirm_label)
+        cancel = dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(cancel)
+        dialog.setEscapeButton(cancel)
+        dialog.exec()
+        return dialog.clickedButton() is confirm
+
+    def _validated_project_delete_target(self, path: str) -> Path:
+        candidate = Path(path).expanduser()
+        is_junction = getattr(candidate, "is_junction", None)
+        if candidate.is_symlink() or (callable(is_junction) and is_junction()):
+            raise ValueError(
+                "Linked project folders cannot be deleted here. Remove the project "
+                "from the list, then manage the link in your file manager."
+            )
+        if not candidate.exists():
+            raise ValueError("The project folder no longer exists on this machine.")
+        if not candidate.is_dir():
+            raise ValueError("The selected project path is not a folder.")
+
+        target = candidate.resolve(strict=True)
+        if target.parent == target or target.is_mount():
+            raise ValueError("A drive or filesystem root cannot be deleted as a project.")
+
+        home = Path.home().resolve()
+        if target == home or target in home.parents:
+            raise ValueError("Your home folder or one of its parents cannot be deleted here.")
+
+        for protected, label in (
+            (self.data_root.resolve(), "Onionmind's local data"),
+            (MODULE_DIR.resolve(), "the running Onionmind application"),
+        ):
+            if (
+                target == protected
+                or target in protected.parents
+                or protected in target.parents
+            ):
+                raise ValueError(f"This folder overlaps {label} and cannot be deleted here.")
+        return target
+
+    def _forget_project_reference(self, path: str) -> bool:
+        target_key = _path_key(path)
+        recent = [
+            _as_text(item)
+            for item in self.settings_data.get("recent_projects", [])
+            if _as_text(item)
+        ]
+        remaining = [item for item in recent if _path_key(item) != target_key]
+        removed = self.left_rail.remove_project(path) or len(remaining) != len(recent)
+        self.settings_data["recent_projects"] = remaining
+        if _path_key(self.settings_data.get("workspace")) == target_key:
+            self.settings_data["workspace"] = ""
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        return removed
+
+    def remove_project_from_menu(self, path: str) -> None:
+        if not path:
+            self.set_status("Select a project to remove from the list.")
+            return
+        if self._project_delete_pending == _path_key(path):
+            self.set_status("That project folder is already being deleted.")
+            return
+        if not self._forget_project_reference(path):
+            self.set_status("That project is no longer in the Projects list.")
+            return
+        name = Path(path).name or path
+        still_open = _path_key(self.workspace) == _path_key(path)
+        suffix = " It remains open." if still_open else ""
+        self.set_status(
+            f"Removed {name} from Projects; its folder remains on this machine.{suffix}"
+        )
+        self.inspector.append_activity(
+            f"Project removed from the list; folder kept: {name}"
+        )
+
+    def delete_project_from_machine(self, path: str) -> None:
+        if self.active_kind:
+            self.set_status("Stop the active run before deleting a project folder.")
+            return
+        if self._project_delete_pending is not None:
+            self.set_status("Wait for the current project deletion to finish.")
+            return
+        if not path:
+            self.set_status("Select a project folder to delete.")
+            return
+        if (
+            _path_is_within(self.workspace, path)
+            and self.terminal.process.state() != QProcess.ProcessState.NotRunning
+        ):
+            self.set_status(
+                "Stop the terminal command before deleting its project folder."
+            )
+            return
+        try:
+            target = self._validated_project_delete_target(path)
+        except (OSError, ValueError) as exc:
+            message = _as_text(exc)
+            self.set_status(message)
+            QMessageBox.warning(self, "Project folder not deleted", message)
+            return
+
+        name = target.name or str(target)
+        if not self._confirm_permanent_deletion(
+            title="Delete project folder from machine",
+            text=f"Permanently delete “{name}” and everything inside it?",
+            detail=(
+                "This removes the folder from this machine and cannot be undone.\n\n"
+                f"{target}"
+            ),
+            confirm_label="Delete folder",
+        ):
+            return
+
+        expected = target
+        self._project_delete_pending = _path_key(expected)
+        self.set_status(f"Deleting project folder from this machine: {name}…")
+
+        def delete_job(signals: WorkerSignals) -> str:
+            del signals
+            checked = self._validated_project_delete_target(str(expected))
+            if _path_key(checked) != _path_key(expected):
+                raise RuntimeError(
+                    "The project path changed before deletion, so Onionmind stopped safely."
+                )
+            shutil.rmtree(checked)
+            return str(checked)
+
+        def setup(worker: SafeWorker) -> None:
+            worker.signals.result.connect(self._project_delete_complete)
+            worker.signals.error.connect(
+                lambda message: self._project_delete_failed(str(expected), message)
+            )
+
+        self._start_worker(delete_job, setup)
+
+    def _project_delete_complete(self, path: Any) -> None:
+        deleted_path = _as_text(path)
+        self._project_delete_pending = None
+        was_open = _path_is_within(self.workspace, deleted_path)
+        self._forget_project_reference(deleted_path)
+        if was_open:
+            self.workspace = None
+            self.current_snapshot = {}
+            self.repo_label.setText("No project")
+            self.repo_label.setToolTip("")
+            self.branch_label.setText("Open a folder")
+            self.scope_status.setText("No project selected")
+            self.terminal.set_workspace(str(Path.home()))
+            self.inspector.update_snapshot({})
+        name = Path(deleted_path).name or deleted_path
+        self.set_status(f"Deleted project folder from this machine: {name}")
+        self.inspector.append_activity(
+            f"Project folder permanently deleted from this machine: {name}"
+        )
+
+    def _project_delete_failed(self, path: str, message: str) -> None:
+        self._project_delete_pending = None
+        name = Path(path).name or path
+        text = f"Could not delete {name}: {message}"
+        self.set_status(text)
+        self.inspector.append_activity(text)
+        QMessageBox.warning(
+            self,
+            "Project folder not deleted",
+            text + "\n\nClose programs using the folder, check permissions, then try again.",
+        )
+
     def open_folder(self) -> None:
         if self.active_kind:
             self.set_status("Stop the active run before changing projects.")
@@ -6125,7 +6664,7 @@ class OnionmindWindow(QMainWindow):
         self.scope_status.setText(self.workspace)
         self.terminal.set_workspace(self.workspace)
         recent = [_as_text(p) for p in self.settings_data.get("recent_projects", [])]
-        recent = [p for p in recent if os.path.normcase(p) != os.path.normcase(self.workspace)]
+        recent = [p for p in recent if _path_key(p) != _path_key(self.workspace)]
         recent.insert(0, self.workspace)
         self.settings_data.update(workspace=self.workspace, recent_projects=recent[:10])
         if not self.demo:
@@ -6148,7 +6687,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.error.connect(lambda message: self._workspace_failed(message))
 
     def _workspace_ready(self, snapshot: dict[str, Any]) -> None:
-        if self.workspace and os.path.normcase(_as_text(snapshot.get("root"))) != os.path.normcase(self.workspace):
+        if not self.workspace or _path_key(snapshot.get("root")) != _path_key(self.workspace):
             return
         self.current_snapshot = snapshot
         branch = snapshot.get("branch") or ("No repository" if not snapshot.get("is_git") else "detached HEAD")
@@ -6182,9 +6721,47 @@ class OnionmindWindow(QMainWindow):
         )
         self.composer.clear()
         self.clear_attachments()
-        self.left_rail.sessions.clearSelection()
+        self.left_rail.clear_session_selection()
         self.set_status("New task ready")
         self.focus_composer()
+
+    def add_session(self) -> None:
+        if self.active_kind:
+            self.set_status("Stop the active run before adding a session.")
+            return
+        if not self.save_current_session():
+            self.set_status(
+                "A new session was not added because the current history could not be saved."
+            )
+            return
+        self.new_task(save_current=False)
+        try:
+            model = self.current_model_id()
+            session = self.session_bridge.create(
+                "New session", model, self.workspace, ()
+            )
+            session = self.session_bridge.save(
+                session,
+                title="New session",
+                model=model,
+                workspace=self.workspace,
+                messages=[],
+            )
+        except Exception as exc:
+            message = f"Could not add a saved session: {exc}"
+            self.set_status(message)
+            self.inspector.append_activity(message)
+            return
+        self.current_session = session
+        session_id = _as_text(_field(session, "id"))
+        self.session_objects[session_id] = session
+        sessions = self.session_bridge.list()
+        self.session_objects = {
+            _as_text(_field(item, "id")): item for item in sessions
+        }
+        self.left_rail.set_sessions(sessions, session_id)
+        self.set_status("Added saved session")
+        self.inspector.append_activity("Saved session added locally")
 
     def _session_title(self) -> str:
         first = next((_as_text(m.get("content")) for m in self.chat_messages if m.get("role") == "user"), "New session")
@@ -6220,17 +6797,17 @@ class OnionmindWindow(QMainWindow):
 
     def archive_session(self, session_id: str) -> None:
         if self.active_kind:
-            self.set_status("Stop the active run before archiving a session.")
+            self.set_status("Stop the active run before removing a session.")
             return
         if not session_id:
-            self.set_status("Select a saved session to archive.")
+            self.set_status("Select a saved session to remove from the list.")
             return
         session = self.session_objects.get(session_id)
         title = _as_text(_field(session, "title", "this session"))
         answer = QMessageBox.question(
             self,
-            "Archive local session",
-            f"Archive “{title}”? It will leave the active session list but remain in local archive storage.",
+            "Remove session from Sessions",
+            f"Remove “{title}” from Sessions? It will remain on this machine in local archive storage.",
             QMessageBox.StandardButton.Archive if hasattr(QMessageBox.StandardButton, "Archive") else QMessageBox.StandardButton.Yes,
             QMessageBox.StandardButton.Cancel,
         )
@@ -6242,7 +6819,7 @@ class OnionmindWindow(QMainWindow):
             return
         archived = self.session_bridge.archive(session_id)
         if archived is None:
-            self.set_status("The selected session could not be archived.")
+            self.set_status("The selected session could not be removed from the list.")
             return
         self.session_objects.pop(session_id, None)
         if self.current_session is not None and _as_text(_field(self.current_session, "id")) == session_id:
@@ -6250,8 +6827,70 @@ class OnionmindWindow(QMainWindow):
         sessions = self.session_bridge.list()
         self.session_objects = {_as_text(_field(item, "id")): item for item in sessions}
         self.left_rail.set_sessions(sessions, _as_text(_field(self.current_session, "id")) if self.current_session else None)
-        self.set_status(f"Archived session: {title}")
-        self.inspector.append_activity(f"Session archived locally: {title}")
+        self.set_status(f"Removed session from Sessions: {title}")
+        self.inspector.append_activity(
+            f"Session removed from the list and kept in local archive storage: {title}"
+        )
+
+    def delete_session_from_machine(self, session_id: str) -> None:
+        if self.active_kind:
+            self.set_status("Stop the active run before deleting a session.")
+            return
+        if not session_id:
+            self.set_status("Select a saved session to delete from this machine.")
+            return
+        session = self.session_objects.get(session_id)
+        if session is None:
+            session = next(
+                (
+                    item
+                    for item in self.session_bridge.list()
+                    if _as_text(_field(item, "id")) == session_id
+                ),
+                None,
+            )
+        if session is None:
+            self.set_status("That saved session is no longer available.")
+            self.left_rail.set_sessions(self.session_bridge.list())
+            return
+        title = _as_text(_field(session, "title", "this session"))
+        if not self._confirm_permanent_deletion(
+            title="Delete session from machine",
+            text=f"Permanently delete “{title}”?",
+            detail=(
+                "This removes the session history from this machine and cannot be undone."
+            ),
+            confirm_label="Delete session",
+        ):
+            return
+        if not self.session_bridge.delete(session_id):
+            self.set_status("The selected session could not be deleted from this machine.")
+            QMessageBox.warning(
+                self,
+                "Session not deleted",
+                "Onionmind could not remove the local session file. Check local storage permissions, then try again.",
+            )
+            return
+        self.session_objects.pop(session_id, None)
+        if (
+            self.current_session is not None
+            and _as_text(_field(self.current_session, "id")) == session_id
+        ):
+            self.new_task(save_current=False)
+        sessions = self.session_bridge.list()
+        self.session_objects = {
+            _as_text(_field(item, "id")): item for item in sessions
+        }
+        current_id = (
+            _as_text(_field(self.current_session, "id"))
+            if self.current_session
+            else None
+        )
+        self.left_rail.set_sessions(sessions, current_id)
+        self.set_status(f"Deleted session from this machine: {title}")
+        self.inspector.append_activity(
+            f"Session permanently deleted from this machine: {title}"
+        )
 
     def export_conversation(self) -> None:
         if not self.chat_messages:
