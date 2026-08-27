@@ -58,6 +58,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -208,6 +209,10 @@ QSplitter::handle { background: #37342f; }
 QSplitter::handle:hover { background: #71557c; }
 QStatusBar { background: #151412; border-top: 1px solid #35322d; color: #9f988f; }
 QStatusBar::item { border: none; }
+QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #b7b0a7; padding: 2px 8px; }
+QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
+QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
+QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
@@ -1136,6 +1141,107 @@ class HarnessBridge:
         return launcher, cwd
 
 
+class UpdateBridge:
+    """Tor-only self-update for the installed standalone bundle.
+
+    Source installs and development checkouts have no bundle to swap, so the
+    bridge reports itself unavailable there and the UI says so instead of
+    half-offering an update. Every network call goes through the verified Tor
+    port with a fresh isolated circuit, exactly like Chat search: a failed
+    check never falls back to a direct request.
+    """
+
+    def __init__(self, core: Any, desktop_core: Any) -> None:
+        self.core = core
+        self.desktop_core = desktop_core
+        # Nuitka puts __compiled__ into each compiled module's globals (and
+        # sets sys.frozen in standalone); a plain `python onionmind_desktop.py`
+        # checkout has neither.
+        frozen = "__compiled__" in globals() or bool(getattr(sys, "frozen", False))
+        candidate = Path(sys.executable).resolve().parent if frozen else None
+        if candidate is not None and not (candidate / "Onionmind.exe").is_file():
+            candidate = None
+        self.install_dir: Optional[Path] = candidate
+        self.work_dir: Optional[Path] = (
+            self.install_dir.parent / "onionmind-update" if self.install_dir else None
+        )
+
+    @property
+    def available(self) -> bool:
+        return self.desktop_core is not None and self.install_dir is not None
+
+    def revision(self) -> Optional[str]:
+        reader = getattr(self.desktop_core, "installed_revision", None)
+        if not self.available or not callable(reader):
+            return None
+        return reader(self.install_dir)
+
+    def revision_label(self) -> str:
+        revision = self.revision()
+        if revision is None:
+            return "development copy" if not self.available else "unknown revision"
+        helper = getattr(self.desktop_core, "short_revision", None)
+        return f"revision {helper(revision) if callable(helper) else revision[:7]}"
+
+    def _updater(self) -> Any:
+        factory = getattr(self.core, "_proxies", None)
+        if not callable(factory):
+            raise RuntimeError("This Onionmind build cannot build Tor proxy settings.")
+        user_agent = _as_text(getattr(self.core, "UA", "")) or (
+            "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
+        )
+        return self.desktop_core.BundleUpdater(
+            self.install_dir,
+            self.work_dir,
+            lambda port: factory(port, True),   # fresh credentials => fresh circuit
+            user_agent,
+        )
+
+    def tor_port(self) -> Optional[int]:
+        port = getattr(self.core, "_port", None)
+        return int(port) if port else None
+
+    def check(self) -> Any:
+        """Fetch and validate the feed manifest. Worker thread body."""
+
+        port = self.tor_port()
+        if port is None:
+            raise RuntimeError("No verified Tor proxy this session; refusing a direct update check.")
+        return self._updater().fetch_manifest(port)
+
+    def download(
+        self,
+        manifest: Any,
+        progress: Callable[[Optional[float], str], None],
+        stop_event: Any,
+    ) -> Path:
+        """Download, verify, and stage the new bundle. Worker thread body."""
+
+        port = self.tor_port()
+        if port is None:
+            raise RuntimeError("No verified Tor proxy this session; refusing a direct download.")
+        updater = self._updater()
+        archive = updater.download(port, manifest, progress=progress, stop_event=stop_event)
+        return updater.stage(manifest, archive)
+
+    def pending(self) -> Optional[Path]:
+        finder = getattr(self.desktop_core, "pending_staging_dir", None)
+        if not self.available or not callable(finder):
+            return None
+        return finder(self.work_dir)
+
+    def housekeep(self) -> None:
+        pruner = getattr(self.desktop_core, "prune_update_workdir", None)
+        if self.available and callable(pruner):
+            try:
+                pruner(self.work_dir, running_revision=self.revision())
+            except OSError:
+                pass
+
+    def apply_command(self, staging_dir: str) -> list[str]:
+        return self._updater().apply_command(staging_dir)
+
+
 class LeftRail(QWidget):
     newTaskRequested = Signal()
     addSessionRequested = Signal()
@@ -1915,11 +2021,21 @@ class ModelManagerDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, data_root: Path, agent_limitation: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        agent_limitation: str,
+        update_bridge: Optional[UpdateBridge] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.data_root = data_root
+        self.update_bridge = update_bridge
+        self.update_manifest: Any = None
+        self.update_staging: Optional[str] = None
+        self._update_stop: Optional[threading.Event] = None
         self.setWindowTitle("Onionmind settings")
-        self.resize(540, 350)
+        self.resize(560, 430)
         outer = QVBoxLayout(self)
         heading = QLabel("Boundaries and storage")
         heading.setObjectName("brand")
@@ -1939,6 +2055,47 @@ class SettingsDialog(QDialog):
         storage.setWordWrap(True)
         form.addRow("Session storage", storage)
         outer.addLayout(form)
+
+        updates_heading = QLabel("Updates")
+        updates_heading.setObjectName("brand")
+        outer.addWidget(updates_heading)
+        updates_row = QHBoxLayout()
+        version = QLabel(
+            update_bridge.revision_label() if update_bridge and update_bridge.available
+            else "Development copy — the updater applies to an installed Onionmind bundle"
+        )
+        version.setWordWrap(True)
+        updates_row.addWidget(version, 1)
+        self.check_updates_button = QPushButton("Check for updates")
+        self.check_updates_button.setAccessibleName("Check for Onionmind updates over Tor")
+        self.check_updates_button.clicked.connect(self._check_updates)
+        updates_row.addWidget(self.check_updates_button)
+        outer.addLayout(updates_row)
+        boundary = QLabel("The check and the download both travel over Tor; there is no clearnet fallback.")
+        boundary.setObjectName("meta")
+        boundary.setWordWrap(True)
+        outer.addWidget(boundary)
+        self.autocheck_box = QCheckBox("Check automatically over Tor (at most every 12 hours)")
+        self.autocheck_box.setAccessibleName("Permission for automatic Onionmind update checks over Tor")
+        self.autocheck_box.setToolTip(
+            "Off by default. While off, the updater contacts nothing until you press "
+            "Check for updates; while on, Onionmind looks for updates over Tor for as "
+            "long as it stays open."
+        )
+        window = self.parent()
+        if isinstance(window, OnionmindWindow):
+            self.autocheck_box.setChecked(window.update_permission_enabled())
+        self.autocheck_box.toggled.connect(self._permission_toggled)
+        outer.addWidget(self.autocheck_box)
+        self.update_feedback = QLabel()
+        self.update_feedback.setObjectName("meta")
+        self.update_feedback.setWordWrap(True)
+        outer.addWidget(self.update_feedback)
+        self.update_progress = QProgressBar()
+        self.update_progress.setTextVisible(False)
+        self.update_progress.setFixedHeight(6)
+        self.update_progress.hide()
+        outer.addWidget(self.update_progress)
         outer.addStretch(1)
         self.storage_feedback = QLabel()
         self.storage_feedback.setObjectName("meta")
@@ -1950,6 +2107,162 @@ class SettingsDialog(QDialog):
         open_folder.clicked.connect(self._open_storage_folder)
         actions.rejected.connect(self.reject)
         outer.addWidget(actions)
+
+        if update_bridge is None or not update_bridge.available:
+            self.check_updates_button.setEnabled(False)
+            self.update_feedback.setText("")
+        pending = update_bridge.pending() if update_bridge and update_bridge.available else None
+        if pending is not None:
+            self._offer_restart(str(pending))
+
+    def _window(self) -> Any:
+        parent = self.parent()
+        return parent if isinstance(parent, OnionmindWindow) else None
+
+    def _permission_toggled(self, checked: bool) -> None:
+        window = self._window()
+        if window is None:
+            return
+        window.set_update_permission(checked)
+        if checked:
+            self.update_feedback.setText(
+                "Automatic checks are on: Onionmind will look for updates over Tor "
+                "while it runs - never over a direct connection."
+            )
+        else:
+            self.update_feedback.setText(
+                "Automatic checks are off: nothing is contacted until you press Check for updates."
+            )
+
+    def _check_updates(self) -> None:
+        bridge = self.update_bridge
+        window = self._window()
+        if bridge is None or not bridge.available or window is None:
+            return
+        if not window._tor_ready:
+            self.update_feedback.setText(
+                "Tor is not up. Start it from the toolbar pill, then check again - updates never use a direct connection."
+            )
+            return
+        self.check_updates_button.setEnabled(False)
+        self.update_feedback.setText("Checking for updates through Tor…")
+
+        def check_job(signals: WorkerSignals) -> Any:
+            del signals
+            return bridge.check()
+
+        def wire_check(worker: SafeWorker) -> None:
+            worker.signals.result.connect(self._update_check_done)
+            worker.signals.error.connect(self._update_check_failed)
+
+        window._start_worker(check_job, wire_check)
+
+    def _update_check_done(self, manifest: Any) -> None:
+        self.check_updates_button.setEnabled(True)
+        bridge = self.update_bridge
+        window = self._window()
+        if window is not None:
+            window.note_update_check(manifest)
+        self.update_manifest = manifest
+        state = bridge.desktop_core.update_state(bridge.revision(), manifest)
+        short = bridge.desktop_core.short_revision(manifest.revision)
+        if state == "available":
+            self.update_feedback.setText(
+                f"Version {manifest.version} (revision {short}) is available. "
+                "The download runs through Tor and is verified against its SHA-256."
+            )
+            self._reveal_download()
+        elif state == "current":
+            self.update_feedback.setText(f"Onionmind is up to date (revision {short}).")
+        else:
+            self.update_feedback.setText("The feed could not be compared with this installation.")
+
+    def _update_check_failed(self, message: str) -> None:
+        self.check_updates_button.setEnabled(True)
+        self.update_feedback.setText(message)
+
+    def _reveal_download(self) -> None:
+        box = self.findChild(QDialogButtonBox)
+        if box is None or getattr(self, "_download_button", None) is not None:
+            return
+        self._download_button = box.addButton(
+            "Download and install", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self._download_button.setAccessibleName("Download the Onionmind update over Tor")
+        self._download_button.clicked.connect(self._download_update)
+
+    def _download_update(self) -> None:
+        bridge = self.update_bridge
+        window = self._window()
+        manifest = self.update_manifest
+        if bridge is None or window is None or manifest is None:
+            return
+        self._download_button.setEnabled(False)
+        self.check_updates_button.setEnabled(False)
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.show()
+        self.update_feedback.setText("Downloading the update through Tor…")
+        self._update_stop = threading.Event()
+        manifest_ref = manifest
+
+        def download_job(signals: WorkerSignals) -> str:
+            def progress(fraction: Optional[float], note: str) -> None:
+                if fraction is None:
+                    signals.text.emit(note)
+                else:
+                    signals.progress.emit(float(fraction), note)
+
+            return str(bridge.download(manifest_ref, progress, self._update_stop))
+
+        worker = window._start_worker(download_job)
+        worker.signals.progress.connect(self._update_download_progress)
+        worker.signals.text.connect(self._update_download_note)
+        worker.signals.result.connect(self._update_download_done)
+        worker.signals.error.connect(self._update_download_failed)
+
+    def _update_download_progress(self, fraction: float, note: str) -> None:
+        self.update_progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        self.update_feedback.setText(note)
+
+    def _update_download_note(self, note: str) -> None:
+        self.update_feedback.setText(note)
+
+    def _update_download_done(self, staging: str) -> None:
+        self.update_progress.hide()
+        self.update_staging = staging
+        self._offer_restart(staging)
+        window = self._window()
+        if window is not None:
+            window.show_update_ready()
+
+    def _update_download_failed(self, message: str) -> None:
+        self.update_progress.hide()
+        self.update_feedback.setText(message)
+        if getattr(self, "_download_button", None) is not None:
+            self._download_button.setEnabled(True)
+        self.check_updates_button.setEnabled(True)
+
+    def _offer_restart(self, staging: str) -> None:
+        self.update_staging = staging
+        self.update_feedback.setText(
+            "The update is downloaded, verified, and staged. Restart Onionmind to finish installing it."
+        )
+        box = self.findChild(QDialogButtonBox)
+        if box is None or getattr(self, "_restart_button", None) is not None:
+            return
+        self._restart_button = box.addButton(
+            "Restart and update", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self._restart_button.setAccessibleName("Restart Onionmind to install the update")
+        self._restart_button.clicked.connect(self._restart_for_update)
+
+    def _restart_for_update(self) -> None:
+        bridge = self.update_bridge
+        window = self._window()
+        if bridge is None or window is None or not self.update_staging:
+            return
+        window.restart_for_update(self.update_staging)
 
     def _open_storage_folder(self) -> None:
         try:
@@ -1980,6 +2293,7 @@ class OnionmindWindow(QMainWindow):
         self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions")
         self.workspace_bridge = WorkspaceBridge(desktop_core)
         self.harness_bridge = HarnessBridge(desktop_core, core)
+        self.update_bridge = UpdateBridge(core, desktop_core)
         self.settings_data = {} if demo else self.settings_bridge.load()
         self.workspace: Optional[str] = None
         self.current_snapshot: dict[str, Any] = {}
@@ -1998,12 +2312,19 @@ class OnionmindWindow(QMainWindow):
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
+        self._update_timer: Optional[QTimer] = None
         self._build_window()
         self._install_shortcuts()
         if demo:
             self._populate_demo()
         else:
             self._restore_state()
+            # A staged update is local state, not network: surface it without
+            # requiring the automatic-check permission.
+            if self.update_bridge.available and self.update_bridge.pending() is not None:
+                self.show_update_ready()
+            if self.update_permission_enabled():
+                self._start_update_timer()
             self._probe_services()
 
     def _build_window(self) -> None:
@@ -2164,6 +2485,13 @@ class OnionmindWindow(QMainWindow):
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().setFixedHeight(24)
         self.statusBar().addWidget(self.status_label, 1)
+        self.update_status = QPushButton("Updates…")
+        self.update_status.setObjectName("updateStatus")
+        self.update_status.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_status.setFlat(True)
+        self.update_status.clicked.connect(self.open_settings)
+        self._set_update_notice(None)
+        self.statusBar().addPermanentWidget(self.update_status)
         self.scope_status = QLabel("No project selected")
         self.scope_status.setObjectName("meta")
         self.statusBar().addPermanentWidget(self.scope_status)
@@ -2432,6 +2760,7 @@ class OnionmindWindow(QMainWindow):
     def _tor_probe_complete(self, port: Any) -> None:
         self._set_tor_state(f"Ready · {port}" if port else "Ready", "good")
         self.tor_status.setToolTip("Tor is up. Click to stop it. Search runs through Tor or not at all.")
+        self._maybe_autocheck_updates()
 
     def _tor_probe_failed(self, message: str) -> None:
         self._set_tor_state("Not ready", "bad")
@@ -2465,7 +2794,10 @@ class OnionmindWindow(QMainWindow):
                 self.set_status("No Tor daemon or Tor Browser found on this machine.")
                 return
             try:
-                self._tor_process = subprocess.Popen(command)
+                self._tor_process = subprocess.Popen(
+                    command,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
             except OSError as exc:
                 self._set_tor_state("Not ready", "bad")
                 self.set_status(f"Could not start Tor: {exc}")
@@ -3664,7 +3996,130 @@ class OnionmindWindow(QMainWindow):
         self.inspector.append_activity(f"Onionmind model installed: {self._describe_model(name)}")
 
     def open_settings(self) -> None:
-        SettingsDialog(self.data_root, self.harness_bridge.limitation, self).exec()
+        SettingsDialog(
+            self.data_root, self.harness_bridge.limitation, self.update_bridge, self
+        ).exec()
+
+    # --- Tor-routed self-update -----------------------------------------
+    #
+    # Permission first: the updater never opens a network connection on its
+    # own. Automatic checks run only while the user has granted standing
+    # permission in Settings (off by default); otherwise the network is
+    # touched exclusively by pressing Check for updates or Download and
+    # install. With permission granted, checks repeat for as long as the app
+    # stays open - not just at startup - and always over a verified circuit.
+
+    UPDATE_CHECK_INTERVAL_HOURS = 12
+
+    def update_permission_enabled(self) -> bool:
+        return bool(self.settings_data.get("updates_autocheck_enabled"))
+
+    def set_update_permission(self, enabled: bool) -> None:
+        self.settings_data["updates_autocheck_enabled"] = bool(enabled)
+        self.settings_bridge.save(self.settings_data)
+        if enabled:
+            self._start_update_timer()
+            # Granting permission is itself permission: check right away when
+            # Tor is already verified, instead of waiting out the interval.
+            self._maybe_autocheck_updates()
+        elif self._update_timer is not None:
+            self._update_timer.stop()
+
+    def _start_update_timer(self) -> None:
+        if self._update_timer is None:
+            self._update_timer = QTimer(self)
+            self._update_timer.setInterval(self.UPDATE_CHECK_INTERVAL_HOURS * 3600 * 1000)
+            self._update_timer.timeout.connect(self._maybe_autocheck_updates)
+        self._update_timer.start()
+
+    def _set_update_notice(self, text: Optional[str]) -> None:
+        self.update_status.setText(text or "Updates…")
+        self.update_status.setProperty("attention", text is not None)
+        style = self.update_status.style()
+        style.unpolish(self.update_status)
+        style.polish(self.update_status)
+        self.update_status.setToolTip(
+            (text + " Click to open Settings.") if text
+            else "Check for a newer Onionmind build over Tor. Nothing is contacted until you ask."
+        )
+
+    def _maybe_autocheck_updates(self) -> None:
+        if self.demo or not self.update_bridge.available:
+            return
+        if not self.update_permission_enabled():
+            return  # No standing permission means no network, ever.
+        if self.update_bridge.tor_port() is None:
+            return
+        pending = self.update_bridge.pending()
+        if pending is not None:
+            self.show_update_ready()
+            return
+        last_check = _as_text(self.settings_data.get("updates_last_check", ""))
+        if last_check:
+            try:
+                checked_at = datetime.fromisoformat(last_check)
+                age_hours = (datetime.now() - checked_at).total_seconds() / 3600
+                if age_hours < self.UPDATE_CHECK_INTERVAL_HOURS:
+                    return
+            except ValueError:
+                pass  # an unreadable timestamp means "check again", not "never check"
+        bridge = self.update_bridge
+
+        def autocheck_job(signals: WorkerSignals) -> Any:
+            del signals
+            bridge.housekeep()
+            return bridge.check()
+
+        def wire_autocheck(worker: SafeWorker) -> None:
+            worker.signals.result.connect(self._autocheck_updates_done)
+            worker.signals.error.connect(self._autocheck_updates_failed)
+
+        self._start_worker(autocheck_job, wire_autocheck)
+
+    def _autocheck_updates_done(self, manifest: Any) -> None:
+        self.note_update_check(manifest)
+        helper_state = getattr(self.desktop_core, "update_state", None)
+        state = helper_state(self.update_bridge.revision(), manifest) if callable(helper_state) else "unavailable"
+        if state != "available":
+            self._set_update_notice(None)
+            return
+        short = getattr(self.desktop_core, "short_revision", lambda value: str(value)[:7])
+        label = short(manifest.revision)
+        self._set_update_notice(f"Update available · {label}")
+        self.inspector.append_activity(
+            f"Onionmind update available: revision {label}. The check ran through Tor; install from Settings."
+        )
+
+    def _autocheck_updates_failed(self, message: str) -> None:
+        # Silent on the surface - a failed background check must not nag - but
+        # it stays visible in the activity inspector, which is the honest log.
+        self.inspector.append_activity(f"Background update check over Tor failed: {message}")
+
+    def note_update_check(self, manifest: Any) -> None:
+        revision = _field(manifest, "revision", None) if manifest is not None else None
+        self.settings_data["updates_last_check"] = datetime.now().isoformat(timespec="seconds")
+        if revision:
+            self.settings_data["updates_seen_revision"] = _as_text(revision)
+        self.settings_bridge.save(self.settings_data)
+
+    def show_update_ready(self) -> None:
+        self._set_update_notice("Update ready — restart to install")
+        self.inspector.append_activity(
+            "Onionmind update downloaded, verified, and staged. Restart from Settings to install it."
+        )
+
+    def restart_for_update(self, staging: str) -> None:
+        try:
+            command = self.update_bridge.apply_command(staging)
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the swap helper must
+            # outlive this process without holding on to its console.
+            creationflags = (0x00000008 | 0x00000200) if os.name == "nt" else 0
+            subprocess.Popen(command, creationflags=creationflags, close_fds=True)
+        except OSError as exc:
+            self.set_status(f"Could not start the update installer: {exc}")
+            return
+        self.inspector.append_activity("Restarting Onionmind to apply the staged update")
+        QApplication.instance().quit()
 
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")

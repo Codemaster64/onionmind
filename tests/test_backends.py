@@ -49,22 +49,30 @@ class Mock(http.server.BaseHTTPRequestHandler):
 def test_llama_backend():
     srv = http.server.HTTPServer(("127.0.0.1", 0), Mock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    onionmind.LLAMA = f"http://127.0.0.1:{srv.server_port}/v1/chat/completions"
-    onionmind.BACKEND = "llama-server"
-    onionmind.web_search = lambda q, n=5: f"- stubbed result for {q!r}"   # no tor here
+    old_llama = onionmind.LLAMA
+    old_backend = onionmind.BACKEND
+    old_search = onionmind.web_search
+    try:
+        onionmind.LLAMA = f"http://127.0.0.1:{srv.server_port}/v1/chat/completions"
+        onionmind.BACKEND = "llama-server"
+        onionmind.web_search = lambda q, n=5: f"- stubbed result for {q!r}"   # no tor here
 
-    answer = onionmind.turn([{"role": "user", "content": "search something"}])
-    assert "All over it." in answer, answer
-    assert captured[0]["max_tokens"] > 8192, captured[0]["max_tokens"]
+        answer = onionmind.turn([{"role": "user", "content": "search something"}])
+        assert "All over it." in answer, answer
+        assert captured[0]["max_tokens"] > 8192, captured[0]["max_tokens"]
 
-    # the second request must carry the history translated to OpenAI shape
-    wire = captured[1]
-    roles = [m["role"] for m in wire["messages"]]
-    assert roles == ["user", "assistant", "tool"], roles
-    tool_msg = wire["messages"][2]
-    assert tool_msg["tool_call_id"] == "tc0", tool_msg   # positional, self-consistent
-    assistant = wire["messages"][1]
-    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"query": "test q"}'
+        # the second request must carry the history translated to OpenAI shape
+        wire = captured[1]
+        roles = [m["role"] for m in wire["messages"]]
+        assert roles == ["user", "assistant", "tool"], roles
+        tool_msg = wire["messages"][2]
+        assert tool_msg["tool_call_id"] == "tc0", tool_msg   # positional, self-consistent
+        assistant = wire["messages"][1]
+        assert assistant["tool_calls"][0]["function"]["arguments"] == '{"query": "test q"}'
+    finally:
+        onionmind.LLAMA = old_llama
+        onionmind.BACKEND = old_backend
+        onionmind.web_search = old_search
     print("llama-server adapter OK: translation, string-args, positional ids, full turn")
 
 

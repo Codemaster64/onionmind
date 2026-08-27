@@ -60,12 +60,17 @@ jobs:
             "logo.svg",
             "logo-small.svg",
             "LICENSE",
-            "THIRD_PARTY_NOTICES.md"
+            "THIRD_PARTY_NOTICES.md",
+            ".onionmind-source-revision"
           )
           foreach ($Name in $Expected) {
             if (-not (Test-Path -LiteralPath (Join-Path $Bundle $Name) -PathType Leaf)) {
               throw "Standalone bundle is missing $Name"
             }
+          }
+          $Revision = (Get-Content -LiteralPath (Join-Path $Bundle ".onionmind-source-revision") -Raw).Trim()
+          if ($Revision -ne "${{ github.sha }}") {
+            throw "Bundle revision $Revision does not match the built commit ${{ github.sha }}"
           }
 
       - name: Upload Windows bundle
@@ -76,3 +81,68 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 9
+
+  # The in-app updater refuses api.github.com (hostile to shared Tor exit
+  # addresses) and reads a plain release asset instead. Every push to main
+  # republishes the rolling desktop-latest release: the zip carries the bundle,
+  # the JSON manifest carries the revision, size, and SHA-256 the app verifies
+  # before staging anything.
+  release:
+    name: rolling desktop-latest release
+    needs: windows
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: desktop-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUNDLE_ASSET: Onionmind-Windows-x64.zip
+      MANIFEST_ASSET: onionmind-update.json
+    steps:
+      - name: Download the built bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: Onionmind-Windows-x64
+          path: bundle
+
+      - name: Pack bundle and write the update manifest
+        run: |
+          set -euo pipefail
+          test -f "bundle/Onionmind.exe"
+          test -f "bundle/.onionmind-source-revision"
+          revision="$(tr -d '[:space:]' < bundle/.onionmind-source-revision)"
+          if [ "$revision" != "${{ github.sha }}" ]; then
+            echo "bundle revision $revision != ${{ github.sha }}" >&2
+            exit 1
+          fi
+          (cd bundle && zip -qr "../${BUNDLE_ASSET}" .)
+          size="$(stat -c%s "${BUNDLE_ASSET}")"
+          sha256="$(sha256sum "${BUNDLE_ASSET}" | cut -d' ' -f1)"
+          cat > "${MANIFEST_ASSET}" <<EOF
+          {
+            "product": "onionmind-desktop",
+            "platform": "windows-x64",
+            "revision": "${revision}",
+            "version": "1.0.0",
+            "asset": "${BUNDLE_ASSET}",
+            "asset_url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-latest/${BUNDLE_ASSET}",
+            "size": ${size},
+            "sha256": "${sha256}"
+          }
+          EOF
+          cat "${MANIFEST_ASSET}"
+
+      - name: Publish the rolling release
+        run: |
+          set -euo pipefail
+          gh release delete desktop-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create desktop-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Onionmind desktop (rolling)" \
+            --notes "Rolling Windows build of main, republished on every push. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip." \
+            "${BUNDLE_ASSET}" \
+            "${MANIFEST_ASSET}"
