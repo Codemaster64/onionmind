@@ -61,6 +61,12 @@ def tor_check():
             print(f"[tor] active, exit {r.get('IP')} (port {port})", file=sys.stderr)
             return
         print(f"[tor] port {port} responded but is NOT Tor - refusing", file=sys.stderr)
+    # Telling a Windows user to run systemctl is telling them nothing. Tor
+    # Browser is how Tor gets onto a Windows box and its bundled tor binds 9150
+    # by itself, so name the thing that actually works on the platform underfoot.
+    if os.name == "nt":
+        sys.exit("No Tor proxy on 9050/9150. Start Tor Browser and click "
+                 "Connect - its bundled Tor binds 9150 - then try again.")
     sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
 
 
