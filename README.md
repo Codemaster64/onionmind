@@ -126,6 +126,11 @@ onionmind-code "fix the parser tests"   # one-shot repository-aware agent
 python onionmind.py "who won the last election?"  # local CLI chat + Tor search
 ```
 
+Want the Tor routing without the Onionmind workbench? The self-contained
+[`ollama-tor`](ollama-tor/) companion wraps any supported `ollama launch`
+integration, verifies Tor before spawning it, and routes proxy-aware child
+traffic through a fail-closed Tor bridge.
+
 Or just double-click the icon. The desktop app keeps sessions locally and can
 export a conversation; the classic CLI still supports `/save notes.txt`.
 
