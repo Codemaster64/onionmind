@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused improvement to Onionmind
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or limitation should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful outcome rather than only a preferred implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Windows or Linux workbench
+        - CLI or coding agent
+        - Android
+        - Matchstick live USB
+        - Ollama Tor companion
+        - Installer or updater
+        - Documentation
+        - Cross-platform
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy and network impact
+      description: Note any new network access, stored data, permissions, telemetry, or trust boundary. Write "None" when there is no impact.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: I can describe how the result could be verified honestly.
+          required: true

@@ -1,0 +1,7 @@
+/.pytest_cache/
+/.verify-venv/
+/build/
+/dist/
+/src/*.egg-info/
+__pycache__/
+*.pyc
