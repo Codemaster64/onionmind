@@ -6,20 +6,25 @@
 
 **A native, local-first coding workbench with Ollama models and Tor search.**
 
-![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20USB-7D4698)
+![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/inference-local--first-black)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
 ![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
-![project](https://img.shields.io/badge/free%20%26%20open%20source-non--commercial-9146F0)
+![status](https://img.shields.io/badge/status-beta-9146F0)
+![project](https://img.shields.io/badge/open%20source-community--maintained-59316C)
 
-[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)
-[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)
+[![Desktop build](https://github.com/Codemaster64/onionmind/actions/workflows/desktop-build.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/desktop-build.yml)
+[![USB kit](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml)
+[![Ollama Tor plugin](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml)
+
+[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)
+[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)
 [![Download for Android](https://img.shields.io/badge/Android-Onionmind--1.3.apk-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/v1.3/Onionmind-1.3.apk)
 [![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-amnesic-usb-stick)
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
 
-[all downloads](https://github.com/Codemaster64/onionmind/releases) · every install includes the `onionmind` command
+[all downloads](https://github.com/Codemaster64/onionmind/releases) · desktop and Termux installs include the `onionmind` command
 
 **No Onionmind account · no Onionmind telemetry.** Local chat, project context,
 session history, and model inference stay on your computer. Optional network
@@ -52,8 +57,9 @@ Harness task through Ollama. **`onionmind-chat`** is retained as an alias for th
 workbench.
 
 **Windows** — one download, one double-click:
-**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/v1.0/onionmind-setup.cmd)**
-(75 KB — the entire installer in one file). Double-click it, wait out the
+**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)**
+(about 400 KB — the current installer and its source payloads in one file).
+Double-click it, wait out the
 model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
 in new terminals. SmartScreen may grumble at a self-contained script — that's
 what it does; *More info → Run anyway*.
@@ -62,10 +68,14 @@ what it does; *More info → Run anyway*.
 [install-onionmind.ps1](install-onionmind.ps1) into PowerShell.
 
 **Linux** — one download, one command:
-**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)**,
+**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)**,
 then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
 user). Same deal — the right model for your GPU, an `onionmind` command and a
 desktop launcher.
+
+Already set up and want the newest native Windows build directly? Download the
+rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip),
+rebuilt from `main` after every successful desktop workflow.
 
 For repository-aware coding work from a terminal:
 
@@ -115,7 +125,7 @@ and UI are on-device; web-search queries are sent to DuckDuckGo over Tor.
 arm64 phones only.
 
 Want a terminal on your phone too? [Termux](https://f-droid.org) +
-**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind-android.sh)**
+**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind-android.sh)**
 gives you the same `onionmind` command Android-side.
 
 **Using it**
@@ -181,7 +191,6 @@ custom models, and safety alignment.
 **PYRE** is reserved as **Legacy / Collector** for archived or
 special-edition models and older versions, for retro access and research
 archives, with the tagline **“Rise.”**
-works too, for raw chat without search.
 
 ---
 
@@ -280,7 +289,7 @@ The 60-second version for engineers — [the long version is here](TECHNICAL.md)
 - **The driver can't rot.** The NVIDIA kernel module is compiled against the exact
   kernel on the stick at build time — and that kernel never updates. The classic
   driver-vs-kernel breakage is structurally impossible.
-- **Everything is tested.** Seven validation suites (`usb/tests/`) exercise the
+- **Everything is tested.** Six validation suites (`usb/tests/`) exercise the
   whole stack in containers — Tor bootstrap, model baking, firewall ordering,
   read-only serving.
 
@@ -295,8 +304,11 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 - What you *search for*, and how you *write*, can identify you regardless of any
   technology.
 - No GPU? It still runs — on the CPU. Fine for the small models, painful for the 27B.
-- DeepSeek Harness Agent mode is a direct-network developer tool. Its web and
-  shell activity is not covered by Onionmind Chat's Tor-search boundary.
+- Agent mode refuses to start without verified Tor and sends proxy-aware child
+  traffic through a Tor-only loopback bridge. Python and Node direct sockets are
+  blocked, but an external shell command that ignores proxy settings remains an
+  application-level gap; use Matchstick, a container, or an OS egress rule when
+  the whole machine must be fail-closed.
 - On a phone: expect phone speeds — roughly 5–15 tokens/second on recent
   chipsets — and disable battery optimisation for Termux, or Android will kill
   it mid-chat.
@@ -320,7 +332,8 @@ definitive legal conclusion.
 The maintainers do not operate a service and do not collect, store, or process
 user prompts or outputs. Local chat processing happens on the user's device.
 Chat search queries are sent to DuckDuckGo over Tor and are visible to
-DuckDuckGo; optional Harness tools may contact other services directly. Tor and
+DuckDuckGo. Agent tools can contact other services through Tor; external
+commands that ignore the inherited proxy remain the documented gap. Tor and
 privacy tooling are generally lawful, but lawful use depends on what you do with
 them and on applicable law.
 
@@ -337,6 +350,6 @@ and access to information—not unlawful activity.
 
 <div align="center">
 
-**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [TECHNICAL.md](TECHNICAL.md) · [Legal](LEGAL.md)
+**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [Technical](TECHNICAL.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Legal](LEGAL.md)
 
 </div>

@@ -16,11 +16,11 @@ Onionmind is a local AI workbench powered by models served on the user's machine
 
 ## Positioning
 
-Onionmind combines local Ollama inference with Tor-routed search and a DeepSeek Harness coding path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Chat search sends its query to DuckDuckGo's onion service through Tor; model downloads, updates, and Harness network-capable tools have separately disclosed direct-network boundaries.
+Onionmind combines local Ollama inference with Tor-routed search and a DeepSeek Harness coding path. The Onionmind maintainers receive no chat content, source code, account data, or telemetry. Chat search and native desktop updates use Tor; model downloads and the source-install updater are explicit direct downloads. Agent traffic that honors the injected proxy uses Tor, Python and Node direct sockets are blocked, and external commands that ignore proxies remain a documented application-level gap.
 
 ## Operating Context
 
-Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama by `onionmind.py --agent`, which verifies a Tor circuit before starting it and refuses to run without one; the agent's proxy and socket shims put everything it runs on Tor. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
+Users run Onionmind on Windows or Linux, often beside a code editor and terminal, with Ollama or llama.cpp serving a local model. Coding sessions start in a chosen project folder, but Harness tools and approvals—not the working directory—govern their actual access. DeepSeek Harness is launched through Ollama by `onionmind.py --agent`, which verifies a Tor circuit before starting and refuses to run without one. Proxy-aware traffic goes through a Tor-only loopback bridge, while injected Python and Node shims refuse non-loopback sockets; system-wide containment still requires an OS egress rule, container, or Matchstick. Existing installs expose `onionmind` for the desktop workbench, `onionmind-code` for one-shot Harness work, and `onionmind-chat` as a compatibility alias for the workbench.
 
 ## Capabilities and Constraints
 
