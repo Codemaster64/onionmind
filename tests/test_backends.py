@@ -47,17 +47,21 @@ class Mock(http.server.BaseHTTPRequestHandler):
 
 
 def test_llama_backend():
+    captured.clear()
     srv = http.server.HTTPServer(("127.0.0.1", 0), Mock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     old_llama = onionmind.LLAMA
     old_backend = onionmind.BACKEND
     old_search = onionmind.web_search
+    old_check = onionmind.tor_check
     try:
         onionmind.LLAMA = f"http://127.0.0.1:{srv.server_port}/v1/chat/completions"
         onionmind.BACKEND = "llama-server"
+        onionmind.tor_check = lambda: None
         onionmind.web_search = lambda q, n=5: f"- stubbed result for {q!r}"   # no tor here
 
-        answer = onionmind.turn([{"role": "user", "content": "search something"}])
+        answer = onionmind.turn([{"role": "user", "content": "search something"}],
+                                allow_search=True)
         assert "All over it." in answer, answer
         assert captured[0]["max_tokens"] > 8192, captured[0]["max_tokens"]
 
@@ -73,6 +77,7 @@ def test_llama_backend():
         onionmind.LLAMA = old_llama
         onionmind.BACKEND = old_backend
         onionmind.web_search = old_search
+        onionmind.tor_check = old_check
     print("llama-server adapter OK: translation, string-args, positional ids, full turn")
 
 
@@ -238,23 +243,65 @@ def test_stream_reports_tool_activity():
     old_backend = onionmind.BACKEND
     old_stream = onionmind._ask_ollama_stream
     old_search = onionmind.web_search
+    old_check = onionmind.tor_check
     try:
         onionmind.BACKEND = "ollama"
         onionmind._ask_ollama_stream = lambda *_args, **_kwargs: next(replies)
         onionmind.web_search = lambda query, n=5: f"result for {query}"
+        onionmind.tor_check = lambda: setattr(onionmind, "_port", 9150)
         events = []
         answer = onionmind.turn_stream(
             [{"role": "user", "content": "search"}], lambda _chunk: None,
-            on_event=events.append)
+            on_event=events.append, allow_search=True)
         assert answer == "Found it.", answer
         assert [event["kind"] for event in events] == [
-            "tool_started", "tool_finished"], events
+            "tool_started", "tor_verified", "tool_finished"], events
         assert events[0]["arguments"] == {"query": "onions"}, events
-        assert events[1]["result"] == "result for onions", events
+        assert events[1]["port"] == 9150, events
+        assert events[2]["result"] == "result for onions", events
     finally:
         onionmind.BACKEND = old_backend
         onionmind._ask_ollama_stream = old_stream
         onionmind.web_search = old_search
+        onionmind.tor_check = old_check
+
+
+def test_search_tools_are_absent_without_explicit_permission():
+    response = mock.Mock(status_code=200, ok=True)
+    response.json.return_value = {"message": {"role": "assistant", "content": "local"}}
+    with mock.patch.object(onionmind.requests, "post", return_value=response) as post:
+        onionmind._ask_ollama([{"role": "user", "content": "hello"}])
+        local_payload = post.call_args.kwargs["json"]
+        assert "tools" not in local_payload
+        assert onionmind.NUM_PREDICT > 8192
+        assert local_payload["options"]["num_predict"] == onionmind.NUM_PREDICT
+        assert local_payload["options"]["num_ctx"] >= onionmind.NUM_PREDICT
+        onionmind._ask_ollama(
+            [{"role": "user", "content": "hello"}], allow_search=True
+        )
+        assert post.call_args.kwargs["json"]["tools"] == onionmind.TOOLS
+
+
+def test_spurious_search_call_is_refused_without_network():
+    replies = iter([
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "function": {"name": "web_search", "arguments": {"query": "private"}}
+        }]},
+        {"role": "assistant", "content": "Stayed local."},
+    ])
+    events = []
+    with mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind, "_ask_ollama_stream", side_effect=lambda *_a, **_kw: next(replies)), \
+         mock.patch.object(onionmind, "tor_check") as check, \
+         mock.patch.object(onionmind, "web_search") as search:
+        answer = onionmind.turn_stream(
+            [{"role": "user", "content": "stay local"}], lambda _chunk: None,
+            on_event=events.append,
+        )
+    assert answer == "Stayed local."
+    check.assert_not_called()
+    search.assert_not_called()
+    assert [event["kind"] for event in events] == ["tool_refused"]
 
 
 def test_old_python_uses_legacy_ui_without_importing_native_module():
@@ -276,5 +323,7 @@ if __name__ == "__main__":
     test_stream_exhaustion_recovers_and_compacts_history()
     test_ollama_stream_retains_cutoff_reasoning_and_reason()
     test_stream_reports_tool_activity()
+    test_search_tools_are_absent_without_explicit_permission()
+    test_spurious_search_call_is_refused_without_network()
     test_old_python_uses_legacy_ui_without_importing_native_module()
     print("DONE_BACKEND_OK")

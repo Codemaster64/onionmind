@@ -43,7 +43,6 @@ object Server {
                         "/api/install" -> install(session)
                         "/api/select" -> select(session)
                         "/api/remove" -> remove(session)
-                        "/api/tor" -> tor(session)
                         "/api/chat" -> chat(session)
                         else -> NanoHTTPD.newFixedLengthResponse(
                             Response.Status.NOT_FOUND, "text/plain", "?")
@@ -81,8 +80,7 @@ object Server {
             .getMemoryInfo(memory)
         val storage = StatFs(ctx.filesDir.path).availableBytes / (1024 * 1024)
         return json(buildJsonObject {
-            put("torEnabled", ProcessManager.torEnabled(ctx))
-            put("tor", ProcessManager.torEnabled(ctx) && ProcessManager.torReady(ctx))
+            put("tor", ProcessManager.torReady())
             put("llama", ProcessManager.llamaReady())
             put("model", model?.id
                 ?: (if (ProcessManager.downloadProgress >= 0.0) ProcessManager.downloadId else "none"))
@@ -135,15 +133,6 @@ object Server {
         else error(Response.Status.BAD_REQUEST, "unknown model")
     }
 
-    private fun tor(session: IHTTPSession): Response {
-        val files = HashMap<String, String>(); session.parseBody(files)
-        val raw = session.parms["enabled"] ?: formValue(files["postData"] ?: files["content"], "enabled")
-        if (raw.isNullOrBlank()) return error(Response.Status.BAD_REQUEST, "enabled?")
-        val enabled = raw.equals("true", ignoreCase = true)
-        ProcessManager.setTorEnabled(ctx, enabled)
-        return json(buildJsonObject { put("ok", true); put("enabled", enabled) }.toString())
-    }
-
     /** null means ABSENT. It used to return "", which made every `?: return
      *  error(...)` guard dead code - most seriously in tor(), where a request
      *  with no `enabled` field read as `false` and silently switched Tor OFF. */
@@ -163,20 +152,37 @@ object Server {
         // an EMPTY conversation and answered something unrelated to the question.
         val raw = session.parms["messages"]
             ?: formValue(files["postData"] ?: files["content"], "messages")
+        // Permission belongs to this request only. Missing, malformed, and all
+        // non-true values fail closed; nothing is saved in preferences.
+        val allowSearch = (session.parms["allowSearch"]
+            ?: formValue(files["postData"] ?: files["content"], "allowSearch"))
+            .equals("true", ignoreCase = true)
         val messages = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
             .map { it.jsonObject }.toMutableList()
         // the UI sends plain {role, content} turns; the agent extends the list
-        ProcessManager.ensureLlama(ctx)
         val answer = try {
-            chatLock.submit<String> { Agent.turn(LLAMA, messages) { query ->
-                if (!ProcessManager.torEnabled(ctx)) "(web search is disabled because Tor is off)"
-                else Agent.webSearch(query)
-            } }.get()
+            chatLock.submit<String?> {
+                // Starting and checking the child are serialized with its chat.
+                // An occupied shared-loopback port is never allowed to reach
+                // Agent.turn unless our exact llama-server child is still live.
+                if (!ProcessManager.ensureLlama(ctx) || !ProcessManager.awaitLlamaReady()) {
+                    null
+                } else {
+                    Agent.turn(LLAMA, messages, allowSearch) { query ->
+                        // Starting Tor is lazy: ticking the one-turn box merely makes
+                        // the tool available. No Tor process or network is touched
+                        // unless the model actually asks to search during this turn.
+                        if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady())
+                            "(Tor could not start safely; web search was not performed)"
+                        else Agent.webSearch(query)
+                    }
+                }
+            }.get()
         } catch (e: ExecutionException) {
             return error(Response.Status.INTERNAL_ERROR, rootMessage(e))
         }
         return json(buildJsonObject {
-            put("answer", answer)
+            put("answer", answer ?: "(the model server did not come up)")
             put("messages", JsonArray(messages))
         }.toString())
     }

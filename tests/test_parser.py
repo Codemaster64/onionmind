@@ -67,6 +67,24 @@ def test_strip_thinking():
     assert om.strip_thinking("<think>still reasoning and never finished") == ""
 
 
+def test_strip_thinking_uses_the_full_reasoning_tag_grammar():
+    tagged = (
+        "Before < THINK data-mode='private' >FIRST SECRET</ THINK > middle "
+        "<tHiNk\tstage=\"second\">SECOND SECRET</ tHiNk\t> after"
+    )
+    assert om.strip_thinking(tagged) == "Before  middle  after"
+
+    # A completed answer followed by a partial opening tag must keep the answer,
+    # while a truncated closing tag keeps the entire unfinished block private.
+    assert om.strip_thinking("Visible< THI") == "Visible"
+    assert om.strip_thinking("Visible< THINK data-mode='private'") == "Visible"
+    assert om.strip_thinking("< THINK mode=x>SECRET</ THI") == ""
+
+    # Similar-looking ordinary text is not a reasoning tag.
+    plain = "Math says 2 < 3; <this is ordinary; <thinking> is another tag."
+    assert om.strip_thinking(plain) == plain
+
+
 def test_results_never_span_lines():
     """The DSH adapter strides three lines per result; a wrapped snippet used to
     shift every later result onto the wrong title. Same silent mis-citation the

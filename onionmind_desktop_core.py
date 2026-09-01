@@ -32,6 +32,8 @@ __all__ = [
     "SettingsStore",
     "ChatSession",
     "SessionStore",
+    "strip_thinking",
+    "sanitize_messages",
     "WorkspaceChange",
     "WorkspaceSnapshot",
     "WorkspaceInspector",
@@ -303,7 +305,7 @@ class ChatSession:
             "title": self.title,
             "model": self.model,
             "workspace": self.workspace,
-            "messages": copy.deepcopy(self.messages),
+            "messages": sanitize_messages(self.messages),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "archived_at": self.archived_at,
@@ -311,15 +313,147 @@ class ChatSession:
 
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_THINK_TAG_PATTERN = r"<\s*(/?)\s*think(?:\s[^>]*)?>"
+_THINK_TAG = re.compile(_THINK_TAG_PATTERN, re.IGNORECASE)
+_REASONING_FIELDS = frozenset(
+    {"analysis", "reasoning", "reasoning_content", "thinking"}
+)
 
 
-def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _think_tag_candidate(candidate: str) -> tuple[str, bool]:
+    """Classify text beginning with ``<`` against prefixes of _THINK_TAG."""
+    if not candidate.startswith("<"):
+        return "invalid", False
+    index, size = 1, len(candidate)
+    while index < size and candidate[index].isspace():
+        index += 1
+    if index == size:
+        return "prefix", False
+
+    closing = candidate[index] == "/"
+    if closing:
+        index += 1
+        while index < size and candidate[index].isspace():
+            index += 1
+        if index == size:
+            return "prefix", True
+
+    for expected in "think":
+        if index == size:
+            return "prefix", closing
+        if re.fullmatch(expected, candidate[index], re.IGNORECASE) is None:
+            return "invalid", closing
+        index += 1
+    if index == size:
+        return "prefix", closing
+    if candidate[index] == ">":
+        match = _THINK_TAG.fullmatch(candidate[:index + 1])
+        return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+    if not candidate[index].isspace():
+        return "invalid", closing
+    index += 1
+    while index < size:
+        if candidate[index] == ">":
+            match = _THINK_TAG.fullmatch(candidate[:index + 1])
+            return ("complete", bool(match.group(1))) if match else ("invalid", closing)
+        index += 1
+    return "prefix", closing
+
+
+def _partial_think_tag(text: str) -> tuple[int, bool] | None:
+    start = text.find("<")
+    while start >= 0:
+        state, closing = _think_tag_candidate(text[start:])
+        if state == "prefix":
+            return start, closing
+        start = text.find("<", start + 1)
+    return None
+
+
+def strip_thinking(text: str) -> str:
+    """Remove all model reasoning blocks from completed assistant text.
+
+    A response can contain reasoning before a tool call and another block after
+    the tool result.  Treat an unmatched closing tag as the end of an implicit
+    leading reasoning block, and an unmatched opening tag as reasoning through
+    end-of-response.  This deliberately fails closed for legacy transcripts.
+    """
+
+    if not isinstance(text, str):
+        raise TypeError("assistant content must be a string")
+
+    visible: list[str] = []
+    cursor = 0
+    depth = 0
+    for tag in _THINK_TAG.finditer(text):
+        closing = bool(tag.group(1))
+        if closing:
+            if depth:
+                depth -= 1
+                if depth == 0:
+                    cursor = tag.end()
+            else:
+                # Some local reasoning models omit the opening tag. Preserve
+                # the established fail-closed behavior and discard that prefix.
+                visible.clear()
+                cursor = tag.end()
+            continue
+
+        if depth == 0:
+            visible.append(text[cursor:tag.start()])
+        depth += 1
+
+    if depth == 0:
+        tail = text[cursor:]
+        partial = _partial_think_tag(tail)
+        if partial is None:
+            visible.append(tail)
+        elif partial[1]:
+            visible.clear()
+        else:
+            # Keep completed visible text before an unfinished opening tag.
+            visible.append(tail[:partial[0]])
+    return "".join(visible).strip()
+
+
+def sanitize_messages(
+    messages: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deep-copy messages and remove reasoning from every assistant entry.
+
+    Non-content fields such as ``tool_calls`` are retained verbatim so a live
+    turn can finish its tool protocol before the sanitized history is stored.
+    """
+
     copied: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             raise TypeError(f"message {index} must be a mapping")
-        copied.append(copy.deepcopy(dict(message)))
+        item = copy.deepcopy(dict(message))
+        if item.get("role") == "assistant":
+            for key in list(item):
+                if isinstance(key, str) and key.casefold() in _REASONING_FIELDS:
+                    item.pop(key, None)
+            content = item.get("content")
+            item["content"] = _sanitize_assistant_content(content)
+        copied.append(item)
     return copied
+
+
+def _sanitize_assistant_content(value: Any) -> Any:
+    if isinstance(value, str):
+        return strip_thinking(value)
+    if isinstance(value, Mapping):
+        return {key: _sanitize_assistant_content(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_assistant_content(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_assistant_content(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return sanitize_messages(messages)
 
 
 class SessionStore:

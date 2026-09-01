@@ -369,15 +369,25 @@ class HarnessAgentTests(unittest.TestCase):
 
     def env(self, root):
         log = os.path.join(root, ".onionmind", "agent-net.log")
-        with mock.patch.object(onionmind, "tor_check"),              mock.patch.object(onionmind, "start_tor_bridge", return_value=9999),              mock.patch.object(onionmind, "NET_LOG", log):
+        with mock.patch.object(onionmind, "tor_check"),              mock.patch.object(onionmind, "start_tor_hidden"),              mock.patch.object(onionmind, "start_tor_bridge", return_value=9999),              mock.patch.object(onionmind, "NET_LOG", log):
             return onionmind.agent_env({"PATH": os.environ.get("PATH", "")})
 
     def test_no_tor_means_no_agent(self):
-        with mock.patch.object(onionmind, "tor_check",
+        with mock.patch.object(onionmind, "start_tor_hidden"),              mock.patch.object(onionmind, "tor_check",
                                side_effect=SystemExit("No Tor proxy")),              mock.patch("subprocess.call") as call:
             with self.assertRaises(SystemExit):
                 onionmind.run_agent("do a thing")
         call.assert_not_called()                 # fails closed: never started
+
+    def test_hidden_tor_is_attempted_before_failing_closed(self):
+        # The agent brings up the tor.exe this file owns - hidden, never
+        # firefox.exe - and only then verifies the circuit.
+        order = []
+        with mock.patch.object(onionmind, "start_tor_hidden",
+                               side_effect=lambda: order.append("hidden")),              mock.patch.object(onionmind, "tor_check",
+                               side_effect=lambda: order.append("check")),              mock.patch.object(onionmind, "start_tor_bridge", return_value=9999),              mock.patch.object(onionmind, "NET_LOG", os.devnull),              mock.patch("subprocess.call", return_value=0):
+            onionmind.run_agent("do a thing")
+        self.assertEqual(order, ["hidden", "check"])
 
     def test_every_child_is_pointed_at_the_tor_bridge(self):
         with tempfile.TemporaryDirectory() as root:
@@ -407,15 +417,17 @@ class HarnessAgentTests(unittest.TestCase):
         self.assertEqual(argv[:5], ["ollama", "launch", "dsh", "--model", "some-model"])
         self.assertEqual(argv[-3:], ["--profile", "headless", "fix the parser"])
 
-    def test_the_search_patch_is_opt_in_until_the_launcher_takes_it(self):
-        # ollama's launcher rejects --patch today; sending it anyway means no
-        # agent at all, which is worse than a provider the proxy already covers.
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ONIONMIND_DSH_PATCH", None)
-            self.assertNotIn("--patch", onionmind.agent_argv("m", "t"))
-            os.environ["ONIONMIND_DSH_PATCH"] = "1"
-            argv = onionmind.agent_argv("m", "t")
-        self.assertTrue(argv[argv.index("--patch") + 1].endswith(".patch.yml"))
+    def test_the_search_patch_escape_hatch_is_gone(self):
+        # ollama's launcher rejects the patch profile today, and an environment
+        # variable that smuggles it past agent_argv would be a silent boundary
+        # change - so the launcher offers no way in for it at all, and the
+        # harness's own provider rides the proxy shims like everything else.
+        for value in (None, "1"):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("ONIONMIND_DSH_PATCH", None)
+                if value is not None:
+                    os.environ["ONIONMIND_DSH_PATCH"] = value
+                self.assertNotIn("--patch", onionmind.agent_argv("m", "t"))
 
     def test_no_task_means_an_interactive_session(self):
         argv = onionmind.agent_argv("some-model")

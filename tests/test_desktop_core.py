@@ -112,6 +112,103 @@ class SettingsStoreTests(unittest.TestCase):
 
 
 class SessionStoreTests(unittest.TestCase):
+    def test_unmatched_reasoning_opening_keeps_the_visible_prefix_once(self) -> None:
+        self.assertEqual(core.strip_thinking("Before<think>SECRET"), "Before")
+        self.assertEqual(
+            core.strip_thinking(
+                "Before<think>first</think> middle<think>SECOND SECRET"
+            ),
+            "Before middle",
+        )
+
+    def test_variant_and_truncated_reasoning_never_reaches_persistence(self) -> None:
+        content = (
+            "Before< THINK data-origin=legacy>SECRET</ THINK > after< THI"
+        )
+        self.assertEqual(core.strip_thinking(content), "Before after")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sessions"
+            store = core.SessionStore(root)
+            session = store.create(
+                messages=[{"role": "assistant", "content": content}]
+            )
+            saved = (root / f"{session.id}.json").read_text(encoding="utf-8")
+
+        self.assertEqual(session.messages[0]["content"], "Before after")
+        self.assertNotIn("SECRET", saved)
+        self.assertNotIn("< THI", saved)
+
+    def test_reasoning_is_removed_at_every_session_store_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sessions"
+            store = core.SessionStore(root)
+            tool_call = {
+                "function": {
+                    "name": "web_search",
+                    "arguments": {"query": "local privacy"},
+                }
+            }
+            session = store.create(
+                messages=[
+                    {"role": "user", "content": "Research this"},
+                    {
+                        "role": "assistant",
+                        "content": "<think>FIRST SECRET</think>I will search.",
+                        "thinking": "STRUCTURED SECRET",
+                        "tool_calls": [tool_call],
+                    },
+                    {"role": "tool", "content": "local result"},
+                    {
+                        "role": "assistant",
+                        "content": "Before<think>SECOND SECRET</think> after",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "<think>NESTED SECRET</think>Nested answer",
+                            }
+                        ],
+                    },
+                ]
+            )
+
+            self.assertEqual(session.messages[1]["content"], "I will search.")
+            self.assertEqual(session.messages[1]["tool_calls"], [tool_call])
+            self.assertNotIn("thinking", session.messages[1])
+            self.assertEqual(session.messages[3]["content"], "Before after")
+            self.assertEqual(
+                session.messages[4]["content"][0]["text"], "Nested answer"
+            )
+            saved_text = (root / f"{session.id}.json").read_text(encoding="utf-8")
+            self.assertNotIn("SECRET", saved_text)
+            self.assertNotIn("<think>", saved_text)
+
+            # Simulate a legacy on-disk session that predates the persistence
+            # boundary. Loading must clean it before it reaches a transcript;
+            # the next save must also repair the file.
+            legacy = json.loads(saved_text)
+            legacy["messages"][1]["content"] = (
+                "<think>LEGACY SECRET</think>Visible tool-round text"
+            )
+            (root / f"{session.id}.json").write_text(
+                json.dumps(legacy), encoding="utf-8"
+            )
+
+            loaded = store.load(session.id)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(
+                loaded.messages[1]["content"], "Visible tool-round text"
+            )
+            self.assertEqual(loaded.messages[1]["tool_calls"], [tool_call])
+            store.save(loaded)
+            repaired = (root / f"{session.id}.json").read_text(encoding="utf-8")
+            self.assertNotIn("LEGACY SECRET", repaired)
+            self.assertNotIn("<think>", repaired)
+
     def test_create_save_list_load_and_archive_message_dicts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="onion mind sessions ") as temporary:
             root = Path(temporary) / "local sessions"
