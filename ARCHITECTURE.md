@@ -172,10 +172,12 @@ and the edition/GPU matrix: [usb/README.md](usb/README.md).
   its isolated venv first, skips pip when constrained versions are already present,
   and refuses to touch the network unless rerun with `-AllowDirectNetwork` (+ `-Yes`
   to skip the prompt). `-Check` validates without building.
-- **Windows release** is manual: a maintainer runs the build, packages it with the
-  offline-first bootstrap (`onionmind-bootstrap.ps1`/`.cmd`) as
-  `Onionmind-Windows-x64.zip`, verifies locally, and uploads. **No GitHub Actions
-  build/publish job.**
+- **CI** (`.github/workflows/desktop-build.yml`) runs the payload check, the core
+  tests, and the desktop build on every push, verifies the bundle, and — on every
+  push to `main` — republishes the rolling `desktop-latest` release whose manifest
+  is the in-app updater's feed. `usb-tests.yml` and `ollama-tor.yml` run their own
+  suites. **Tagged releases, the Android APK, and the Matchstick image are built
+  and attached manually.**
 
 ## Tests
 

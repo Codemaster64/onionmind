@@ -144,10 +144,11 @@ class DistributionPrivacyTests(unittest.TestCase):
 
     def test_no_cloud_workflow_files_remain(self) -> None:
         # The desktop self-updater is fed by a rolling GitHub release that only
-        # the desktop-build workflow can republish, and the usb kit runs the
-        # Linux-side validation. Those two are the deliberate cloud footprint;
-        # nothing else may grow in .github/workflows.
-        allowed = {"desktop-build.yml", "usb-tests.yml"}
+        # the desktop-build workflow can republish, the usb kit runs the
+        # Linux-side validation, and ollama-tor tests the standalone Tor-routing
+        # companion. Those three are the deliberate cloud footprint; nothing
+        # else may grow in .github/workflows.
+        allowed = {"desktop-build.yml", "usb-tests.yml", "ollama-tor.yml"}
         present = {
             path.name
             for pattern in ("*.yml", "*.yaml")

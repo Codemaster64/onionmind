@@ -13,8 +13,11 @@ of things you must not get wrong here, and the checks that prove you didn't.
 - **Read before editing:** [ARCHITECTURE.md](ARCHITECTURE.md) (where things live),
   [CONTRIBUTING.md](CONTRIBUTING.md) (the check list), [TECHNICAL.md](TECHNICAL.md)
   (the privacy claims you must not weaken).
-- **Environment:** Windows + PowerShell 7 is the primary shell. There is **no CI
-  build/publish job** — builds, tests, and releases are explicit local commands.
+- **Environment:** Windows + PowerShell 7 is the primary shell. CI
+  (`.github/workflows/`) runs the payload check, core tests, and the desktop
+  build on every push, and republishes the rolling `desktop-latest` release
+  from `main` (the in-app updater's feed). Tagged releases, the Android APK,
+  and the Matchstick image are built and attached manually.
 
 ## Hard rules — do not break these
 
@@ -100,4 +103,6 @@ suites unless asked.
   thing the whole design exists to prevent.
 - Writing a doc claim ("~19 tok/s", "works on X") without running it.
 - Importing Qt into `onionmind_desktop_core.py` and breaking its headless tests.
-- Assuming a CI job will build/test — nothing runs unless you run it.
+- Assuming CI covers you — the `desktop-build` workflow runs the payload check
+  and a subset of the tests, but the coding-agent, privacy-contract, release-
+  version, and desktop UI suites only run when you run them.
