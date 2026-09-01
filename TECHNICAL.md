@@ -344,9 +344,12 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   mock-server test as the desktop (`tests/test_backends.py`). Offline JVM
   suites pin the Android-specific invariants: `AgentPrivacyTest` (the search
   tool is scoped to the turn that allowed it; a spurious tool call is refused
-  without touching the network) and `OwnedLoopbackProcessTest` (an occupied
+  without touching the network), `OwnedLoopbackProcessTest` (an occupied
   port is rejected, a dead child never turns a stranger's listener into ours,
-  waiting fails closed on child death, stop destroys only our child). The
+  waiting fails closed on child death, stop destroys only our child), and
+  `Socks5Test` (a request built through the real okhttp client hands the
+  hostname to the SOCKS5 proxy unresolved — remote DNS, no system-resolver
+  leak — offline against a stub proxy). The
   loopback capability/token split in `Server.kt` is code review only — no
   test covers it yet.
 - **Not verified: anything on a phone.** No device or emulator ran this APK;

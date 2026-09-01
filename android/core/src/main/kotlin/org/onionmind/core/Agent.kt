@@ -4,6 +4,7 @@ import kotlinx.serialization.json.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.OkHttpClient
+import okhttp3.Dns
 import okhttp3.Request
 import okhttp3.FormBody
 import okhttp3.Response
@@ -49,7 +50,9 @@ object Agent {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    private fun client(user: String, pass: String): OkHttpClient {
+    // internal, not private: Socks5Test builds a real client to prove the
+    // SOCKS5-auth socket factory resolves hostnames through Tor.
+    internal fun client(user: String, pass: String): OkHttpClient {
         // okhttp layers TLS itself over whatever socket the factory hands it,
         // so a SOCKS5-auth socket below HTTPS just works.
         val factory = object : javax.net.SocketFactory() {
@@ -65,6 +68,18 @@ object Agent {
         return OkHttpClient.Builder()
             .socketFactory(factory)
             .proxy(Proxy.NO_PROXY)          // never the system proxy
+            // socks5h, not socks5: carry the hostname through to Socks5Socket
+            // inside the SOCKS5 request. Without this Dns override okhttp runs
+            // the system resolver on every hostname first - leaking the query
+            // to the ISP - and the socket would receive an IP literal instead
+            // of the name Tor is supposed to resolve at the exit.
+            .dns(object : Dns {
+                // getByAddress(name, addr) keeps the hostname without any
+                // lookup, so hostString below still carries it into the
+                // SOCKS5 request and the dummy address is never routed.
+                override fun lookup(hostname: String): List<InetAddress> =
+                    listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
+            })
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
             .build()
