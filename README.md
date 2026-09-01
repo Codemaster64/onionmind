@@ -302,7 +302,8 @@ disappointing ones. [See what has been verified, and what hasn't.](TECHNICAL.md#
 
 ## Under the hood
 
-The 60-second version for engineers — [the long version is here](TECHNICAL.md):
+The 60-second version for engineers — [the long version is here](TECHNICAL.md),
+and contributors should start with the code map in [ARCHITECTURE.md](ARCHITECTURE.md):
 
 - **Chat searches are designed not to leak the user's IP address.** Every Onionmind Chat search
   builds a *fresh Tor circuit*, resolves DNS through Tor, and hits DuckDuckGo's
@@ -376,6 +377,6 @@ and access to information—not unlawful activity.
 
 <div align="center">
 
-**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [TECHNICAL.md](TECHNICAL.md) · [Legal](LEGAL.md)
+**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [Architecture](ARCHITECTURE.md) · [TECHNICAL.md](TECHNICAL.md) · [Legal](LEGAL.md)
 
 </div>
