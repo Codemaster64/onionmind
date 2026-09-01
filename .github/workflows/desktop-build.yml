@@ -127,7 +127,7 @@ jobs:
             "product": "onionmind-desktop",
             "platform": "windows-x64",
             "revision": "${revision}",
-            "version": "1.0.0",
+            "version": "1.4.0",
             "asset": "${BUNDLE_ASSET}",
             "asset_url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-latest/${BUNDLE_ASSET}",
             "size": ${size},
