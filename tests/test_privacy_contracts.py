@@ -128,6 +128,41 @@ class BackgroundTorTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertIsNone(onionmind._managed_tor_process)
 
+    def test_darwin_launches_brew_tor_under_an_owned_torrc(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(onionmind.os, "name", "posix"), \
+                 mock.patch.object(onionmind.sys, "platform", "darwin"), \
+                 mock.patch.object(onionmind.os.path, "expanduser", return_value=temporary), \
+                 mock.patch.object(onionmind, "_darwin_tor_binary", return_value="/opt/homebrew/bin/tor"), \
+                 mock.patch.object(onionmind, "tor_proxy_port", side_effect=[None, 9050]), \
+                 mock.patch.object(onionmind.subprocess, "Popen", return_value=process) as popen:
+                self.assertEqual(onionmind.start_tor_hidden(timeout=2), 9050)
+
+            argv = popen.call_args.args[0]
+            self.assertEqual(argv[0], "/opt/homebrew/bin/tor")
+            self.assertEqual(
+                Path(argv[2]), Path(temporary) / ".onionmind" / "tor" / "torrc"
+            )
+            self.assertIn("SocksPort 9050", Path(argv[2]).read_text(encoding="utf-8"))
+            self.assertIn(
+                "CookieAuthentication 0", Path(argv[2]).read_text(encoding="utf-8")
+            )
+            self.assertIs(popen.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertIs(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_darwin_without_tor_fails_closed_with_an_install_hint(self) -> None:
+        with mock.patch.object(onionmind.os, "name", "posix"), \
+             mock.patch.object(onionmind.sys, "platform", "darwin"), \
+             mock.patch.object(onionmind, "tor_proxy_port", return_value=None), \
+             mock.patch.object(onionmind, "_darwin_tor_binary", return_value=None), \
+             mock.patch.object(onionmind.subprocess, "Popen") as popen, \
+             self.assertRaises(RuntimeError) as raised:
+            onionmind.start_tor_hidden()
+        self.assertIn("brew install tor", str(raised.exception))
+        popen.assert_not_called()
+
     def test_failed_reverification_clears_a_previously_verified_port(self) -> None:
         response = mock.Mock()
         response.json.return_value = {"IsTor": False}
@@ -238,8 +273,15 @@ class DistributionPrivacyTests(unittest.TestCase):
         self.assertIn("$DependencyAudit", builder)
         self.assertIn("[switch]$AllowDirectNetwork", builder)
         self.assertNotIn('"--upgrade", "pip"', builder)
-        self.assertNotIn('"--assume-yes-for-downloads"', builder)
         self.assertIn('"--windows-console-mode=hide"', builder)
+        # Nuitka may fetch its own build tooling (the dependency walker) into
+        # its user cache headlessly - main always allowed this and CI requires
+        # it - but that consent flag belongs only to the Nuitka invocation:
+        # the sole package-install path stays the audited, gated repair above.
+        self.assertEqual(builder.count('"--assume-yes-for-downloads"'), 1)
+        self.assertIn(
+            '"--assume-yes-for-downloads"', builder[builder.index("$NuitkaArguments"):]
+        )
 
     def test_windows_updater_audits_exact_runtime_ranges_before_repair(self) -> None:
         updater = self.text("update-onionmind.ps1")
