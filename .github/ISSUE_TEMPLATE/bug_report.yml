@@ -1,0 +1,70 @@
+name: Bug report
+description: Report reproducible behavior that is broken or misleading
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Onionmind. Remove prompts, source code, usernames, IP addresses, and other private data from logs before posting them.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Windows desktop
+        - Linux desktop or CLI
+        - Android APK
+        - Android Termux
+        - Matchstick live USB
+        - Ollama Tor companion
+        - Installer or updater
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Onionmind version or commit, OS, GPU/phone model, RAM/VRAM, model tier, and Tor setup when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Paste only the smallest useful excerpt and redact private data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this with the latest supported version or current `main`.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This is not a security vulnerability; security reports belong in the private advisory form.
+          required: true

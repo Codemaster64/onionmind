@@ -6,21 +6,32 @@
 
 **A native, local-first coding workbench with Ollama models and Tor search.**
 
-**Platforms:** Windows · Linux · Android · Matchstick USB
+![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android%20%7C%20USB-7D4698)
+![local](https://img.shields.io/badge/inference-local--first-black)
+![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
+![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
+![status](https://img.shields.io/badge/status-beta-9146F0)
+![project](https://img.shields.io/badge/open%20source-community--maintained-59316C)
 
-**Inference:** local-first · **License:** MIT / Apache-2.0 components · **Project:** free and open source
+[![Desktop build](https://github.com/Codemaster64/onionmind/actions/workflows/desktop-build.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/desktop-build.yml)
+[![USB kit](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml)
+[![Ollama Tor plugin](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml)
 
-**Downloads:** [releases](https://github.com/Codemaster64/onionmind/releases) ·
-[Linux installer](install-onionmind.sh) ·
-[Android APKs (manual releases)](https://github.com/Codemaster64/onionmind/releases) ·
-[Matchstick USB](#matchstick--the-amnesic-usb-stick)
+[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)
+[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)
+[![Download for Android](https://img.shields.io/badge/Android-releases%20page-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases)
+[![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-amnesic-usb-stick)
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
 
-Windows releases are built and attached manually as `Onionmind-Windows-x64.zip`.
-There is no cloud CI build or automatic release job. Because this repository is
-private, its GitHub release assets require sign-in and are not an anonymous
-distribution channel.
+Windows ships two routes: the one-click `onionmind-setup.cmd` above, and the
+rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip)
+the desktop workflow rebuilds after every push to `main` — that rolling release
+is also the in-app updater's feed. Tagged release artifacts, including the
+Android APK, are built and attached manually. The repository is public, so
+release downloads need no sign-in.
+
+[all downloads](https://github.com/Codemaster64/onionmind/releases) · desktop and Termux installs include the `onionmind` command
 
 **No Onionmind account · no Onionmind telemetry.** Opening Onionmind makes no
 external request and starts no network service. Local chat, project context,
@@ -62,13 +73,13 @@ workbench. The portable Windows archive is different: neither the ZIP nor its
 bootstrap creates a command or shortcut. Run `Onionmind.exe` from the extracted
 folder, or create a shortcut to that executable yourself.
 
-**Windows** — download the manually published `Onionmind-Windows-x64.zip`, then
-extract it. The archive contains `Onionmind.exe`, `onionmind-bootstrap.cmd`, and
-`onionmind-bootstrap.ps1`. Run the bootstrap to perform an **offline local
-inventory first**: it reports supported, missing, and out-of-date components
-without downloading anything or starting Tor, Ollama, or another service. It
-shows the exact install plan and direct-network destinations before asking you
-to apply it. Only confirmed missing or out-of-policy components are installed.
+**Windows** — one download, one double-click:
+**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)**
+(about 400 KB — the current installer and its source payloads in one file).
+Double-click it, wait out the
+model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
+in new terminals. SmartScreen may grumble at a self-contained script — that's
+what it does; *More info → Run anyway*.
 
 The Tor indicator starts at **Off**, or **Proxy · port** when it detects an
 unverified pre-existing SOCKS listener. Enabling **Allow Tor search this turn**
@@ -76,17 +87,24 @@ can change it to **Starting** and then **Running · 9150**. Onionmind launches
 `tor.exe` hidden, never `firefox.exe`, and stops only the Tor process it owns
 when the app closes. An already-running local Tor proxy is reused and left alone.
 
-The older all-in-one `onionmind-setup.cmd` release is deprecated and does not
-contain the current native workbench. No GitHub workflow builds or publishes the
-Windows archive. Maintainers build it locally, verify it, and attach it to a
-release manually. Private GitHub releases require an authenticated account;
-downloading one is therefore not anonymous.
+Prefer a portable install? Extract the rolling zip instead and run
+`onionmind-bootstrap.cmd` from the extracted folder. The bootstrap takes an
+**offline local inventory first**: it reports supported, missing, and
+out-of-date components without downloading anything or starting Tor, Ollama,
+or another service. It shows the exact install plan and direct-network
+destinations before you apply anything — applying is an explicit
+`-Apply -AllowDirectNetwork` step, and only confirmed missing or out-of-policy
+components are installed.
 
 **Linux** — one download, one command:
-**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind.sh)**,
+**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)**,
 then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
 user). Same deal — the right model for your GPU, an `onionmind` command and a
 desktop launcher.
+
+Already set up and want the newest native Windows build directly? Download the
+rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip),
+rebuilt from `main` after every successful desktop workflow.
 
 For repository-aware coding work from a terminal:
 
@@ -141,7 +159,7 @@ queries are sent to DuckDuckGo with hostname resolution performed by Tor.
 arm64 phones only.
 
 Want a terminal on your phone too? [Termux](https://f-droid.org) +
-**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/releases/download/v1.0/install-onionmind-android.sh)**
+**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind-android.sh)**
 gives you the same `onionmind` command Android-side.
 
 **Using it**
@@ -151,6 +169,11 @@ onionmind                    # open the native desktop workbench
 onionmind-code "fix the parser tests"   # one-shot repository-aware agent
 python onionmind.py "explain this function"       # local CLI chat; search stays off unless enabled for that turn
 ```
+
+Want the Tor routing without the Onionmind workbench? The self-contained
+[`ollama-tor`](ollama-tor/) companion wraps any supported `ollama launch`
+integration, verifies Tor before spawning it, and routes proxy-aware child
+traffic through a fail-closed Tor bridge.
 
 Or just double-click the icon. The desktop app keeps sessions locally and can
 export a conversation; the classic CLI still supports `/save notes.txt`.
@@ -171,8 +194,9 @@ interactive approval requests fail closed; custom DSH profiles can change that
 composition.
 
 For source development, install `requirements-desktop.txt` and run
-`python onionmind_desktop.py`. Builds and tests are explicit local operations;
-there is no GitHub Actions workflow. The principal checks are:
+`python onionmind_desktop.py`. GitHub Actions runs the payload check, the core
+tests, and the desktop build on every push, plus the USB kit and `ollama-tor`
+suites; the same principal checks run locally:
 
 ```text
 python build.py --check
@@ -220,7 +244,6 @@ custom models, and safety alignment.
 **PYRE** is reserved as **Legacy / Collector** for archived or
 special-edition models and older versions, for retro access and research
 archives, with the tagline **“Rise.”**
-works too, for raw chat without search.
 
 ---
 
@@ -320,7 +343,7 @@ and contributors should start with the code map in [ARCHITECTURE.md](ARCHITECTUR
 - **The driver can't rot.** The NVIDIA kernel module is compiled against the exact
   kernel on the stick at build time — and that kernel never updates. The classic
   driver-vs-kernel breakage is structurally impossible.
-- **Everything is tested.** Seven validation suites (`usb/tests/`) exercise the
+- **Everything is tested.** Six validation suites (`usb/tests/`) exercise the
   whole stack in containers — Tor bootstrap, model baking, firewall ordering,
   read-only serving.
 
@@ -335,8 +358,11 @@ We won't oversell you ([full threat model](TECHNICAL.md#going-further-on-privacy
 - What you *search for*, and how you *write*, can identify you regardless of any
   technology.
 - No GPU? It still runs — on the CPU. Fine for the small models, painful for the 27B.
-- DeepSeek Harness Agent mode is a direct-network developer tool. Its web and
-  shell activity is not covered by Onionmind Chat's Tor-search boundary.
+- Agent mode refuses to start without verified Tor and sends proxy-aware child
+  traffic through a Tor-only loopback bridge. Python and Node direct sockets are
+  blocked, but an external shell command that ignores proxy settings remains an
+  application-level gap; use Matchstick, a container, or an OS egress rule when
+  the whole machine must be fail-closed.
 - On a phone: expect phone speeds — roughly 5–15 tokens/second on recent
   chipsets — and disable battery optimisation for Termux, or Android will kill
   it mid-chat.
@@ -360,7 +386,8 @@ definitive legal conclusion.
 The maintainers do not operate a service and do not collect, store, or process
 user prompts or outputs. Local chat processing happens on the user's device.
 Chat search queries are sent to DuckDuckGo over Tor and are visible to
-DuckDuckGo; optional Harness tools may contact other services directly. Tor and
+DuckDuckGo. Agent tools can contact other services through Tor; external
+commands that ignore the inherited proxy remain the documented gap. Tor and
 privacy tooling are generally lawful, but lawful use depends on what you do with
 them and on applicable law.
 
@@ -377,6 +404,6 @@ and access to information—not unlawful activity.
 
 <div align="center">
 
-**Onionmind** · [Get it](#get-it-in-60-seconds) · [Matchstick](usb/README.md) · [Architecture](ARCHITECTURE.md) · [TECHNICAL.md](TECHNICAL.md) · [Legal](LEGAL.md)
+**Onionmind** · [Get it](#get-onionmind) · [Matchstick](usb/README.md) · [Architecture](ARCHITECTURE.md) · [Technical](TECHNICAL.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Legal](LEGAL.md)
 
 </div>
