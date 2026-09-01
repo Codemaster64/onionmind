@@ -1291,7 +1291,7 @@ def parse_terminal_command(
 # manifest carries the source revision plus the size and SHA-256 of the zip.
 # Every request - manifest and bundle alike - goes through the local Tor SOCKS
 # port with fresh credentials, so each fetch rides its own circuit. A failed
-# Tor check fails closed; there is no clearnet fallback anywhere in this path.
+# Tor check fails closed; there is no direct-network fallback anywhere in this path.
 
 UPDATE_REPO = "Codemaster64/onionmind"
 UPDATE_FEED_TAG = "desktop-latest"
@@ -1305,7 +1305,7 @@ _UPDATE_ASSET_HOSTS = ("github.com", "githubusercontent.com", "github.io")
 
 
 class BundleUpdateError(RuntimeError):
-    """A user-facing update failure. Never retried over clearnet."""
+    """A user-facing update failure. Never retried outside Tor."""
 
 
 @dataclass(frozen=True)

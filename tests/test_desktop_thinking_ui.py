@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication
@@ -400,6 +403,51 @@ class ThinkingIndicatorTests(unittest.TestCase):
         desktop.OnionmindWindow._start_chat(host)
 
         self.assertEqual(payloads[0]["answer"], "Buffered answer")
+
+    def test_stopping_chat_keeps_text_received_before_stop(self) -> None:
+        payloads: list[dict] = []
+
+        class Signal:
+            def emit(self, value) -> None:
+                del value
+
+            def connect(self, callback) -> None:
+                del callback
+
+        signals = SimpleNamespace(event=Signal(), result=Signal(), error=Signal())
+
+        def turn_stream(history, on_text, **kwargs):
+            del history, kwargs
+            on_text("Partial answer")
+            host.stop_event.set()
+            return "A later answer that must not replace the partial text"
+
+        core = SimpleNamespace(BACKEND="ollama", turn_stream=turn_stream)
+        block = SimpleNamespace(start_thinking=lambda text: None)
+
+        def start_worker(job):
+            payloads.append(job(signals))
+            return SimpleNamespace(signals=signals)
+
+        host = SimpleNamespace(
+            stop_event=None,
+            current_model_id=lambda: "model",
+            chat_messages=[],
+            transcript=SimpleNamespace(add_message=lambda role, text: block),
+            stream_block=None,
+            set_status=lambda text: None,
+            _describe_model=lambda model: model,
+            inspector=SimpleNamespace(append_activity=lambda text: None),
+            core=core,
+            _start_worker=start_worker,
+            _chat_event=lambda event: None,
+            _chat_complete=lambda payload: None,
+            _chat_failed=lambda message: None,
+        )
+
+        desktop.OnionmindWindow._start_chat(host)
+
+        self.assertEqual(payloads[0]["answer"], "Partial answer")
 
 
 if __name__ == "__main__":

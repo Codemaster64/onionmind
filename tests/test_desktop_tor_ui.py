@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication, QCheckBox
@@ -38,12 +41,14 @@ class TorIndicatorStateTests(unittest.TestCase):
             _port=verified,
             tor_proxy_port=lambda: port,
         )
+        self.autochecks = []
         return SimpleNamespace(
             core=core,
             tor_status=desktop.StatusPill("Tor", "Off", "idle"),
             tor_probe_generation=2,
             tor_phase="off",
             inspector=ActivityRecorder(),
+            _maybe_autocheck_updates=lambda: self.autochecks.append("autocheck"),
         )
 
     def test_late_startup_probe_cannot_overwrite_starting(self) -> None:
@@ -68,6 +73,15 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.label.text(), "Running · 9150")
         self.assertEqual(host.tor_phase, "running")
+        # A verified circuit is the updater's only window, so the Running
+        # transition is exactly where the permissioned autocheck piggybacks.
+        self.assertEqual(self.autochecks, ["autocheck"])
+
+    def test_unverified_proxy_transition_does_not_autocheck_updates(self) -> None:
+        host = self.state_host(port=9150)
+        desktop.OnionmindWindow._show_local_tor_state(host, 9150)
+        self.assertEqual(host.tor_status.label.text(), "Proxy · 9150")
+        self.assertEqual(self.autochecks, [])
 
     def test_exited_managed_process_transitions_running_to_off(self) -> None:
         process = mock.Mock()

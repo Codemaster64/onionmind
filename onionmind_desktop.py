@@ -743,6 +743,29 @@ def _ui_animations_enabled() -> bool:
     return True
 
 
+def _apply_native_dark_title_bar(window: Any) -> None:
+    """Pin the Windows title bar to dark regardless of the system scheme.
+
+    The workbench is dark by design on every platform, so on a light-mode
+    Windows install the native frame would be the one bright surface in the
+    room. DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20; 19 on pre-2004 builds)
+    matches it to the body. Purely cosmetic: every failure path is silent and
+    the app runs identically without it.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        for attribute in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(window.winId()), attribute, ctypes.byref(ctypes.c_int(1)), 4
+            ) == 0:
+                return
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+
 class ThinkingDots(QWidget):
     """A tiny, low-cost progress cue; adjacent text carries the meaning."""
 
@@ -2413,7 +2436,7 @@ class SettingsDialog(QDialog):
         self.check_updates_button.clicked.connect(self._check_updates)
         updates_row.addWidget(self.check_updates_button)
         outer.addLayout(updates_row)
-        boundary = QLabel("The check and the download both travel over Tor; there is no clearnet fallback.")
+        boundary = QLabel("The check and the download both travel over Tor; there is no direct-network fallback.")
         boundary.setObjectName("meta")
         boundary.setWordWrap(True)
         outer.addWidget(boundary)
@@ -4161,16 +4184,28 @@ class OnionmindWindow(QMainWindow):
                             ) from compatibility_error
                         raise
             except BaseException:
+                if stop_event.is_set():
+                    # Cancellation is a normal completion path. Keep the
+                    # privacy-filtered text received before Stop was clicked;
+                    # do not turn a partial answer into an error message.
+                    return {
+                        "answer": stream_filter.finish(),
+                        "history": history,
+                        "stopped": True,
+                    }
                 stream_filter.abort()
                 raise
             if stop_event.is_set():
-                stream_filter.abort()
-                safe_answer = ""
+                # Stop must halt further generation without erasing the
+                # already-buffered, sanitized response.
+                safe_answer = stream_filter.finish()
+                stopped = True
             else:
                 buffered_answer = stream_filter.finish()
                 returned_answer = _strip_thinking(_as_text(answer))
                 safe_answer = returned_answer or buffered_answer
-            return {"answer": safe_answer, "history": history}
+                stopped = False
+            return {"answer": safe_answer, "history": history, "stopped": stopped}
 
         worker = self._start_worker(chat_job)
         worker.signals.event.connect(self._chat_event)
@@ -4229,7 +4264,10 @@ class OnionmindWindow(QMainWindow):
 
     def _chat_complete(self, payload: dict[str, Any]) -> None:
         answer = _strip_thinking(payload.get("answer"))
-        if not answer:
+        stopped = bool(payload.get("stopped"))
+        if not answer and stopped:
+            answer = "Generation stopped before an answer was written."
+        elif not answer:
             answer = "The local model returned no answer."
         if self.stream_block is not None:
             self.stream_block.set_text(answer)
@@ -4248,8 +4286,10 @@ class OnionmindWindow(QMainWindow):
         except Exception:
             port = None
         self._show_local_tor_state(port)
-        self.set_status("Chat turn complete")
-        self.inspector.append_activity("Chat turn completed locally")
+        self.set_status("Chat stopped" if stopped else "Chat turn complete")
+        self.inspector.append_activity(
+            "Chat stopped; partial answer preserved" if stopped else "Chat turn completed locally"
+        )
         self._set_active(None)
         self.save_current_session()
 
@@ -4753,6 +4793,14 @@ def run(core_module: Any = None, demo: bool = False) -> int:
     window = OnionmindWindow(core_module, _load_desktop_core(), demo=demo)
     app.setProperty("onionmindWindow", window)
     window.show()
+    _apply_native_dark_title_bar(window)
+    # A system scheme flip (scheduled dark mode, Settings) must not re-light
+    # the only surface the app does not paint itself.
+    style_hints = app.styleHints()
+    if hasattr(style_hints, "colorSchemeChanged"):
+        style_hints.colorSchemeChanged.connect(
+            lambda _scheme: _apply_native_dark_title_bar(window)
+        )
     if _SCREENSHOT_PATH:
         window.resize(1440, 900)
 
