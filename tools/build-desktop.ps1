@@ -198,7 +198,12 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
 }
 
 Write-Host "Auditing the isolated build environment"
-$auditOutput = @(& $VenvPython -c $DependencyAudit (Join-Path $RepoRoot "requirements-desktop.txt"))
+# powershell.exe 5.1 passes embedded double quotes to native commands unescaped,
+# which corrupts an inline "-c" script (the audit source contains "), so run it
+# from a file instead - the same detour AGENTS.md prescribes for git -m under 5.1.
+$AuditScriptPath = Join-Path ([IO.Path]::GetTempPath()) "onionmind-audit-dependencies.py"
+[IO.File]::WriteAllText($AuditScriptPath, $DependencyAudit)
+$auditOutput = @(& $VenvPython $AuditScriptPath (Join-Path $RepoRoot "requirements-desktop.txt"))
 if ($auditOutput) { $auditOutput | ForEach-Object { Write-Host "  $_" } }
 $dependenciesReady = ($LASTEXITCODE -eq 0)
 
@@ -228,7 +233,7 @@ if ($dependenciesReady) {
         "--requirement", (Join-Path $RepoRoot "requirements-desktop.txt")
     )
     Write-Host "Re-auditing the isolated build environment"
-    $reauditOutput = @(& $VenvPython -c $DependencyAudit (Join-Path $RepoRoot "requirements-desktop.txt"))
+    $reauditOutput = @(& $VenvPython $AuditScriptPath (Join-Path $RepoRoot "requirements-desktop.txt"))
     if ($reauditOutput) { $reauditOutput | ForEach-Object { Write-Host "  $_" } }
     if ($LASTEXITCODE -ne 0) {
         throw "The dependency repair did not bring the venv inside the constrained ranges."
