@@ -15,7 +15,6 @@
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
   #manage { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
-  #tor-toggle { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
   .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -26,7 +25,10 @@
          border-bottom-left-radius: 4px; }
   .bot small { display: block; color: var(--dim); font-size: 11px; margin-top: 6px; }
   #form { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-          border-top: 1px solid var(--line); }
+          border-top: 1px solid var(--line); flex-wrap: wrap; }
+  #search-permission { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
+                       color: #cdbbd5; font-size: 12px; padding: 0 2px 2px; }
+  #search-permission input { accent-color: var(--purple); width: 16px; height: 16px; }
   #q { flex: 1; background: var(--card); border: 1px solid var(--line); color: inherit;
        border-radius: 12px; padding: 11px 14px; font: inherit; outline: none; }
   button { background: var(--purple); color: #fff; border: 0; border-radius: 12px;
@@ -64,7 +66,6 @@
     <circle cx="64" cy="64" r="5" fill="#7D4698" stroke="none"/>
   </svg>
   <h1>Onionmind</h1>
-  <button id="tor-toggle" onclick="toggleTor()">Tor on</button>
   <button id="manage" onclick="openManager()">Models</button>
   <div id="dots">
     <span class="dot" id="d-tor">tor</span><span class="dot" id="d-model">model</span>
@@ -112,16 +113,20 @@
 </div>
 
 <div id="chat"></div>
-<div id="busy">thinking + searching over tor…</div>
+<div id="busy">thinking locally…</div>
 <form id="form">
+  <label id="search-permission">
+    <input id="allow-search" type="checkbox">
+    Allow Tor search this turn
+  </label>
   <input id="q" placeholder="Ask anything…" autocomplete="off">
   <button id="send">Send</button>
 </form>
 
 <script>
 // Android does not isolate loopback between apps: any installed app can reach
-// 127.0.0.1:8081. This token is generated per process and pasted in when the
-// page is served, so a request without it is not from this page.
+// 127.0.0.1:8081. The page itself is served only at an unguessable per-process
+// capability URL; this separate token authenticates its API requests.
 const TOKEN = '__ONIONMIND_TOKEN__';
 const api = (path, init) => fetch(path, {...init,
   headers: {...(init && init.headers), 'X-Onionmind-Token': TOKEN}});
@@ -130,21 +135,19 @@ const form = body => ({method:'POST',
 const errorText = err => err instanceof Error ? (err.message || String(err)) : String(err);
 // A cold first message spends ~30s loading the weights before a token appears.
 // Saying "thinking" for that is indistinguishable from a hang.
-const busyText = () => status.llama === false ? 'loading the model into memory…'
-  : (status.torEnabled === false ? 'thinking locally…' : 'thinking + searching over tor…');
+const busyText = () => status.llama === false ? 'loading the model into memory…' : 'thinking locally…';
 let history = [], status = {model:'none', models:[]}, ready = false;
 const $ = id => document.getElementById(id);
 
 async function poll() {
   try { status = await (await api('/api/status')).json(); } catch {}
   $('d-tor').classList.toggle('on', !!status.tor);
-  $('tor-toggle').textContent = status.torEnabled === false ? 'Tor off' : 'Tor on';
-  $('tor-toggle').title = status.torEnabled === false ? 'Turn Tor on to enable web search' : 'Turn Tor off to disable web search';
+  $('d-tor').title = status.tor ? 'Onionmind background Tor is running' : 'Background Tor is off';
   $('d-model').classList.toggle('on', status.model !== 'none' && !status.downloading);
   const setup = $('setup'), chat = $('chat'), form = $('form');
   if (status.model === 'none' && !status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
-    $('setup-text').textContent = 'Download the model? Everything stays on this phone.';
+    $('setup-text').textContent = 'Inference and local files stay on this phone. Model downloads use direct HTTPS, not Tor.';
     $('prog').style.width = '0%';
     renderModelPicker();
     $('setup-custom').hidden = false;
@@ -162,16 +165,10 @@ async function poll() {
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
     if ($('busy').style.display === 'block') $('busy').textContent = busyText();
-    if (!ready) { add('bot', 'Ready. ' + (status.torEnabled === false ? 'Tor is off — web search is disabled, but local chat still works.' : (status.tor ? 'Tor is up.' : 'Tor is still building circuits — searches wait for it, chat does not.')) + ' Ask anything.'); ready = true; }
+    if (!ready) { add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn"' + (status.tor ? ' Tor is up.' : '') + ' Ask anything.'); ready = true; }
   }
 }
 setInterval(poll, 2000); poll();
-
-async function toggleTor() {
-  const enabled = status.torEnabled === false;
-  await api('/api/tor', form('enabled=' + enabled));
-  await poll();
-}
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -215,12 +212,17 @@ function renderModelPicker() {
 }
 
 async function install(id) {
+  if (!confirmModelDownload()) return;
   try {
     const r = await api('/api/install', form('id='+encodeURIComponent(id)));
     if (!r.ok) throw new Error('HTTP ' + r.status);
   } catch (err) {
     $('setup-text').textContent = 'Could not start the download. Please try again.';
   }
+}
+
+function confirmModelDownload() {
+  return confirm('This model download uses direct HTTPS, not Tor. Continuing exposes this phone’s network address to the model host. Inference and local files stay on this phone. Downloads are resumable even when Onionmind is minimized. Continue?');
 }
 
 function openManager() { $('manager').hidden = false; renderManager(); }
@@ -236,6 +238,7 @@ async function addCustom(urlField) {
   const url = box.value.trim();
   const name = urlField ? '' : $('custom-name').value.trim();
   if (!url) return;
+  if (!confirmModelDownload()) return;
   // file and bytes are derived server-side from the URL and the download itself.
   const r = await api('/api/install', form(new URLSearchParams({name, url})));
   if (!r.ok) { alert(((await r.json().catch(() => ({}))).error) || 'Could not add model'); return; }
@@ -264,13 +267,19 @@ function add(cls, text) {
 $('form').onsubmit = async e => {
   e.preventDefault();
   const q = $('q').value.trim(); if (!q) return;
+  const allowSearch = $('allow-search').checked;
+  // Consume permission before any asynchronous work. It cannot silently carry
+  // into the next message, even if this request fails.
+  $('allow-search').checked = false;
+  $('allow-search').disabled = true;
+  $('send').disabled = true;
   $('q').value = ''; add('you', q);
   history.push({role:'user', content:q});
-  $('busy').textContent = busyText();
+  $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
   $('busy').style.display = 'block';
   try {
     const response = await api('/api/chat',
-      form('messages=' + encodeURIComponent(JSON.stringify(history))));
+      form(new URLSearchParams({messages:JSON.stringify(history), allowSearch:String(allowSearch)})));
     const raw = await response.text();
     let r;
     try { r = JSON.parse(raw); }
@@ -280,6 +289,8 @@ $('form').onsubmit = async e => {
     history = r.messages || history;
   } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); }
   $('busy').style.display = 'none';
+  $('allow-search').disabled = false;
+  $('send').disabled = false;
 };
 </script>
 </body>

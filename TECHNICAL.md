@@ -315,18 +315,43 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   with a generated torrc.
 - **UI:** a WebView talking to a NanoHTTPD server on `127.0.0.1:8081` only —
   onboarding (model download with progress), chat, status dots for tor/model.
+  Android shares loopback across every installed app, so the chat page is
+  served only under a high-entropy capability URL handed to this app's own
+  WebView, and the JSON API additionally requires a header token that never
+  appears in a URL; both secrets are random per app start and not persisted.
+- **Child ownership:** a listening port is not ownership evidence on Android.
+  `OwnedLoopbackProcess` (core) treats `llama-server`'s port as ready only
+  while the exact child this app launched is alive: an already-listening
+  `:8080` is rejected rather than adopted, and shutdown destroys only the
+  child we started — never whoever owns the port. Tor readiness follows the
+  same rule: our child alive plus the SOCKS port open.
 - **Search agent:** `android/core` is a pure-Kotlin port of `onionmind.py` —
   including a hand-written SOCKS5 client with username/password auth, because
   **fresh random credentials per search are what make tor build a separate
   circuit per query**, and the JVM's stock SOCKS support can't authenticate.
   The agent loop, DDG onion endpoint, per-block result parsing and
-  thinking-strip mirror the Python line for line.
+  thinking-strip mirror the Python line for line. The `web_search` tool is
+  advertised to llama-server only on the exact turn the user allowed search;
+  a search tool call without that permission is answered with a refusal and
+  the network callback never runs, and a tor that fails to start safely
+  yields "(Tor could not start safely; web search was not performed)"
+  instead of a query.
 - **Model:** downloaded on first launch into app storage (4B/9B by RAM),
   resumable with HTTP Range. APK stays 14 MB; the 4B adds 2.5 GB on-device.
 - **Verified:** `:core` runs live network tests against a real tor daemon
   inside the build image (`android/itest.sh`) — SOCKS auth handshake, circuit
   isolation, onion search, result parsing. The adapter logic has the same
-  mock-server test as the desktop (`tests/test_backends.py`).
+  mock-server test as the desktop (`tests/test_backends.py`). Offline JVM
+  suites pin the Android-specific invariants: `AgentPrivacyTest` (the search
+  tool is scoped to the turn that allowed it; a spurious tool call is refused
+  without touching the network), `OwnedLoopbackProcessTest` (an occupied
+  port is rejected, a dead child never turns a stranger's listener into ours,
+  waiting fails closed on child death, stop destroys only our child), and
+  `Socks5Test` (a request built through the real okhttp client hands the
+  hostname to the SOCKS5 proxy unresolved — remote DNS, no system-resolver
+  leak — offline against a stub proxy). The
+  loopback capability/token split in `Server.kt` is code review only — no
+  test covers it yet.
 - **Not verified: anything on a phone.** No device or emulator ran this APK;
   it is debug-signed, first install is yours, and the Termux path is the
   battle-tested fallback.

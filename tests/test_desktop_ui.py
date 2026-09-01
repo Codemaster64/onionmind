@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
@@ -273,7 +275,13 @@ class DesktopUiTests(unittest.TestCase):
 
         dialog.model_name.setText("blaze")
         self.assertTrue(dialog.pull_button.isEnabled())
-        dialog.pull_button.click()
+        with mock.patch.object(
+            ui.QMessageBox,
+            "warning",
+            return_value=ui.QMessageBox.StandardButton.Yes,
+        ) as confirm_download:
+            dialog.pull_button.click()
+        confirm_download.assert_called_once()
         self.assertEqual(requested, ["blaze"])
         self.assertFalse(dialog.model_name.isEnabled())
         dialog.set_error("Ollama failed")
@@ -426,7 +434,13 @@ class DesktopUiTests(unittest.TestCase):
             )
             window.set_mode("agent")
             window.composer.setPlainText("Check every button")
-            window.send_button.click()
+            with mock.patch.object(
+                ui.QMessageBox,
+                "warning",
+                return_value=ui.QMessageBox.StandardButton.Yes,
+            ) as confirm_agent:
+                window.send_button.click()
+            confirm_agent.assert_called_once()
             self.assertEqual(agent_tasks, ["Check every button"])
 
             export_path = Path(temporary) / "conversation.md"
@@ -451,45 +465,38 @@ class DesktopUiTests(unittest.TestCase):
         window.left_rail.settings_button.click()
         self._close(window)
 
-    def test_tor_pill_click_starts_and_stops_tor(self) -> None:
+    def test_tor_pill_reports_managed_verified_and_off_states(self) -> None:
         window = self._window()
         window.demo = False
         core = window.core
-        core.tor_check = lambda: None
-        core._port = 9050
-        launched: list[list[str]] = []
+        core._port = None
 
         class _Process:
             def __init__(self) -> None:
                 self.alive = True
-                self.terminated = False
+                self.stopped = False
 
             def poll(self):
                 return None if self.alive else 0
 
-            def terminate(self) -> None:
-                self.terminated = True
-                self.alive = False
+        managed = _Process()
+        stopped: list[bool] = []
+        core._managed_tor_process = managed
+        core.stop_managed_tor = lambda: stopped.append(True) or setattr(managed, "alive", False)
+        window._show_local_tor_state(9150)
+        self.assertEqual(window.tor_status.label.text(), "Running · 9150")
+        self.assertEqual(window.tor_phase, "running")
 
-        process = _Process()
+        # A listener that answers but was never verified stays a warning, never "ready".
+        core._managed_tor_process = None
+        window._show_local_tor_state(9151)
+        self.assertEqual(window.tor_status.label.text(), "Proxy · 9151")
+        self.assertEqual(window.tor_phase, "proxy")
 
-        def fake_popen(command, *args, **kwargs):
-            launched.append(list(command))
-            return process
-
-        with mock.patch.object(ui, "_tor_launch_command", return_value=["tor"]),                 mock.patch.object(ui.subprocess, "Popen", fake_popen):
-            window._set_tor_state("Not ready", "bad")
-            window.tor_status.clicked.emit()
-            self.assertEqual(launched, [["tor"]])
-            self.assertTrue(self._wait_until(lambda: window._tor_ready))
-            self.assertIn("Ready", window.tor_status.label.text())
-
-            window.tor_status.clicked.emit()
-
-        self.assertTrue(process.terminated)
-        self.assertFalse(window._tor_ready)
-        self.assertIsNone(core._port)
-        self.assertEqual(window.tor_status.label.text(), "Stopped")
+        window._show_local_tor_state(None)
+        self.assertEqual(window.tor_status.label.text(), "Off")
+        self.assertEqual(window.tor_phase, "off")
+        self.assertFalse(stopped)
         self._close(window)
 
     def test_visible_copy_and_accessible_controls_use_onionmind_language(self) -> None:
@@ -537,6 +544,7 @@ class DesktopUiTests(unittest.TestCase):
         self._close(window)
 
 
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class UpdatePermissionTests(unittest.TestCase):
     """The updater is reachable at all times but networks only with permission."""
 
@@ -691,6 +699,47 @@ class UpdatePermissionTests(unittest.TestCase):
             self._close(dialog)
             self._close(window)
 
+
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
+class NativeTitleBarTests(unittest.TestCase):
+    def test_windows_frame_is_pinned_dark_with_the_modern_attribute(self) -> None:
+        window = mock.Mock()
+        window.winId.return_value = 4242
+        dwm = mock.Mock()
+        dwm.DwmSetWindowAttribute.return_value = 0
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", new=mock.Mock(dwmapi=dwm), create=True):
+            ui._apply_native_dark_title_bar(window)
+        call = dwm.DwmSetWindowAttribute.call_args
+        self.assertEqual(call.args[0], 4242)
+        self.assertEqual(call.args[1], 20)          # DWMWA_USE_IMMERSIVE_DARK_MODE
+        self.assertEqual(call.args[3], 4)
+
+    def test_legacy_attribute_19_is_the_fallback(self) -> None:
+        window = mock.Mock()
+        window.winId.return_value = 4242
+        dwm = mock.Mock()
+        dwm.DwmSetWindowAttribute.side_effect = [2147942487, 0]   # E_INVALIDARG, ok
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", new=mock.Mock(dwmapi=dwm), create=True):
+            ui._apply_native_dark_title_bar(window)
+        self.assertEqual(
+            [c.args[1] for c in dwm.DwmSetWindowAttribute.call_args_list], [20, 19]
+        )
+
+    def test_non_windows_platforms_touch_nothing(self) -> None:
+        window = mock.Mock()
+        with mock.patch.object(ui.os, "name", "posix"):
+            ui._apply_native_dark_title_bar(window)
+        window.winId.assert_not_called()
+
+    def test_dwm_failures_stay_silent(self) -> None:
+        window = mock.Mock()
+        window.winId.side_effect = TypeError("no native handle (offscreen)")
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", create=True) as windll:
+            ui._apply_native_dark_title_bar(window)     # must not raise
+            windll.dwmapi.DwmSetWindowAttribute.assert_not_called()
 
 
 if __name__ == "__main__":

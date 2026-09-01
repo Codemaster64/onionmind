@@ -72,4 +72,16 @@ class ParseTest {
         assertEquals("plain answer", Agent.stripThinking("plain answer"))
         assertEquals("", Agent.stripThinking("<think>still reasoning and never finished"))
     }
+
+    @Test fun stripThinkingVariantsTruncationAndMultipleBlocks() {
+        val tagged = "Before < THINK data-mode='private' >FIRST SECRET</ THINK > middle " +
+                "<tHiNk\tstage=\"second\">SECOND SECRET</ tHiNk\t> after"
+        assertEquals("Before  middle  after", Agent.stripThinking(tagged))
+        assertEquals("Visible", Agent.stripThinking("Visible< THI"))
+        assertEquals("Visible", Agent.stripThinking("Visible< THINK data-mode='private'"))
+        assertEquals("", Agent.stripThinking("< THINK mode=x>SECRET</ THI"))
+
+        val plain = "Math says 2 < 3; <this is ordinary; <thinking> is another tag."
+        assertEquals(plain, Agent.stripThinking(plain))
+    }
 }

@@ -1,33 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Regenerated from the repository logo.svg so the launcher icon matches the
+     canonical Onionmind mark: each ring is an onion layer / Tor hop with a gap
+     that rotates inward, tracing a route to the local core. Viewport is 128 to
+     keep logo.svg's coordinates exactly; the 40 degree gap is the last 11.1%
+     of each ring (trimPathEnd 0.889), positioned by the group rotation. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
+    android:viewportWidth="128"
+    android:viewportHeight="128">
+    <group android:pivotX="64" android:pivotY="64" android:rotation="-104">
+        <path
+            android:pathData="M116,64 A52,52 0 1 1 12,64 A52,52 0 1 1 116,64"
+            android:strokeColor="#7D4698"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.35"
+            android:trimPathEnd="0.889" />
+    </group>
+    <group android:pivotX="64" android:pivotY="64" android:rotation="-32">
+        <path
+            android:pathData="M104,64 A40,40 0 1 1 24,64 A40,40 0 1 1 104,64"
+            android:strokeColor="#7D4698"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.55"
+            android:trimPathEnd="0.889" />
+    </group>
+    <group android:pivotX="64" android:pivotY="64" android:rotation="40">
+        <path
+            android:pathData="M92,64 A28,28 0 1 1 36,64 A28,28 0 1 1 92,64"
+            android:strokeColor="#7D4698"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeAlpha="0.78"
+            android:trimPathEnd="0.889" />
+    </group>
+    <group android:pivotX="64" android:pivotY="64" android:rotation="112">
+        <path
+            android:pathData="M80,64 A16,16 0 1 1 48,64 A16,16 0 1 1 80,64"
+            android:strokeColor="#7D4698"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:trimPathEnd="0.889" />
+    </group>
     <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,12 A42,42 0,1 1,53.9 12"
-        android:strokeColor="#7D4698"
-        android:strokeWidth="5.5"
-        android:strokeAlpha="0.35" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,22 A32,32 0,1 1,53.9 22"
-        android:strokeColor="#7D4698"
-        android:strokeWidth="5.5"
-        android:strokeAlpha="0.55" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,32 A22,22 0,1 1,53.9 32"
-        android:strokeColor="#7D4698"
-        android:strokeWidth="5.5"
-        android:strokeAlpha="0.78" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,42 A12,12 0,1 1,53.9 42"
-        android:strokeColor="#7D4698"
-        android:strokeWidth="5.5" />
-    <path
-        android:fillColor="#7D4698"
-        android:pathData="M54,49 A5,5 0,1 1,53.9 49" />
+        android:pathData="M70,64 A6,6 0 1 1 58,64 A6,6 0 1 1 70,64 Z"
+        android:fillColor="#7D4698" />
 </vector>
