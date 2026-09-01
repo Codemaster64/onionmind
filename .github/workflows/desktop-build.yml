@@ -2,6 +2,7 @@ name: desktop build
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -37,8 +38,11 @@ jobs:
           python -m pip install "requests>=2.32,<3" "PySocks>=1.7,<2"
           python tests/test_parser.py
           python tests/test_backends.py
+          python tests/test_coding_agent.py
+          python tests/test_privacy_contracts.py
           python tests/test_desktop_core.py
           python tests/test_installer_contracts.py
+          python tests/test_release_version_contracts.py
 
       - name: Validate desktop build inputs
         shell: powershell

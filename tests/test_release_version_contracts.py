@@ -43,8 +43,14 @@ class ReleaseVersionContractTests(unittest.TestCase):
                 read("android/Dockerfile"),
             )
         )
+        ci_manifest_version = capture(
+            r'"version": "([^"]+)"',
+            read(".github/workflows/desktop-build.yml"),
+            "CI rolling-release manifest version",
+        )
 
         self.assertEqual(project_version, "1.4.0")
+        self.assertEqual(ci_manifest_version, project_version)
         self.assertEqual(android_version, "1.4")
         self.assertEqual(project_version.removesuffix(".0"), android_version)
         self.assertEqual(len(windows_metadata), 2)

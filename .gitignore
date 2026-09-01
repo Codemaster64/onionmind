@@ -10,3 +10,6 @@ android/local.properties
 *.keystore
 .desktop-build-venv/
 dist/
+# Stray runtime output if the agent shims ever get written to the repo root;
+# the real ones live in ~/.onionmind/shims (see _write_shims in onionmind.py).
+/shims/
