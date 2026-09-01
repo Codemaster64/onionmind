@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Qwen3.8-27B uncensored + Tor web search, on Ollama. Arch and Ubuntu/Debian. One paste.
+# Qwen3.8-27B uncensored + Tor web search, on Ollama. Arch, Ubuntu/Debian, and
+# macOS (Homebrew). One paste.
 # Re-runnable: skips what is already done and resumes partial downloads.
+# ponytail: the macOS branch is syntax-checked (bash -n) and its Tor logic is
+# unit-tested offline in tests/test_privacy_contracts.py, but no installer run
+# has been observed on Apple hardware yet.
 set -euo pipefail
 
 # Weights live outside $HOME deliberately. Ollama runs as User=ollama under systemd:
@@ -8,23 +12,39 @@ set -euo pipefail
 #     service. A ~/ path fails with a bare "no such file" and no chmod fixes it.
 #   - Ubuntu's vendor unit has no ProtectHome, but home dirs are often mode 750.
 # /var/lib is writable and visible on both (Arch's ProtectSystem=full only locks
-# /usr /boot /etc), so one path works everywhere.
-DIR="${ONIONMIND_DIR:-/var/lib/qwen}"
+# /usr /boot /etc), so one path works everywhere. On macOS ollama runs as the
+# logged-in user under brew services, so that reasoning does not apply and the
+# install stays in $HOME.
+OS_NAME=$(uname -s)
+if [ "$OS_NAME" = Darwin ]; then
+  DIR="${ONIONMIND_DIR:-$HOME/.local/share/onionmind}"
+else
+  DIR="${ONIONMIND_DIR:-/var/lib/qwen}"
+fi
 say()  { printf '\033[36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -ne 0 ] || die "run as your normal user, not root - it calls sudo where needed"
-command -v systemctl >/dev/null || die "needs systemd"
+if [ "$OS_NAME" != Darwin ]; then
+  command -v systemctl >/dev/null || die "needs systemd"
+fi
 
-if   command -v pacman  >/dev/null 2>&1; then DISTRO=arch
+if [ "$OS_NAME" = Darwin ]; then DISTRO=mac
+elif command -v pacman  >/dev/null 2>&1; then DISTRO=arch
 elif command -v apt-get >/dev/null 2>&1; then DISTRO=debian
-else die "unsupported distro - needs pacman or apt-get"; fi
+else die "unsupported system - needs Homebrew (macOS), pacman, or apt-get"; fi
 say "Distro family: $DISTRO"
 
 # --- 1. GPU -----------------------------------------------------------------
 VRAM=0
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$DISTRO" = mac ]; then
+  GPU=metal
+  # Unified memory is shared with macOS itself; treat ~5 GB as the OS+apps
+  # floor so model picks are honest about what is actually free.
+  MEM_MB=$(( $(sysctl -n hw.memsize) / 1048576 ))
+  [ "$MEM_MB" -gt 5000 ] && VRAM=$(( MEM_MB - 5000 )) || VRAM=0
+elif command -v nvidia-smi >/dev/null 2>&1; then
   VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)
   GPU=nvidia
 elif [ -d /sys/module/amdgpu ]; then
@@ -41,7 +61,18 @@ say "GPU: $GPU, ${VRAM} MiB VRAM"
 # --- 2. Packages ------------------------------------------------------------
 # Python deps come from the distro, NOT pip: both Arch and Ubuntu 23.04+ mark the
 # system Python externally-managed (PEP 668) and `pip install` refuses outright.
-if [ "$DISTRO" = arch ]; then
+if [ "$DISTRO" = mac ]; then
+  command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS - install it from brew.sh, then rerun"
+  brew list --formula tor >/dev/null 2>&1 || { say "Installing tor (brew)"; brew install tor; }
+  command -v ollama >/dev/null 2>&1 || { say "Installing ollama (brew)"; brew install ollama; }
+  # No distro python packages here: CLT's python3 takes plain --user, brew's
+  # PEP 668 python needs the override flag. Both are user-local, no sudo.
+  if ! python3 -c 'import requests, socks' >/dev/null 2>&1; then
+    python3 -m pip install --user --quiet requests PySocks ||
+      python3 -m pip install --user --quiet --break-system-packages requests PySocks ||
+      warn "python deps failed - run 'python3 -m pip install --user requests PySocks' and rerun"
+  fi
+elif [ "$DISTRO" = arch ]; then
   case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
   PKGS=(tor python-requests python-pysocks python-tk curl "$OLLAMA_PKG")
   MISSING=()
@@ -97,33 +128,45 @@ esac
 
 # --- 3. Tor daemon ----------------------------------------------------------
 # The daemon (SOCKS on 9050) beats Tor Browser here: no GUI, no window to keep open,
-# and systemd restarts it.
-systemctl is-active --quiet tor || { say "Starting tor"; sudo systemctl enable --now tor; }
+# and a service manager restarts it.
+if [ "$DISTRO" = mac ]; then
+  brew services start tor >/dev/null 2>&1 || warn "could not start the tor service - run 'brew services start tor'"
+else
+  systemctl is-active --quiet tor || { say "Starting tor"; sudo systemctl enable --now tor; }
+fi
 tor_up() { (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null && { exec 3<&- 3>&-; return 0; }; return 1; }
 for _ in $(seq 1 40); do tor_up && break; sleep 2; done
 if tor_up; then say "Tor SOCKS up on 9050"
-else warn "tor not listening - 'systemctl status tor'; search will refuse until it is"; fi
+else warn "tor not listening - start it ('brew services start tor' on macOS, 'sudo systemctl start tor' on Linux); search will refuse until it is"; fi
 
 # --- 4. Ollama tuning + service --------------------------------------------
-# Ollama runs as a systemd service under its own user, so exporting these in your shell
-# does nothing - the server never sees them. They have to be a unit drop-in.
-say "Applying ollama tuning (systemd drop-in)"
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-sudo tee /etc/systemd/system/ollama.service.d/10-tuning.conf >/dev/null <<'UNIT'
+if [ "$DISTRO" = mac ]; then
+  # ponytail: brew services has no drop-in environment story, so the Linux
+  # flash-attention/KV-cache tuning below is skipped; ollama's Metal defaults
+  # apply. Revisit if brew grows per-service env config.
+  say "Starting ollama under brew services"
+  brew services start ollama >/dev/null 2>&1 || warn "could not start ollama - run 'brew services start ollama'"
+else
+  # Ollama runs as a systemd service under its own user, so exporting these in your shell
+  # does nothing - the server never sees them. They have to be a unit drop-in.
+  say "Applying ollama tuning (systemd drop-in)"
+  sudo mkdir -p /etc/systemd/system/ollama.service.d
+  sudo tee /etc/systemd/system/ollama.service.d/10-tuning.conf >/dev/null <<'UNIT'
 [Service]
 Environment="OLLAMA_FLASH_ATTENTION=1"
 Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
 UNIT
-sudo systemctl daemon-reload
-sudo systemctl enable --now ollama
-sudo systemctl restart ollama          # pick up the drop-in if it was already running
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ollama
+  sudo systemctl restart ollama          # pick up the drop-in if it was already running
+fi
 
 for _ in $(seq 1 40); do
   curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null && break
   sleep 2
 done
 curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null \
-  || die "ollama did not come up on 11434 ('journalctl -u ollama -n50' to see why)"
+  || die "ollama did not come up on 11434 ('brew services log ollama' on macOS, 'journalctl -u ollama -n50' on Linux)"
 
 # --- 5. Pick the build that fits -------------------------------------------
 # ONIONMIND_MODEL picks what gets installed:
@@ -169,9 +212,13 @@ else
 fi
 
 # --- 6. Weights -------------------------------------------------------------
-sudo mkdir -p "$DIR"
-sudo chown "$(id -u):$(id -g)" "$DIR"
-sudo chmod 755 "$DIR"                  # traversable by the ollama service user
+if [ "$DISTRO" = mac ]; then
+  mkdir -p "$DIR"                      # ollama runs as this user; no service-user dance
+else
+  sudo mkdir -p "$DIR"
+  sudo chown "$(id -u):$(id -g)" "$DIR"
+  sudo chmod 755 "$DIR"                # traversable by the ollama service user
+fi
 
 # Huggingface publishes each LFS object's sha256 in X-Linked-ETag, so a 16GB
 # download can be checked against the digest the host itself serves - no hash
@@ -180,12 +227,13 @@ sudo chmod 755 "$DIR"                  # traversable by the ollama service user
 # inscrutable model-load error. ONIONMIND_SKIP_VERIFY=1 opts out.
 verify() {  # file url
   [ "${ONIONMIND_SKIP_VERIFY:-0}" = 1 ] && return 0
-  command -v sha256sum >/dev/null 2>&1 || return 0
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 0
   want=$(curl -fsSLI "$2" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "x-linked-etag:" {gsub(/"/, "", $2); print $2}' | tail -1)
   case "$want" in
     *[!0-9a-f]* | "") return 0 ;;      # nothing published; nothing to check
   esac
-  got=$(sha256sum "$1" | cut -d' ' -f1)
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$1" | cut -d' ' -f1)
+  else got=$(shasum -a 256 "$1" | cut -d' ' -f1); fi
   if [ "$got" != "$want" ]; then
     rm -f "$1"
     die "$(basename "$1") downloaded corrupt (sha256 $got, expected $want) - deleted it; rerun to try again"
@@ -269,7 +317,7 @@ cat > "$DIR/onionmind.py" <<'PYEOF'
 
 Needs a tor daemon on 9050 (systemctl start tor) or Tor Browser on 9150.
 """
-import sys, os, re, html, json, secrets, socket, socketserver, subprocess, threading, time, urllib.parse, requests
+import sys, os, re, html, json, secrets, shutil, socket, socketserver, subprocess, threading, time, urllib.parse, requests
 
 for _s in (sys.stdout, sys.stderr):              # Windows console defaults to cp1252,
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
@@ -362,11 +410,80 @@ def _tor_browser_roots():
     return unique
 
 
+def _await_tor_ready(timeout, stop_event=None):
+    """Block until our managed tor answers on a SOCKS port, or explain why not."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            stop_managed_tor()
+            raise RuntimeError("Background Tor start was stopped.")
+        port = tor_proxy_port()
+        if port:
+            return port
+        if _managed_tor_process is not None and _managed_tor_process.poll() is not None:
+            break
+        time.sleep(0.25)
+    stop_managed_tor()
+    raise RuntimeError("The background Tor process did not become ready.")
+
+
+def _darwin_tor_binary():
+    """Return a tor binary Onionmind may launch and own on macOS, or None."""
+    found = shutil.which("tor")
+    if not found:
+        found = next(
+            (candidate for candidate in ("/opt/homebrew/bin/tor", "/usr/local/bin/tor")
+             if os.path.isfile(candidate)),
+            None,
+        )
+    return found
+
+
+def _start_darwin_tor(stop_event=None, timeout=30):
+    """Launch Homebrew's tor with a generated torrc this session owns (macOS).
+
+    The Tor Browser bundle layout is deliberately not parsed here; `brew
+    install tor` is the documented path, and the installer normally runs it as
+    a brew service - this is the fallback when nothing is listening. The torrc
+    mirrors Android's ProcessManager (SOCKS on 9050, a private data dir, no
+    control cookie), and stop_managed_tor() still only ever touches the
+    process started below.
+    """
+    global _managed_tor_process
+    tor = _darwin_tor_binary()
+    if tor is None:
+        raise RuntimeError(
+            "No tor binary found. Install it with 'brew install tor' (or start "
+            "your Tor service), then enable Tor search again."
+        )
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("Background Tor start was stopped.")
+    data = os.path.join(os.path.expanduser("~"), ".onionmind", "tor")
+    os.makedirs(data, exist_ok=True)
+    torrc = os.path.join(data, "torrc")
+    with open(torrc, "w", encoding="utf-8") as handle:
+        handle.write(
+            "SocksPort 9050\n"
+            f"DataDirectory \"{data}\"\n"
+            "CookieAuthentication 0\n"
+            "AvoidDiskWrites 1\n"
+        )
+    _managed_tor_process = subprocess.Popen(
+        [tor, "-f", torrc],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return _await_tor_ready(timeout, stop_event)
+
+
 def start_tor_hidden(timeout=30, stop_event=None):
     """Start Tor Browser's Tor daemon without opening a browser or console window.
 
     Called only after the user opts into Tor search. Existing Tor proxies are
-    reused and never adopted or stopped by Onionmind.
+    reused and never adopted or stopped by Onionmind. On macOS there is no
+    Tor Browser bundle to mine; Homebrew's tor is launched under a torrc we
+    own instead.
     """
     global _managed_tor_process
     existing = tor_proxy_port()
@@ -375,6 +492,8 @@ def start_tor_hidden(timeout=30, stop_event=None):
     if _managed_tor_process is not None:
         stop_managed_tor()
     if os.name != "nt":
+        if sys.platform == "darwin":
+            return _start_darwin_tor(stop_event=stop_event, timeout=timeout)
         raise RuntimeError("Start the local Tor service, then enable Tor search again.")
 
     for root in _tor_browser_roots():
@@ -405,19 +524,7 @@ def start_tor_hidden(timeout=30, stop_event=None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if stop_event is not None and stop_event.is_set():
-                stop_managed_tor()
-                raise RuntimeError("Background Tor start was stopped.")
-            port = tor_proxy_port()
-            if port:
-                return port
-            if _managed_tor_process.poll() is not None:
-                break
-            time.sleep(0.25)
-        stop_managed_tor()
-        raise RuntimeError("The background Tor process did not become ready.")
+        return _await_tor_ready(timeout, stop_event)
     raise RuntimeError("Tor Browser's background Tor process was not found. Install Tor Browser first.")
 
 
@@ -8731,11 +8838,17 @@ chmod 644 "$DIR/logo.svg"
 # runtime arguments and never interpolate the install path through sed.
 DIR_LITERAL=$(python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$DIR")
 MODEL_LITERAL=$(python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$MODEL_NAME")
+# The generated launcher nudges the local tor service awake if it is not
+# running. The right command differs per platform; neither starts Tor Browser.
+if [ "$DISTRO" = mac ]; then
+  TOR_NUDGE='nc -z 127.0.0.1 9050 2>/dev/null || echo "[tor] not running - search will refuse until: brew services start tor"'
+else
+  TOR_NUDGE='systemctl is-active --quiet tor 2>/dev/null || sudo -n systemctl start tor 2>/dev/null || echo "[tor] not running - search will refuse until: sudo systemctl start tor"'
+fi
 sudo tee /usr/local/bin/onionmind >/dev/null <<LAUNCH
 #!/bin/sh
 DIR=$DIR_LITERAL
-systemctl is-active --quiet tor 2>/dev/null || sudo -n systemctl start tor 2>/dev/null \
-  || echo "[tor] not running - search will refuse until: sudo systemctl start tor"
+$TOR_NUDGE
 cd "\$HOME"             # /save <file> lands here
 PYTHON="\$DIR/desktop-env/bin/python"
 [ -x "\$PYTHON" ] && [ -f "\$DIR/desktop-env/.onionmind-desktop-ready" ] || PYTHON=python3
@@ -8813,8 +8926,9 @@ exit "\$status"
 UPDATE
 sudo chmod 755 /usr/local/bin/onionmind-update
 
-mkdir -p "$HOME/.local/share/applications"
-cat > "$HOME/.local/share/applications/onionmind.desktop" <<DESK
+if [ "$DISTRO" != mac ]; then
+  mkdir -p "$HOME/.local/share/applications"
+  cat > "$HOME/.local/share/applications/onionmind.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=Onionmind
@@ -8824,13 +8938,14 @@ Icon=$DIR/logo.svg
 Terminal=false
 Categories=Network;Utility;
 DESK
-# desktop icon only if the DE actually has a Desktop dir
-DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
-if [ -d "$DESKTOP_DIR" ]; then
-  cp "$HOME/.local/share/applications/onionmind.desktop" "$DESKTOP_DIR/onionmind.desktop"
-  chmod +x "$DESKTOP_DIR/onionmind.desktop"
+  # desktop icon only if the DE actually has a Desktop dir
+  DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
+  if [ -d "$DESKTOP_DIR" ]; then
+    cp "$HOME/.local/share/applications/onionmind.desktop" "$DESKTOP_DIR/onionmind.desktop"
+    chmod +x "$DESKTOP_DIR/onionmind.desktop"
+  fi
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 fi
-command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 echo
 say "Ready"
@@ -8839,4 +8954,8 @@ echo "  Coding:      onionmind-code \"task\"   (headless agent; web over Tor onl
 echo "  Updates:     onionmind-update   (code only, model untouched)"
 [ "$VISION" = 1 ] && echo "  Images:      ollama run $MODEL_NAME-vision   (then give it an image path)"
 echo "  Web search:  $DIR/onionmind.py \"your question\""
-echo "  Shortcut:    Onionmind - double-click to open the workbench"
+if [ "$DISTRO" = mac ]; then
+  echo "  Launcher:    Spotlight -> onionmind   (no .app bundle yet; command first)"
+else
+  echo "  Shortcut:    Onionmind - double-click to open the workbench"
+fi

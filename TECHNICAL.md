@@ -656,6 +656,16 @@ OpenAI server in `tests/test_backends.py` — translation, string-encoded tool
 arguments, positional tool ids, and a full search turn. Nothing has run on an
 actual phone yet.
 
+macOS support follows the same honesty rule. What is verified offline:
+`tests/test_privacy_contracts.py` covers the darwin Tor path end to end with
+mocks — a listener is reused before anything launches, Homebrew's `tor` starts
+under a generated torrc (SOCKS 9050, private data dir, no control cookie) with
+output discarded, and a missing binary fails closed with an install hint. The
+installer's Homebrew branch passes `bash -n` and the payload contract. What is
+**not** verified: nothing has been executed on Apple hardware — the installer
+run, brew service behaviour, PySide6-on-mac rendering, and Metal model
+performance are all first-run territory.
+
 ## Notes
 
 - **Vision** is installed automatically as `inferno-vision`. The `mmproj` is the

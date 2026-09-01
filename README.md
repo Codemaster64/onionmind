@@ -6,7 +6,7 @@
 
 **A native, local-first coding workbench with Ollama models and Tor search.**
 
-![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20Android%20%7C%20USB-7D4698)
+![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20USB-7D4698)
 ![local](https://img.shields.io/badge/inference-local--first-black)
 ![speed](https://img.shields.io/badge/speed-up%20to%20166%20tok%2Fs-59316C)
 ![license](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-black)
@@ -96,11 +96,13 @@ destinations before you apply anything — applying is an explicit
 `-Apply -AllowDirectNetwork` step, and only confirmed missing or out-of-policy
 components are installed.
 
-**Linux** — one download, one command:
+**Linux & macOS** — one download, one command:
 **[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)**,
-then `bash install-onionmind.sh` (Arch or Ubuntu/Debian, run as your normal
-user). Same deal — the right model for your GPU, an `onionmind` command and a
-desktop launcher.
+then `bash install-onionmind.sh` (Arch, Ubuntu/Debian, or macOS with Homebrew;
+run as your normal user). Same deal — the right model for your hardware, an
+`onionmind` command and, on Linux, a desktop launcher. The macOS path is new
+and honestly labelled: its Tor logic is unit-tested offline and the installer
+is syntax-checked, but it has not been run on Apple hardware yet.
 
 Already set up and want the newest native Windows build directly? Download the
 rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip),
