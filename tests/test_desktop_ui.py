@@ -273,7 +273,13 @@ class DesktopUiTests(unittest.TestCase):
 
         dialog.model_name.setText("blaze")
         self.assertTrue(dialog.pull_button.isEnabled())
-        dialog.pull_button.click()
+        with mock.patch.object(
+            ui.QMessageBox,
+            "warning",
+            return_value=ui.QMessageBox.StandardButton.Yes,
+        ) as confirm_download:
+            dialog.pull_button.click()
+        confirm_download.assert_called_once()
         self.assertEqual(requested, ["blaze"])
         self.assertFalse(dialog.model_name.isEnabled())
         dialog.set_error("Ollama failed")
@@ -426,7 +432,13 @@ class DesktopUiTests(unittest.TestCase):
             )
             window.set_mode("agent")
             window.composer.setPlainText("Check every button")
-            window.send_button.click()
+            with mock.patch.object(
+                ui.QMessageBox,
+                "warning",
+                return_value=ui.QMessageBox.StandardButton.Yes,
+            ) as confirm_agent:
+                window.send_button.click()
+            confirm_agent.assert_called_once()
             self.assertEqual(agent_tasks, ["Check every button"])
 
             export_path = Path(temporary) / "conversation.md"
@@ -451,45 +463,38 @@ class DesktopUiTests(unittest.TestCase):
         window.left_rail.settings_button.click()
         self._close(window)
 
-    def test_tor_pill_click_starts_and_stops_tor(self) -> None:
+    def test_tor_pill_reports_managed_verified_and_off_states(self) -> None:
         window = self._window()
         window.demo = False
         core = window.core
-        core.tor_check = lambda: None
-        core._port = 9050
-        launched: list[list[str]] = []
+        core._port = None
 
         class _Process:
             def __init__(self) -> None:
                 self.alive = True
-                self.terminated = False
+                self.stopped = False
 
             def poll(self):
                 return None if self.alive else 0
 
-            def terminate(self) -> None:
-                self.terminated = True
-                self.alive = False
+        managed = _Process()
+        stopped: list[bool] = []
+        core._managed_tor_process = managed
+        core.stop_managed_tor = lambda: stopped.append(True) or setattr(managed, "alive", False)
+        window._show_local_tor_state(9150)
+        self.assertEqual(window.tor_status.label.text(), "Running · 9150")
+        self.assertEqual(window.tor_phase, "running")
 
-        process = _Process()
+        # A listener that answers but was never verified stays a warning, never "ready".
+        core._managed_tor_process = None
+        window._show_local_tor_state(9151)
+        self.assertEqual(window.tor_status.label.text(), "Proxy · 9151")
+        self.assertEqual(window.tor_phase, "proxy")
 
-        def fake_popen(command, *args, **kwargs):
-            launched.append(list(command))
-            return process
-
-        with mock.patch.object(ui, "_tor_launch_command", return_value=["tor"]),                 mock.patch.object(ui.subprocess, "Popen", fake_popen):
-            window._set_tor_state("Not ready", "bad")
-            window.tor_status.clicked.emit()
-            self.assertEqual(launched, [["tor"]])
-            self.assertTrue(self._wait_until(lambda: window._tor_ready))
-            self.assertIn("Ready", window.tor_status.label.text())
-
-            window.tor_status.clicked.emit()
-
-        self.assertTrue(process.terminated)
-        self.assertFalse(window._tor_ready)
-        self.assertIsNone(core._port)
-        self.assertEqual(window.tor_status.label.text(), "Stopped")
+        window._show_local_tor_state(None)
+        self.assertEqual(window.tor_status.label.text(), "Off")
+        self.assertEqual(window.tor_phase, "off")
+        self.assertFalse(stopped)
         self._close(window)
 
     def test_visible_copy_and_accessible_controls_use_onionmind_language(self) -> None:

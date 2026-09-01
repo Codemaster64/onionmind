@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -10,11 +12,17 @@ android {
         applicationId = "org.onionmind.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
         ndk { abiFilters += listOf("arm64-v8a") }   // phones this app is for are all arm64
-        val modelMirrorBase = providers.gradleProperty("modelMirrorBase").orNull ?: ""
-        buildConfigField("String", "MODEL_MIRROR_BASE", "\"${modelMirrorBase.replace("\\\"", "\\\\\"")}\"")
+        val modelMirrorBase = providers.gradleProperty("modelMirrorBase").orNull?.trimEnd('/') ?: ""
+        require(modelMirrorBase.isEmpty() || "https".equals(URI(modelMirrorBase).scheme, ignoreCase = true)) {
+            "modelMirrorBase must use HTTPS"
+        }
+        val escapedModelMirrorBase = modelMirrorBase
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+        buildConfigField("String", "MODEL_MIRROR_BASE", "\"$escapedModelMirrorBase\"")
     }
     buildTypes {
         release {

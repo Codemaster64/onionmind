@@ -23,12 +23,13 @@ object Agent {
     const val UA =
         "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
 
-    // Onion first: it never leaves the Tor network (no exit sees the query),
-    // and the clearnet endpoint 403s most tor exits anyway.
-    val ENDPOINTS = listOf(
-        "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/",
-        "https://html.duckduckgo.com/html/",
-    )
+    // The onion service keeps every query inside the Tor network, so no exit
+    // node sees it and a failed onion request can never become a direct one.
+    const val ENDPOINT =
+        "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/"
+
+    private val THINK_TAG =
+        Regex("""<\s*(/?)\s*think(?:\s[^>]*)?>""", RegexOption.IGNORE_CASE)
 
     const val NUM_PREDICT = 16384  // reasoning models spend the budget thinking first
     const val FINAL_NUM_PREDICT = 4096
@@ -112,26 +113,24 @@ object Agent {
 
     fun webSearch(query: String, n: Int = 5): String {
         var err: String? = null
-        for (url in ENDPOINTS) {
-            repeat(2) {
-                val (u, p) = Socks5Socket.randomCreds()
-                val http = client(u, p)
-                try {
-                    http.newCall(
-                        Request.Builder().url(url)
-                            .header("User-Agent", UA)
-                            .post(FormBody.Builder().add("q", query).build())
-                            .build()
-                    ).execute().use { resp ->              // .use: close on every path
-                        if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
-                        val hits = parseResults(resp.body?.string() ?: "", n)
-                        if (hits.isEmpty()) { err = "empty result page"; return@repeat }
-                        System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
-                        return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
-                    }
-                } catch (e: Exception) { err = e.message }
-                finally { retire(http) }
-            }
+        repeat(2) {                                 // each attempt gets a fresh circuit
+            val (u, p) = Socks5Socket.randomCreds()
+            val http = client(u, p)
+            try {
+                http.newCall(
+                    Request.Builder().url(ENDPOINT)
+                        .header("User-Agent", UA)
+                        .post(FormBody.Builder().add("q", query).build())
+                        .build()
+                ).execute().use { resp ->              // .use: close on every path
+                    if (!resp.isSuccessful) { err = "HTTP ${resp.code}"; return@repeat }
+                    val hits = parseResults(resp.body?.string() ?: "", n)
+                    if (hits.isEmpty()) { err = "empty result page"; return@repeat }
+                    System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
+                    return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
+                }
+            } catch (e: Exception) { err = e.message }
+            finally { retire(http) }
         }
         return "(search failed after trying both endpoints on fresh circuits: $err)"
     }
@@ -200,11 +199,97 @@ object Agent {
         "nbsp" to " ", "hellip" to "\u2026", "mdash" to "\u2014", "ndash" to "\u2013",
         "rsquo" to "\u2019", "lsquo" to "\u2018", "ldquo" to "\u201c", "rdquo" to "\u201d")
 
-    /** Ported from strip_thinking: a truncated monologue is not an answer. */
+    private enum class ThinkTagState { INVALID, PREFIX, COMPLETE }
+
+    private data class ThinkTagCandidate(
+        val state: ThinkTagState,
+        val closing: Boolean = false,
+    )
+
+    /** Classify text beginning with '<' against prefixes of THINK_TAG. */
+    private fun thinkTagCandidate(candidate: String): ThinkTagCandidate {
+        if (!candidate.startsWith("<")) return ThinkTagCandidate(ThinkTagState.INVALID)
+        var index = 1
+        while (index < candidate.length && candidate[index].isWhitespace()) index++
+        if (index == candidate.length) return ThinkTagCandidate(ThinkTagState.PREFIX)
+
+        val closing = candidate[index] == '/'
+        if (closing) {
+            index++
+            while (index < candidate.length && candidate[index].isWhitespace()) index++
+            if (index == candidate.length)
+                return ThinkTagCandidate(ThinkTagState.PREFIX, true)
+        }
+
+        for (expected in "think") {
+            if (index == candidate.length)
+                return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+            if (!candidate[index].equals(expected, ignoreCase = true))
+                return ThinkTagCandidate(ThinkTagState.INVALID, closing)
+            index++
+        }
+        if (index == candidate.length)
+            return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+
+        fun completed(): ThinkTagCandidate {
+            val match = THINK_TAG.matchEntire(candidate.substring(0, index + 1))
+            return if (match == null) ThinkTagCandidate(ThinkTagState.INVALID, closing)
+            else ThinkTagCandidate(ThinkTagState.COMPLETE, match.groupValues[1].isNotEmpty())
+        }
+
+        if (candidate[index] == '>') return completed()
+        if (!candidate[index].isWhitespace())
+            return ThinkTagCandidate(ThinkTagState.INVALID, closing)
+        index++
+        while (index < candidate.length) {
+            if (candidate[index] == '>') return completed()
+            index++
+        }
+        return ThinkTagCandidate(ThinkTagState.PREFIX, closing)
+    }
+
+    private fun partialThinkTag(text: String): Pair<Int, Boolean>? {
+        var start = text.indexOf('<')
+        while (start >= 0) {
+            val candidate = thinkTagCandidate(text.substring(start))
+            if (candidate.state == ThinkTagState.PREFIX)
+                return Pair(start, candidate.closing)
+            start = text.indexOf('<', start + 1)
+        }
+        return null
+    }
+
+    /** Remove all complete or truncated reasoning blocks, failing closed. */
     fun stripThinking(text: String): String {
-        if (text.contains("</think>")) return text.substringAfterLast("</think>").trim()
-        if (text.contains("<think>")) return ""
-        return text.trim()
+        val visible = StringBuilder()
+        var cursor = 0
+        var depth = 0
+        for (tag in THINK_TAG.findAll(text)) {
+            val closing = tag.groupValues[1].isNotEmpty()
+            if (closing) {
+                if (depth > 0) {
+                    depth--
+                    if (depth == 0) cursor = tag.range.last + 1
+                } else {
+                    visible.clear()
+                    cursor = tag.range.last + 1
+                }
+                continue
+            }
+            if (depth == 0) visible.append(text.substring(cursor, tag.range.first))
+            depth++
+        }
+
+        if (depth == 0) {
+            val tail = text.substring(cursor)
+            val partial = partialThinkTag(tail)
+            when {
+                partial == null -> visible.append(tail)
+                partial.second -> visible.clear()
+                else -> visible.append(tail.substring(0, partial.first))
+            }
+        }
+        return visible.toString().trim()
     }
 
     /** llama-server is on loopback, so there is no circuit to isolate and one
@@ -222,10 +307,10 @@ object Agent {
     )
 
     private fun chat(llamaUrl: String, messages: List<JsonObject>, maxTokens: Int,
-                     finalOnly: Boolean = false): ChatReply {
+                     finalOnly: Boolean = false, allowSearch: Boolean = false): ChatReply {
         val body = buildJsonObject {
             put("messages", JsonArray(messages))
-            if (!finalOnly) put("tools", Json.parseToJsonElement(TOOLS))
+            if (!finalOnly && allowSearch) put("tools", Json.parseToJsonElement(TOOLS))
             put("stream", false)
             put("max_tokens", maxTokens)
             if (finalOnly) {
@@ -350,11 +435,14 @@ object Agent {
         return answer
     }
 
-    /** One full user turn against llama-server: chat, tool calls, search, repeat. */
+    /** One full user turn against llama-server: chat, tool calls, search, repeat.
+     *  Search permission is deliberately a required per-call value; callers must
+     *  never infer it from a persistent setting. */
     fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
+             allowSearch: Boolean = false,
              search: (String) -> String = { q -> webSearch(q) }): String {
         for (round in 0 until 6) {
-            val reply = chat(llamaUrl, messages, NUM_PREDICT)
+            val reply = chat(llamaUrl, messages, NUM_PREDICT, allowSearch = allowSearch)
             if (reply.error != null) return reply.error
             val assistant = reply.assistant!!
             messages.add(assistant)
@@ -369,8 +457,10 @@ object Agent {
                 val f = c.jsonObject["function"]!!.jsonObject
                 val name = f["name"]!!.jsonPrimitive.content
                 val args = f["arguments"]?.jsonObject
-                val result = if (name == "web_search")
+                val result = if (name == "web_search" && allowSearch)
                     search(args?.get("query")?.jsonPrimitive?.content ?: "")
+                else if (name == "web_search")
+                    "(web search was not allowed for this turn)"
                 else "(unknown tool $name)"
                 messages.add(buildJsonObject {
                     put("role", "tool")

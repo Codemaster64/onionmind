@@ -20,7 +20,7 @@ class MainActivity : Activity() {
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         setContentView(web)
-        web.loadUrl("http://127.0.0.1:8081/")
+        web.loadUrl(Server.pageUrl())
     }
 
     override fun onDestroy() {

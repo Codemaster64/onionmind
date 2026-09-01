@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import java.io.DataInputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import okhttp3.Request
 import kotlin.concurrent.thread
 
 /**
@@ -57,6 +58,56 @@ class Socks5Test {
                 assertEquals(
                     String(payload), String(got),
                     "bound address leaked into the stream - the reply was not fully drained")
+            }
+        }
+    }
+
+    @Test fun okhttpLeavesTargetHostnameForSocksProxyResolution() {
+        val target = "must-not-resolve.invalid"
+        var receivedHost: String? = null
+        ServerSocket(0).use { proxy ->
+            val worker = thread(isDaemon = true) {
+                proxy.accept().use { connection ->
+                    val input = DataInputStream(connection.getInputStream())
+                    val output = connection.getOutputStream()
+
+                    input.readNBytes(3)
+                    output.write(byteArrayOf(5, 2))
+                    val userLength = input.readNBytes(2)[1].toInt() and 0xff
+                    input.readNBytes(userLength)
+                    val passLength = input.readUnsignedByte()
+                    input.readNBytes(passLength)
+                    output.write(byteArrayOf(1, 0))
+
+                    val connect = input.readNBytes(5)
+                    assertEquals(3, connect[3].toInt(), "SOCKS CONNECT must use a hostname")
+                    val hostLength = connect[4].toInt() and 0xff
+                    receivedHost = String(input.readNBytes(hostLength), Charsets.UTF_8)
+                    input.readNBytes(2)
+                    output.write(byteArrayOf(5, 0, 0, 1, 127, 0, 0, 1, 0, 0))
+
+                    while (input.readLine()?.isNotEmpty() == true) { }
+                    output.write(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                            .toByteArray(),
+                    )
+                    output.flush()
+                }
+            }
+
+            val previousPort = Agent.socksPort
+            Agent.socksPort = proxy.localPort
+            val client = Agent.client("test-circuit", "x")
+            try {
+                client.newCall(Request.Builder().url("http://$target/").build()).execute().use {
+                    assertEquals("OK", it.body?.string())
+                }
+                worker.join(2_000)
+                assertEquals(target, receivedHost, "target hostname must be resolved by Tor")
+            } finally {
+                client.dispatcher.executorService.shutdown()
+                client.connectionPool.evictAll()
+                Agent.socksPort = previousPort
             }
         }
     }
