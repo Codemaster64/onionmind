@@ -107,8 +107,11 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   **off the UI thread** (`SafeWorker`, `WorkerSignals`); cancel actions terminate
   the matching operation. `*Bridge` classes (`SessionBridge`, `WorkspaceBridge`,
   `HarnessBridge`, `UpdateBridge`, `SettingsBridge`) connect core logic to widgets.
-  `OnionmindWindow` is the three-pane shell; `ThinkingStreamFilter` /
-  `ThinkingIndicator` implement the buffer-until-sanitized *Thinking* state.
+  `OnionmindWindow` is the three-pane shell and the deliberate composition
+  root — sessions, workspace, terminal, models, settings, Harness, and updates
+  all plug into it through their `*Bridge` classes, so its fan-in is the
+  design, not drift; `ThinkingStreamFilter` / `ThinkingIndicator` implement
+  the buffer-until-sanitized *Thinking* state.
 
 - **`onionmind.py`** — inference stays here. The desktop calls `turn_stream` etc.;
   it does not reimplement inference or Tor.
@@ -150,6 +153,11 @@ Two Gradle modules, arm64 only:
   `ProcessManager.kt` owns the model catalog and the llama/tor child processes.
   `DownloadService.kt` is a foreground service + wake lock so multi-GB model
   downloads survive Doze/app-cache freezing.
+- **Build helpers** — `android/icons.sh` (launcher icons rendered from the
+  single-sourced `onionmind.ico`), `android/llama.sh` (NDK cross-compile of
+  `llama-server` into `jniLibs`), and `android/itest.sh` (the `:core` suites,
+  live-tor tests included) are the stages `android/Dockerfile` runs before
+  `assembleDebug` — the Dockerfile is what ties them to the rest of the build.
 
 Android source version and packaging notes live in
 [TECHNICAL.md → Android](TECHNICAL.md#android). APKs are built and attached
