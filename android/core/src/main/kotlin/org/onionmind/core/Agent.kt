@@ -132,7 +132,7 @@ object Agent {
             } catch (e: Exception) { err = e.message }
             finally { retire(http) }
         }
-        return "(search failed after trying both endpoints on fresh circuits: $err)"
+        return "(search failed on the onion service after fresh-circuit retries: $err)"
     }
 
     /** Per-result-BLOCK parsing, ported from onionmind.py's parse_results:
@@ -310,7 +310,9 @@ object Agent {
                      finalOnly: Boolean = false, allowSearch: Boolean = false): ChatReply {
         val body = buildJsonObject {
             put("messages", JsonArray(messages))
-            if (!finalOnly && allowSearch) put("tools", Json.parseToJsonElement(TOOLS))
+            // Search consent gates the tools at every request; the no-tools
+            // recovery pass asks for its answer with allowSearch left false.
+            if (allowSearch) put("tools", Json.parseToJsonElement(TOOLS))
             put("stream", false)
             put("max_tokens", maxTokens)
             if (finalOnly) {
