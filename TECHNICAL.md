@@ -236,16 +236,18 @@ In interactive chat, `/save notes.txt` exports the conversation so far.
 
 ### The privacy boundary, precisely
 
-**In Chat mode, only searches leave your machine after installation.** Prompts,
-model reasoning, answers, project snapshots, and session files remain local.
-Search queries go to DuckDuckGo through Tor. Model pulls and application updates
-also require direct downloads when explicitly requested.
+**In Chat mode, prompts and inference stay on your machine.** Model reasoning,
+answers, project snapshots, and session files remain local. Search queries go to
+DuckDuckGo through Tor. Model pulls and the source-install `onionmind-update`
+command are explicit direct downloads; the native desktop updater fetches its
+manifest and bundle through Tor.
 
-**Agent mode leaves over Tor or does not leave.** Every launcher - the workbench,
-`onionmind-code`, and the update scripts - goes through `onionmind.py --agent`,
-which is the one place a circuit is verified. `tor_check()` runs before anything
-starts and exits when no verified circuit exists, so "the agent ran while Tor was
-down" is not a reachable state. It then hands DeepSeek Harness the same
+**Agent mode's supported web path leaves over Tor or does not leave.** Every
+agent launcher—the workbench, `onionmind-code`, and launchers installed by the
+update scripts—goes through `onionmind.py --agent`, which is the one place a
+circuit is verified. `tor_check()` runs before anything starts and exits when no
+verified circuit exists, so "the agent ran while Tor was down" is not a reachable
+state. It then hands DeepSeek Harness the same
 containment `run_code()` gives Qwen Code: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
 and `NODE_USE_ENV_PROXY` point at a loopback HTTP bridge that only knows how to
 dial out through Tor (an unroutable host gets a 502, never a direct connection),
@@ -348,9 +350,11 @@ project as the working directory.
 direct Harness configurations that support patches. It invokes
 `onionmind.py --tor-search`, which verifies Tor and creates the same fresh circuit
 used by Onionmind Chat. Ollama's current `ollama launch dsh` wrapper rejects a
-custom `--patch`, so the shipped wrapper does not claim to load it. Arbitrary
-Harness shell/network tools are outside the Tor-search provider boundary in all
-configurations.
+custom `--patch`, so the shipped wrapper does not claim to load it. Its built-in
+provider is still a Node HTTP client and therefore inherits the Tor bridge and
+socket shim described above. This is application-level containment: proxy-aware
+traffic and Python/Node children are covered, while an arbitrary external binary
+that ignores proxies requires an OS egress rule, container, or Matchstick.
 
 **Phone realities, honestly:** community figures (not our measurements) put
 the 4B Q4 at roughly 5–15 tok/s depending on chipset. Android will kill
@@ -359,8 +363,12 @@ expect warmth: sustained inference is a benchmark workload for a phone.
 
 ## Going further on privacy
 
-Tor here proxies exactly one thing: the search HTTP request. Everything else about your
-machine is untouched. Extending anonymity means changing **the host**, not this tool.
+Tor protects Onionmind's explicit network paths; it does not reconfigure the whole
+host. Search and native desktop updates use Tor. Agent traffic that honors the
+injected proxy uses the Tor bridge, and Python/Node direct sockets are refused.
+Model downloads, source-install updates, normal applications, and external agent
+commands that ignore proxies can still use the host network. Extending anonymity
+means changing **the host**, not just this tool.
 
 ### Start with a threat model
 
@@ -368,7 +376,7 @@ machine is untouched. Extending anonymity means changing **the host**, not this 
 
 | Adversary | What actually helps |
 |---|---|
-| Ad networks, data brokers | Already handled — searches go over Tor, nothing else leaves |
+| Ad networks, data brokers | Onionmind search uses Tor and local inference emits no telemetry; normal host applications remain outside this boundary. |
 | Your ISP / network admin | They see *that* you use Tor, not what you search. Bridges hide even that. |
 | The search engine | Handled — onion service, fresh circuit per query, no account |
 | Someone with your disk | Full-disk encryption, encrypted swap. Tor is irrelevant here. |
