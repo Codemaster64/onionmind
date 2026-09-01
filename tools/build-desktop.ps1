@@ -249,6 +249,7 @@ $NuitkaArguments = @(
     "-m", "nuitka",
     "--mode=standalone",
     "--enable-plugin=pyside6",
+    "--assume-yes-for-downloads",
     "--deployment",
     "--output-dir=$DistRoot",
     "--output-filename=Onionmind.exe",
