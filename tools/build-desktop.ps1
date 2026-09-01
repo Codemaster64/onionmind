@@ -249,6 +249,9 @@ $NuitkaArguments = @(
     "-m", "nuitka",
     "--mode=standalone",
     "--enable-plugin=pyside6",
+    # Nuitka fetches its own build tooling (the dependency walker) into its
+    # user cache headlessly; the package-index consent gate above is
+    # unaffected - pip still only runs through the audited repair.
     "--assume-yes-for-downloads",
     "--deployment",
     "--output-dir=$DistRoot",
