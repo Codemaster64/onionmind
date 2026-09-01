@@ -50,7 +50,7 @@ launcher shells into. Rough section map (line numbers drift — grep the names):
 
 | Concern | Functions | What it owns |
 |---|---|---|
-| **Tor lifecycle** | `start_tor_hidden`, `stop_managed_tor`, `tor_proxy_port`, `tor_check`, `_tor_browser_roots` | Starts a hidden `tor.exe`/`tor` **it owns**, reuses a pre-existing SOCKS listener without touching it, verifies a live circuit, and **fails closed** if none. Never launches Tor Browser's `firefox.exe`. |
+| **Tor lifecycle** | `start_tor_hidden`, `stop_managed_tor`, `tor_proxy_port`, `tor_check`, `_tor_browser_roots`, `_start_darwin_tor` | Starts a hidden `tor.exe`/`tor` **it owns**, reuses a pre-existing SOCKS listener without touching it, verifies a live circuit, and **fails closed** if none. Windows: Tor Browser's background `tor.exe`. macOS: Homebrew's `tor` under a generated torrc. Linux: the distro service. Never launches Tor Browser's `firefox.exe`. |
 | **Inference** | `resolve_model`, `detect_backend`, `installed_models`, `pull_model`, `_ask_ollama[_stream]`, `_ask_llama`, `turn`, `turn_stream` | Ollama **and** llama.cpp adapters behind one `turn`/`turn_stream` seam. Streaming, image messages, tool calls. Model choice resolves to a **raw** backend name; tier labels (SPARK…PYRE) never reach a backend. |
 | **Privacy filtering** | `strip_thinking`, `_think_tag_candidate`, `_partial_think_tag`, `_mark_incomplete`, `_recover_answer` | Strips private reasoning markup before output. The desktop buffers output behind the *Thinking* state until this has run. |
 | **Web search over Tor** | `web_search`, `parse_results`, `tor_check` | Fresh circuit → DNS through Tor → DuckDuckGo onion. Refuses if the circuit doesn't verify. Search is **off unless enabled for that turn**. |

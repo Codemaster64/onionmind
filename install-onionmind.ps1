@@ -242,7 +242,7 @@ $search = @'
 
 Needs a tor daemon on 9050 (systemctl start tor) or Tor Browser on 9150.
 """
-import sys, os, re, html, json, secrets, socket, socketserver, subprocess, threading, time, urllib.parse, requests
+import sys, os, re, html, json, secrets, shutil, socket, socketserver, subprocess, threading, time, urllib.parse, requests
 
 for _s in (sys.stdout, sys.stderr):              # Windows console defaults to cp1252,
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
@@ -335,11 +335,80 @@ def _tor_browser_roots():
     return unique
 
 
+def _await_tor_ready(timeout, stop_event=None):
+    """Block until our managed tor answers on a SOCKS port, or explain why not."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            stop_managed_tor()
+            raise RuntimeError("Background Tor start was stopped.")
+        port = tor_proxy_port()
+        if port:
+            return port
+        if _managed_tor_process is not None and _managed_tor_process.poll() is not None:
+            break
+        time.sleep(0.25)
+    stop_managed_tor()
+    raise RuntimeError("The background Tor process did not become ready.")
+
+
+def _darwin_tor_binary():
+    """Return a tor binary Onionmind may launch and own on macOS, or None."""
+    found = shutil.which("tor")
+    if not found:
+        found = next(
+            (candidate for candidate in ("/opt/homebrew/bin/tor", "/usr/local/bin/tor")
+             if os.path.isfile(candidate)),
+            None,
+        )
+    return found
+
+
+def _start_darwin_tor(stop_event=None, timeout=30):
+    """Launch Homebrew's tor with a generated torrc this session owns (macOS).
+
+    The Tor Browser bundle layout is deliberately not parsed here; `brew
+    install tor` is the documented path, and the installer normally runs it as
+    a brew service - this is the fallback when nothing is listening. The torrc
+    mirrors Android's ProcessManager (SOCKS on 9050, a private data dir, no
+    control cookie), and stop_managed_tor() still only ever touches the
+    process started below.
+    """
+    global _managed_tor_process
+    tor = _darwin_tor_binary()
+    if tor is None:
+        raise RuntimeError(
+            "No tor binary found. Install it with 'brew install tor' (or start "
+            "your Tor service), then enable Tor search again."
+        )
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("Background Tor start was stopped.")
+    data = os.path.join(os.path.expanduser("~"), ".onionmind", "tor")
+    os.makedirs(data, exist_ok=True)
+    torrc = os.path.join(data, "torrc")
+    with open(torrc, "w", encoding="utf-8") as handle:
+        handle.write(
+            "SocksPort 9050\n"
+            f"DataDirectory \"{data}\"\n"
+            "CookieAuthentication 0\n"
+            "AvoidDiskWrites 1\n"
+        )
+    _managed_tor_process = subprocess.Popen(
+        [tor, "-f", torrc],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return _await_tor_ready(timeout, stop_event)
+
+
 def start_tor_hidden(timeout=30, stop_event=None):
     """Start Tor Browser's Tor daemon without opening a browser or console window.
 
     Called only after the user opts into Tor search. Existing Tor proxies are
-    reused and never adopted or stopped by Onionmind.
+    reused and never adopted or stopped by Onionmind. On macOS there is no
+    Tor Browser bundle to mine; Homebrew's tor is launched under a torrc we
+    own instead.
     """
     global _managed_tor_process
     existing = tor_proxy_port()
@@ -348,6 +417,8 @@ def start_tor_hidden(timeout=30, stop_event=None):
     if _managed_tor_process is not None:
         stop_managed_tor()
     if os.name != "nt":
+        if sys.platform == "darwin":
+            return _start_darwin_tor(stop_event=stop_event, timeout=timeout)
         raise RuntimeError("Start the local Tor service, then enable Tor search again.")
 
     for root in _tor_browser_roots():
@@ -378,19 +449,7 @@ def start_tor_hidden(timeout=30, stop_event=None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if stop_event is not None and stop_event.is_set():
-                stop_managed_tor()
-                raise RuntimeError("Background Tor start was stopped.")
-            port = tor_proxy_port()
-            if port:
-                return port
-            if _managed_tor_process.poll() is not None:
-                break
-            time.sleep(0.25)
-        stop_managed_tor()
-        raise RuntimeError("The background Tor process did not become ready.")
+        return _await_tor_ready(timeout, stop_event)
     raise RuntimeError("Tor Browser's background Tor process was not found. Install Tor Browser first.")
 
 
