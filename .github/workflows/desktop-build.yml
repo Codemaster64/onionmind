@@ -50,7 +50,9 @@ jobs:
 
       - name: Build Onionmind.exe
         shell: powershell
-        run: .\tools\build-desktop.ps1 -PythonExecutable python
+        # The runner venv starts empty, so the consent-gated dependency repair
+        # must be allowed; -Yes skips the interactive prompt headless.
+        run: .\tools\build-desktop.ps1 -PythonExecutable python -AllowDirectNetwork -Yes
 
       - name: Verify standalone bundle
         shell: powershell
