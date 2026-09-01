@@ -46,7 +46,7 @@ class ModelDisplayTests(unittest.TestCase):
         self.assertEqual(tagged.raw_id, "inferno:latest")
         self.assertEqual(tagged.tier, "INFERNO")
         self.assertEqual(tagged.tag, "latest")
-        self.assertIn("inferno:latest", tagged.display_name)
+        self.assertEqual(tagged.display_name, "Qwen3.8 27B · heavy - ~12-16 GB VRAM")
 
         size_alias = core.describe_model("registry.local/onion/qwen3.5:9b")
         self.assertEqual(size_alias.raw_id, "registry.local/onion/qwen3.5:9b")
@@ -56,6 +56,16 @@ class ModelDisplayTests(unittest.TestCase):
         vision = core.describe_model("onionmind-inferno-vision:Q4_K_M")
         self.assertEqual(vision.tier, "INFERNO")
         self.assertEqual(vision.tag, "Q4_K_M")
+        self.assertEqual(
+            vision.display_name, "Qwen3.8 27B vision · heavy - ~12-16 GB VRAM"
+        )
+
+        # A model already named after what it is keeps that name, and still says
+        # what it costs to run.
+        self.assertEqual(
+            size_alias.display_name,
+            "registry.local/onion/qwen3.5:9b · moderate - ~7 GB VRAM",
+        )
 
         unknown = core.describe_model("deepseek-r1:8b")
         self.assertIsNone(unknown.tier)

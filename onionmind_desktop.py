@@ -2501,9 +2501,16 @@ class SettingsDialog(QDialog):
         window = self._window()
         if bridge is None or not bridge.available or window is None:
             return
-        if not window._tor_ready:
+        # The pill can read "Running" on a Tor that has never been verified as
+        # Tor - a listening SOCKS port is not proof. The check needs a verified
+        # circuit, so ask for one here rather than refusing and pointing the
+        # user at a control that no longer exists.
+        probe = getattr(window.core, "tor_proxy_port", None)
+        listening = probe() if callable(probe) else None
+        if not listening and bridge.tor_port() is None:
             self.update_feedback.setText(
-                "Tor is not up. Start it from the toolbar pill, then check again - updates never use a direct connection."
+                "Tor is not up. Allow Tor search on a chat turn to start it, then check "
+                "again - updates never use a direct connection."
             )
             return
         self.check_updates_button.setEnabled(False)
@@ -2511,6 +2518,20 @@ class SettingsDialog(QDialog):
 
         def check_job(signals: WorkerSignals) -> Any:
             del signals
+            if bridge.tor_port() is None:
+                verify = getattr(window.core, "tor_check", None)
+                if not callable(verify):
+                    raise RuntimeError("This Onionmind core cannot verify a Tor circuit.")
+                try:
+                    verify()
+                except SystemExit as exc:
+                    # tor_check() exits the process on the CLI; in the desktop
+                    # app that would kill a worker thread without a word.
+                    raise RuntimeError(_as_text(exc) or "Tor could not be verified.") from None
+                if bridge.tor_port() is None:
+                    raise RuntimeError(
+                        "The local proxy did not verify as Tor; refusing a direct update check."
+                    )
             return bridge.check()
 
         def wire_check(worker: SafeWorker) -> None:
@@ -2645,8 +2666,6 @@ class OnionmindWindow(QMainWindow):
         self.desktop_core = desktop_core
         self.demo = demo
         self._workers: set[SafeWorker] = set()
-        self._tor_ready = False
-        self._tor_busy = False
         data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
         self.data_root = Path(data_location or (Path.home() / ".onionmind")) / "desktop"
         self.data_root.mkdir(parents=True, exist_ok=True)
@@ -3245,19 +3264,23 @@ class OnionmindWindow(QMainWindow):
         if callable(helper):
             try:
                 display = helper(raw_id)
-                tier = _as_text(_field(display, "tier", "")).upper()
-                if tier:
-                    return tier
+                described = _as_text(_field(display, "display_name", ""))
+                if described:
+                    return described
             except Exception:
                 pass
         lower = raw_id.lower()
-        tiers = ("spark", "ember", "blaze", "inferno", "cinder", "wildfire", "flashpoint", "phoenix", "nova", "pyre")
-        tier = next((name.upper() for name in tiers if name in lower), "")
-        if tier:
-            return tier
-        tag = raw_id.rsplit(":", 1)[-1] if ":" in raw_id else ""
-        size = tag.upper() if re.fullmatch(r"\d+(?:\.\d+)?B", tag, re.IGNORECASE) else ""
-        return "ONIONMIND CUSTOM" + (f" · {size}" if size else "")
+        # Fallback for a core too old to describe models: the shipped tiers, with
+        # what they actually are and what they cost to run.
+        for token, described in (
+            ("spark", "LFM2.5 2.6B · very light - ~2 GB, fine on CPU"),
+            ("ember", "Qwen3.5 4B · light - ~3 GB VRAM"),
+            ("blaze", "Qwen3.5 9B · moderate - ~7 GB VRAM"),
+            ("inferno", "Qwen3.8 27B · heavy - ~12-16 GB VRAM"),
+        ):
+            if token in lower:
+                return described
+        return raw_id
 
     def set_model_options(self, models: Iterable[str], current: str = "") -> None:
         values: list[str] = []

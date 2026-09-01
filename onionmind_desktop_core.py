@@ -101,6 +101,17 @@ _TIER_ALIASES: dict[str, str] = {
 }
 
 
+# What each tier actually is, and what it costs to run. The tier names are
+# branding; the picker states the real model plus its weight class so the cost
+# of a switch is visible before it is made.
+_TIER_MODELS: dict[str, tuple[str, str]] = {
+    "SPARK": ("LFM2.5 2.6B", "very light - ~2 GB, fine on CPU"),
+    "EMBER": ("Qwen3.5 4B", "light - ~3 GB VRAM"),
+    "BLAZE": ("Qwen3.5 9B", "moderate - ~7 GB VRAM"),
+    "INFERNO": ("Qwen3.8 27B", "heavy - ~12-16 GB VRAM"),
+}
+
+
 @dataclass(frozen=True)
 class ModelDisplay:
     """Presentation data for one installed model without losing its identifier."""
@@ -136,6 +147,25 @@ def _tier_for_model(name: str, tag: str | None) -> str | None:
     return None
 
 
+def _display_name_for(tier: str | None, name: str, raw_id: str) -> str:
+    """The real model name and its weight class; the raw id when we know neither."""
+
+    entry = _TIER_MODELS.get(tier or "")
+    if entry is None:
+        return raw_id
+    model, weight = entry
+    tokens = re.split(r"[-_\s]+", name.casefold())
+    # A model already named after what it is keeps that name; only the branded
+    # tier names are translated back.
+    if not any(token.upper() in _TIER_MODELS for token in tokens):
+        return f"{raw_id} · {weight}"
+    for variant in ("vision", "code"):
+        if variant in tokens:
+            model = f"{model} {variant}"
+            break
+    return f"{model} · {weight}"
+
+
 def describe_model(raw_id: str) -> ModelDisplay:
     """Describe an Ollama model while preserving its exact usable identifier.
 
@@ -150,9 +180,12 @@ def describe_model(raw_id: str) -> ModelDisplay:
 
     name, tag = _model_name_and_tag(raw_id)
     tier = _tier_for_model(name, tag)
-    canonical = tier is not None and raw_id.casefold() == tier.casefold()
-    display_name = tier if canonical else f"{tier} · {raw_id}" if tier else raw_id
-    return ModelDisplay(raw_id=raw_id, tier=tier, display_name=display_name, tag=tag)
+    return ModelDisplay(
+        raw_id=raw_id,
+        tier=tier,
+        display_name=_display_name_for(tier, name, raw_id),
+        tag=tag,
+    )
 
 
 def model_displays(raw_ids: Iterable[str]) -> tuple[ModelDisplay, ...]:

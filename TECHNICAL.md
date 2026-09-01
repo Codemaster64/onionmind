@@ -115,8 +115,10 @@ inference continues through `onionmind.py`. Harness remains the agent seam:
 ollama launch dsh --model <raw-ollama-name> -- --profile headless "<task>"
 ```
 
-The raw Ollama model name is always passed to external tools; labels such as
-SPARK, EMBER, BLAZE, and INFERNO are presentation metadata only. Harness output
+The raw Ollama model name is always passed to external tools. The UI labels a
+model with what it actually is plus its weight class (`Qwen3.8 27B · heavy -
+~12-16 GB VRAM`); SPARK, EMBER, BLAZE, and INFERNO are the internal size ladder
+those labels are resolved from, not what is shown. Harness output
 is streamed into the native transcript, and its working directory is the active
 project rather than the user's home directory.
 

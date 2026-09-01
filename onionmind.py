@@ -573,11 +573,13 @@ def pull_model(name, on_progress=None, stop_event=None):
 
 
 def user_error(exc):
-    """Keep implementation names out of the product-facing desktop UI."""
+    """Keep the local runtime's name out of the product-facing desktop UI.
+
+    Model names are left alone: the UI states which model is running and what it
+    costs to run, so renaming it in an error message only hides the answer.
+    """
     return (str(exc).replace("Ollama", "model service")
-            .replace("ollama", "model service")
-            .replace("Qwen3.8", "INFERNO")
-            .replace("Qwen3.5", "MODEL"))
+            .replace("ollama", "model service"))
 
 
 def _to_openai(messages):

@@ -451,7 +451,10 @@ class DesktopUiTests(unittest.TestCase):
             ):
                 window.left_rail.export_button.click()
             self.assertTrue(export_path.exists())
-            self.assertIn("Model: `INFERNO`", export_path.read_text(encoding="utf-8"))
+            self.assertIn(
+                "Model: `Qwen3.8 27B · heavy - ~12-16 GB VRAM`",
+                export_path.read_text(encoding="utf-8"),
+            )
 
         def close_modal() -> None:
             modal = QApplication.activeModalWidget()
@@ -509,7 +512,9 @@ class DesktopUiTests(unittest.TestCase):
         self.assertEqual(ui._brand_runtime_text("test harness"), "test harness")
         window.set_model_options(["deepseek-r1:8b", "inferno:latest"], "deepseek-r1:8b")
         self.assertEqual(window.current_model_id(), "deepseek-r1:8b")
-        forbidden = ("ollama", "deepseek", "harness", " dsh", "llama.cpp", "node.js")
+        # Model names are deliberately NOT branded away: the picker states the
+        # real model and its weight class. Runtime and harness names still are.
+        forbidden = ("ollama", "harness", " dsh", "llama.cpp", "node.js")
         visible: list[str] = [window.windowTitle()]
         for widget in window.findChildren(QWidget):
             for getter_name in (
@@ -532,7 +537,8 @@ class DesktopUiTests(unittest.TestCase):
         copy = "\n".join(visible).lower()
         for term in forbidden:
             self.assertNotIn(term, copy)
-        self.assertIn("onionmind custom · 8b", copy)
+        self.assertIn("deepseek-r1:8b", copy)
+        self.assertIn("qwen3.8 27b · heavy - ~12-16 gb vram", copy)
         buttons = [
             *window.findChildren(QPushButton),
             *window.findChildren(QToolButton),
@@ -676,14 +682,36 @@ class UpdatePermissionTests(unittest.TestCase):
             self.assertFalse(dialog.autocheck_box.isChecked())
             self.assertTrue(dialog.check_updates_button.isEnabled())
 
-            window._tor_ready = False
+            # Nothing listening and nothing verified: refuse without touching
+            # the network.
             with mock.patch.object(bridge, "check", side_effect=AssertionError("network without Tor")):
                 dialog.check_updates_button.click()
                 self.app.processEvents()
                 self.assertIn("tor is not up", dialog.update_feedback.text().lower())
 
+            # A pill reading "Running" only proves a SOCKS port is listening.
+            # The check must verify the circuit itself rather than refuse.
             manifest = self._manifest()
-            window._tor_ready = True
+            verified: list[bool] = []
+            window.core.tor_proxy_port = lambda: 9150
+            window.core.tor_check = lambda: verified.append(True)
+            with (
+                mock.patch.object(bridge, "check", return_value=manifest),
+                mock.patch.object(
+                    bridge,
+                    "tor_port",
+                    side_effect=lambda: 9150 if verified else None,
+                ),
+            ):
+                dialog.check_updates_button.click()
+                self.assertTrue(
+                    self._wait_until(
+                        lambda: "available" in dialog.update_feedback.text().lower()
+                    )
+                )
+                self.assertEqual(verified, [True])
+
+            dialog._download_button = None
             with (
                 mock.patch.object(bridge, "check", return_value=manifest),
                 mock.patch.object(bridge, "tor_port", return_value=9150),

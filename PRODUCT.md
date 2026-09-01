@@ -27,7 +27,7 @@ Users run Onionmind on Windows or Linux, often beside a code editor and terminal
 - Preserve the existing CLI, streaming chat, Ollama and llama.cpp backends, model discovery and download, image input, conversation export, stop control, and Tor search behavior.
 - The desktop surface must be a standalone native program, not a hosted site or a browser-only wrapper.
 - Repository-changing agent work is delegated to the public DeepSeek Harness integration; the UI must not imply a file was changed when it only chatted about it.
-- Model display keeps Onionmind's named tiers: SPARK, EMBER, BLAZE, INFERNO, CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, and PYRE. Backend identifiers remain available internally, while the normal UI uses Onionmind model names.
+- Model display names the model that is actually running and states its weight class, so the cost of a switch is visible before it is made: `Qwen3.8 27B · heavy - ~12-16 GB VRAM`. The tier names (SPARK, EMBER, BLAZE, INFERNO, and the reserved CINDER, WILDFIRE, FLASHPOINT, PHOENIX, NOVA, PYRE) remain the internal size ladder; a model already named after what it is keeps its own name.
 - The product UI names the coding path **Onionmind Agent**. Backend vendor names belong in technical/legal documentation and internal diagnostics, not ordinary interface copy.
 - Installers provision the isolated PySide6 runtime and mark it ready only after an import check; if provisioning fails, the legacy local chat UI remains available as a fallback.
 - Tor readiness and local model-server readiness are separate states and must be shown honestly.
