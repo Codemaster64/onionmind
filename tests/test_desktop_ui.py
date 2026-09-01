@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
@@ -542,6 +544,7 @@ class DesktopUiTests(unittest.TestCase):
         self._close(window)
 
 
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class UpdatePermissionTests(unittest.TestCase):
     """The updater is reachable at all times but networks only with permission."""
 
@@ -696,6 +699,47 @@ class UpdatePermissionTests(unittest.TestCase):
             self._close(dialog)
             self._close(window)
 
+
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
+class NativeTitleBarTests(unittest.TestCase):
+    def test_windows_frame_is_pinned_dark_with_the_modern_attribute(self) -> None:
+        window = mock.Mock()
+        window.winId.return_value = 4242
+        dwm = mock.Mock()
+        dwm.DwmSetWindowAttribute.return_value = 0
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", new=mock.Mock(dwmapi=dwm), create=True):
+            ui._apply_native_dark_title_bar(window)
+        call = dwm.DwmSetWindowAttribute.call_args
+        self.assertEqual(call.args[0], 4242)
+        self.assertEqual(call.args[1], 20)          # DWMWA_USE_IMMERSIVE_DARK_MODE
+        self.assertEqual(call.args[3], 4)
+
+    def test_legacy_attribute_19_is_the_fallback(self) -> None:
+        window = mock.Mock()
+        window.winId.return_value = 4242
+        dwm = mock.Mock()
+        dwm.DwmSetWindowAttribute.side_effect = [2147942487, 0]   # E_INVALIDARG, ok
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", new=mock.Mock(dwmapi=dwm), create=True):
+            ui._apply_native_dark_title_bar(window)
+        self.assertEqual(
+            [c.args[1] for c in dwm.DwmSetWindowAttribute.call_args_list], [20, 19]
+        )
+
+    def test_non_windows_platforms_touch_nothing(self) -> None:
+        window = mock.Mock()
+        with mock.patch.object(ui.os, "name", "posix"):
+            ui._apply_native_dark_title_bar(window)
+        window.winId.assert_not_called()
+
+    def test_dwm_failures_stay_silent(self) -> None:
+        window = mock.Mock()
+        window.winId.side_effect = TypeError("no native handle (offscreen)")
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", create=True) as windll:
+            ui._apply_native_dark_title_bar(window)     # must not raise
+            windll.dwmapi.DwmSetWindowAttribute.assert_not_called()
 
 
 if __name__ == "__main__":
