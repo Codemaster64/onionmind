@@ -3859,7 +3859,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import (
-    QByteArray,
     QObject,
     QPointF,
     QProcess,
@@ -3873,7 +3872,6 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QAction,
     QColor,
     QDesktopServices,
     QFontDatabase,
@@ -3912,7 +3910,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
-    QStackedWidget,
     QTabWidget,
     QTextEdit,
     QToolButton,
