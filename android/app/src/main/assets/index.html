@@ -222,7 +222,7 @@ async function install(id) {
 }
 
 function confirmModelDownload() {
-  return confirm('This model download uses direct HTTPS, not Tor. Continuing exposes this phone’s network address to the model host. Inference and local files stay on this phone. Continue?');
+  return confirm('This model download uses direct HTTPS, not Tor. Continuing exposes this phone’s network address to the model host. Inference and local files stay on this phone. Downloads are resumable even when Onionmind is minimized. Continue?');
 }
 
 function openManager() { $('manager').hidden = false; renderManager(); }
@@ -238,6 +238,7 @@ async function addCustom(urlField) {
   const url = box.value.trim();
   const name = urlField ? '' : $('custom-name').value.trim();
   if (!url) return;
+  if (!confirmModelDownload()) return;
   // file and bytes are derived server-side from the URL and the download itself.
   const r = await api('/api/install', form(new URLSearchParams({name, url})));
   if (!r.ok) { alert(((await r.json().catch(() => ({}))).error) || 'Could not add model'); return; }

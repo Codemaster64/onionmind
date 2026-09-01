@@ -3,6 +3,7 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.onionmind.core.ModelSource
 import org.onionmind.core.OwnedLoopbackProcess
 import java.io.File
 import java.io.FileOutputStream
@@ -70,10 +71,15 @@ object ProcessManager {
 
     fun addCustom(ctx: Context, name: String, url: String, file: String, bytes: Long): Model {
         require(Uri.parse(url).scheme == "https") { "model URL must use HTTPS" }
-        require(file.matches(FILENAME)) { "invalid model filename" }
         require(url.matches(CLEAN)) { "invalid model URL" }
-        require(name.trim().length in 1..80 && name.matches(CLEAN)) { "invalid model name" }
-        val model = Model("custom-" + UUID.randomUUID().toString(), name.trim(), file, url, bytes.coerceAtLeast(0))
+        // Derive BEFORE validating: whatever we derive still has to clear the
+        // same FILENAME gate, so a crafted URL cannot smuggle a path out of
+        // modelDir any more than a typed filename could.
+        val target = file.ifBlank { ModelSource.filenameFrom(url).orEmpty() }
+        require(target.matches(FILENAME)) { "could not read a model filename from that URL" }
+        val label = name.trim().ifBlank { ModelSource.nameFrom(target) }.take(80)
+        require(label.isNotEmpty() && label.matches(CLEAN)) { "invalid model name" }
+        val model = Model("custom-" + UUID.randomUUID().toString(), label, target, url, bytes.coerceAtLeast(0))
         val all = readCustom(ctx).toMutableList().apply { add(model) }
         writeCustom(ctx, all)
         return model
