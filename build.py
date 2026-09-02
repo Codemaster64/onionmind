@@ -26,9 +26,9 @@ SOURCE = ROOT / "onionmind.py"
 
 AUXILIARY_SOURCES = [
     # source,                      path,                    opening delimiter,            closing delimiter, newline
-    ("onionmind_desktop_core.py", "install-onionmind.ps1", "$desktopCore = @'\n",        "\n'@\n",           "\r\n"),
+    ("onionmind_desktop_core.py", "onionmind-setup.cmd", "$desktopCore = @'\n",        "\n'@\n",           "\r\n"),
     ("onionmind_desktop_core.py", "install-onionmind.sh",  "<<'DESKTOPCOREEOF'\n",       "\nDESKTOPCOREEOF\n", "\n"),
-    ("onionmind_desktop.py",      "install-onionmind.ps1", "$desktopUi = @'\n",          "\n'@\n",           "\r\n"),
+    ("onionmind_desktop.py",      "onionmind-setup.cmd", "$desktopUi = @'\n",          "\n'@\n",           "\r\n"),
     ("onionmind_desktop.py",      "install-onionmind.sh",  "<<'DESKTOPUIEOF'\n",         "\nDESKTOPUIEOF\n",   "\n"),
 ]
 
@@ -38,7 +38,7 @@ WINDOWS_SUBS = []
 
 TARGETS = [
     # path,                     opening delimiter,        closing delimiter,  newline, subs
-    ("install-onionmind.ps1",   "$search = @'\n",         "\n'@\n",           "\r\n",  WINDOWS_SUBS),
+    ("onionmind-setup.cmd",   "$search = @'\n",         "\n'@\n",           "\r\n",  WINDOWS_SUBS),
     ("install-onionmind.sh",    "<<'PYEOF'\n",            "\nPYEOF\n",        "\n",    []),
     ("install-onionmind-android.sh", "<<'PYEOF'\n",       "\nPYEOF\n",        "\n",    []),
 ]
@@ -51,7 +51,7 @@ def icon_payloads():
     ico = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
     svg = (ROOT / "logo.svg").read_text(encoding="utf-8").rstrip("\n")
     return {
-        ("install-onionmind.ps1", "$OnionIco = @'\n", "\n'@\n", "\r\n"): ico,
+        ("onionmind-setup.cmd", "$OnionIco = @'\n", "\n'@\n", "\r\n"): ico,
         ("install-onionmind.sh",  "<<'SVGEOF'\n",     "\nSVGEOF\n", "\n"): svg,
     }
 
@@ -146,37 +146,6 @@ def main() -> int:
         path.write_text(splice(path, opener, closer, payload), encoding="utf-8", newline=newline)
         print(f"  injected     {name}  (icon payload, {len(payload.splitlines())} lines)")
 
-    # The one-click Windows download: a batch file that carries the ENTIRE
-    # PowerShell installer after a marker line. cmd stops at `exit /b` and
-    # hands its own file to powershell, which skips to the marker and runs
-    # the payload. Double-click = full install, no paste, no second download.
-    CMD = ROOT / "onionmind-setup.cmd"
-    marker = "#__ONIONMIND_PS__"
-    # the command line must NOT contain the marker literally, or IndexOf finds
-    # itself instead of the payload - hence the split concatenation
-    half1, half2 = marker[:8], marker[8:]
-    ps1 = (ROOT / "install-onionmind.ps1").read_text(encoding="utf-8")
-    polyglot = (
-        "@echo off\n"
-        "rem Onionmind one-click installer. This file is BOTH a batch file and the\n"
-        "rem full PowerShell installer, appended below the marker. Built by build.py.\n"
-        "set \"ONIONMIND_SETUP=%~f0\"\n"
-        "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
-        "$c = [IO.File]::ReadAllText($env:ONIONMIND_SETUP, [Text.Encoding]::UTF8); "
-        "iex $c.Substring($c.IndexOf('" + half1 + "'+'" + half2 + "'))\"\n"
-        "exit /b %ERRORLEVEL%\n"
-        + marker + "\n" + ps1
-    )
-    if CMD.exists() and CMD.read_text(encoding="utf-8").replace("\r\n", "\n") == polyglot:
-        print("  up to date   onionmind-setup.cmd (one-click wrapper)")
-    else:
-        stale += 1
-        if check_only:
-            print("  STALE        onionmind-setup.cmd (one-click wrapper)")
-        else:
-            CMD.write_text(polyglot, encoding="utf-8", newline="\r\n")
-            print(f"  injected     onionmind-setup.cmd  (one-click wrapper, {len(ps1.splitlines())} payload lines)")
-
     line_ending_targets = {
         name: newline for name, _opener, _closer, newline, _subs in TARGETS
     }
@@ -195,6 +164,20 @@ def main() -> int:
         normalized = path.read_text(encoding="utf-8")
         path.write_text(normalized, encoding="utf-8", newline=newline)
         print(f"  normalized   {name} ({newline!r} line endings)")
+
+    # onionmind-setup.cmd is one file doing two jobs: cmd.exe reads the batch
+    # header, stops at `exit /b`, and hands the file to powershell, which skips
+    # to the marker and runs everything after it. Splicing payloads happens
+    # below the marker, so the header should be untouched - assert that rather
+    # than trust it, because losing these six lines turns the one-click
+    # installer into a file that opens in Notepad.
+    setup = (ROOT / "onionmind-setup.cmd").read_text(encoding="utf-8")
+    marker = "#__ONION" + "MIND_PS__"
+    for required in ("@echo off", 'set "ONIONMIND_SETUP=%~f0"', "exit /b %ERRORLEVEL%", marker):
+        if required not in setup.split(marker)[0] + marker:
+            sys.exit(f"ERROR: onionmind-setup.cmd lost its batch header: {required!r}")
+    if setup.index(marker) > 2000:
+        sys.exit("ERROR: onionmind-setup.cmd marker is not in the header")
 
     if check_only and stale:
         print(f"\n{stale} generated-file issue(s) - run: python build.py")

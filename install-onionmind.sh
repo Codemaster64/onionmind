@@ -1131,7 +1131,7 @@ def _save(history, path):
 # true and none of them are its defaults: the model is the local Ollama one, the
 # only way off this machine is Tor, and one instance gets a budget big enough to
 # finish a job instead of the stock 32k that dead-ends a session mid-task.
-# The installed chat model is num_ctx 8192 (install-onionmind.ps1) - fine for a
+# The installed chat model is num_ctx 8192 (onionmind-setup.cmd) - fine for a
 # conversation, useless for an agent whose system prompt and tool schemas eat most
 # of it before the task even starts. THIS is the number that decides whether a
 # complex job is possible; the session limit set from it is only a guard rail on

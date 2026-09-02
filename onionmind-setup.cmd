@@ -20,6 +20,32 @@ $Dir = [IO.Path]::GetFullPath($Dir)
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
+# --- 0. Architecture -------------------------------------------------------
+# PROCESSOR_ARCHITECTURE alone is a trap: under 32-bit PowerShell on 64-bit
+# Windows (WOW64) it reports x86 and would turn a perfectly good x64 machine
+# away. PROCESSOR_ARCHITEW6432 is only set in that case and carries the REAL
+# architecture, so prefer it and fall back.
+$OsArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 }
+          else { $env:PROCESSOR_ARCHITECTURE }
+switch ($OsArch) {
+  'AMD64' { Say "Windows x64 detected" }
+  'ARM64' {
+    # Ollama ships an arm64 build, but the desktop bundle is x64 and PySide6
+    # publishes no arm64 wheel, so the workbench runs under Windows' x64
+    # emulation. It works; it is slower. Say so rather than let it surprise.
+    Say "Windows ARM64 detected - the engine runs native, the desktop app under x64 emulation"
+  }
+  default {
+    # Not a build gap that a 32-bit download would close: Ollama has no 32-bit
+    # build, and PySide6 publishes no 32-bit Windows wheel at all, so there is
+    # no x86 Onionmind to install. Fail here with the reason instead of dying
+    # deep inside winget or at the first Qt import.
+    throw ("This is $OsArch Windows. Onionmind needs 64-bit Windows (x64 or ARM64): " +
+           "its model engine and desktop toolkit are only built for 64-bit, so " +
+           "there is no 32-bit version to install.")
+  }
+}
+
 # --- 1. Ollama -------------------------------------------------------------
 $O = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
 if (-not (Test-Path $O)) {
@@ -1063,7 +1089,7 @@ def _save(history, path):
 # true and none of them are its defaults: the model is the local Ollama one, the
 # only way off this machine is Tor, and one instance gets a budget big enough to
 # finish a job instead of the stock 32k that dead-ends a session mid-task.
-# The installed chat model is num_ctx 8192 (install-onionmind.ps1) - fine for a
+# The installed chat model is num_ctx 8192 (onionmind-setup.cmd) - fine for a
 # conversation, useless for an agent whose system prompt and tool schemas eat most
 # of it before the task even starts. THIS is the number that decides whether a
 # complex job is possible; the session limit set from it is only a guard rail on

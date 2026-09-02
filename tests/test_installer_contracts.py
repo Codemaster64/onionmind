@@ -12,6 +12,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerContractTests(unittest.TestCase):
+    def test_windows_ships_one_installer_that_gates_on_architecture(self) -> None:
+        """One Windows file, and it turns 32-bit away with a reason.
+
+        The .ps1 used to be a second Windows installer that build.py wrapped
+        into the .cmd; now the .cmd IS the installer. And x86 is not a build
+        gap a download could close - Ollama has no 32-bit build and PySide6
+        publishes no 32-bit Windows wheel - so the installer says so instead of
+        failing deep inside winget or at the first Qt import.
+        """
+        self.assertFalse(
+            (ROOT / "install-onionmind.ps1").exists(),
+            "install-onionmind.ps1 is retired; onionmind-setup.cmd is the Windows installer",
+        )
+        setup = self.text("onionmind-setup.cmd")
+
+        # Still a working polyglot: batch header, then the PowerShell payload.
+        header = setup.split("#__ONION" + "MIND_PS__")[0]
+        self.assertIn("@echo off", header)
+        self.assertIn("exit /b %ERRORLEVEL%", header)
+
+        # WOW64 trap: 32-bit PowerShell on 64-bit Windows reports x86 in
+        # PROCESSOR_ARCHITECTURE, so the real architecture must be read from
+        # PROCESSOR_ARCHITEW6432 first or x64 machines get turned away.
+        arch = setup.index("PROCESSOR_ARCHITEW6432")
+        self.assertLess(arch, setup.index("PROCESSOR_ARCHITECTURE", arch))
+        for accepted in ("'AMD64'", "'ARM64'"):
+            self.assertIn(accepted, setup)
+        self.assertIn("there is no 32-bit version to install", setup)
+
     def text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")
 
@@ -27,7 +56,7 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_desktop_runtime_is_used_only_after_an_import_check(self) -> None:
         for name in (
-            "install-onionmind.ps1",
+            "onionmind-setup.cmd",
             "install-onionmind.sh",
             "update-onionmind.ps1",
             "update-onionmind.sh",
@@ -39,7 +68,7 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_network_asset_sets_are_pinned_to_one_resolved_revision(self) -> None:
         for name in (
-            "install-onionmind.ps1",
+            "onionmind-setup.cmd",
             "install-onionmind.sh",
             "update-onionmind.ps1",
             "update-onionmind.sh",
@@ -55,7 +84,7 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_dsh_yaml_paths_escape_single_quotes(self) -> None:
         self.assertIn("replace(\"'\", \"''\")", self.text("install-onionmind.sh"))
-        self.assertIn(".Replace(\"'\", \"''\")", self.text("install-onionmind.ps1"))
+        self.assertIn(".Replace(\"'\", \"''\")", self.text("onionmind-setup.cmd"))
         self.assertIn("replace(\"'\", \"''\")", self.text("update-onionmind.sh"))
         self.assertIn(".Replace(\"'\", \"''\")", self.text("update-onionmind.ps1"))
 
@@ -66,7 +95,7 @@ class InstallerContractTests(unittest.TestCase):
         self.assertNotIn("Get-Content -Raw $env:ONIONMIND_SETUP", setup)
 
     def test_windows_setup_provisions_python_before_model_download(self) -> None:
-        installer = self.text("install-onionmind.ps1")
+        installer = self.text("onionmind-setup.cmd")
         python_install = installer.index("Python.Python.3.12")
         weight_download = installer.index("Downloading $file")
         self.assertLess(python_install, weight_download)
@@ -82,7 +111,7 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_agent_launchers_preflight_the_supported_node_runtime(self) -> None:
         for name in (
-            "install-onionmind.ps1",
+            "onionmind-setup.cmd",
             "install-onionmind.sh",
             "update-onionmind.ps1",
             "update-onionmind.sh",

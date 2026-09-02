@@ -8,7 +8,7 @@ first if you're a user; read this if you're about to change code.
 ## The one rule, up front
 
 `onionmind.py`, `onionmind.ico`, and the logo payloads are **single-sourced**.
-The installers (`install-onionmind.sh`, `install-onionmind.ps1`,
+The installers (`install-onionmind.sh`, `onionmind-setup.cmd`,
 `install-onionmind-android.sh`, `onionmind-setup.cmd`, …) each carry an embedded
 copy. **Never hand-edit those copies.** Edit the source, then:
 

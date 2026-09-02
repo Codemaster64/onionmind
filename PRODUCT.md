@@ -43,7 +43,7 @@ The product name is **Onionmind**. Keep the supplied onion logo and the existing
 - Existing native desktop implementation and local inference/search core: `onionmind.py`.
 - Brand assets: `logo.svg`, `logo-small.svg`, and `onionmind.ico`.
 - DeepSeek Harness Tor integration: `dsh-onionmind-tor-search.js` and `dsh-onionmind-tor.patch.yml`.
-- Install and update flows: `onionmind-setup.cmd`, `install-onionmind.ps1`, `install-onionmind.sh`, `update-onionmind.ps1`, and `update-onionmind.sh`.
+- Install and update flows: `onionmind-setup.cmd`, `install-onionmind.sh`, `update-onionmind.ps1`, and `update-onionmind.sh`.
 - No customer, benchmark, or feature-parity claims beyond the repository evidence should be fabricated.
 
 ## Product Principles

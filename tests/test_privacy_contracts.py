@@ -199,7 +199,7 @@ class DistributionPrivacyTests(unittest.TestCase):
         runtime_holders = (
             "onionmind.py",
             "android/core/src/main/kotlin/org/onionmind/core/Agent.kt",
-            "install-onionmind.ps1",
+            "onionmind-setup.cmd",
             "install-onionmind.sh",
             "install-onionmind-android.sh",
             "onionmind-setup.cmd",
@@ -230,7 +230,7 @@ class DistributionPrivacyTests(unittest.TestCase):
 
     def test_windows_launchers_never_start_tor_browser(self) -> None:
         for name in (
-            "install-onionmind.ps1",
+            "onionmind-setup.cmd",
             "update-onionmind.ps1",
             "onionmind-setup.cmd",
             "onionmind-bootstrap.ps1",

@@ -10,7 +10,10 @@ hardware, and every claim says how it was checked.
 
 ## Quick start
 
-**Windows** — run `onionmind-setup.cmd` or paste `install-onionmind.ps1` into PowerShell.
+**Windows** — run `onionmind-setup.cmd` (double-click, or `.\onionmind-setup.cmd`).
+It is one file that is both the batch launcher and the full PowerShell installer,
+and it refuses 32-bit Windows up front: the model engine and the desktop toolkit
+are 64-bit-only, so there is no x86 build to install.
 **Linux** — `bash install-onionmind.sh` (Arch or Ubuntu/Debian; run as your normal user, it calls `sudo` where needed).
 
 The desktop entry point opens a native PySide6 workbench. For development:
@@ -632,7 +635,7 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 
 | File | |
 |---|---|
-| `install-onionmind.ps1` | One-paste installer. Everything below is produced by it. |
+| `onionmind-setup.cmd` | The Windows installer: one file, batch header plus the full PowerShell installer. Double-click or run it. Refuses 32-bit Windows. |
 | `onionmind.py` | Local inference/search core, compatibility CLI, and legacy-UI fallback. |
 | `onionmind_desktop.py` | Native PySide6 workbench and asynchronous process/UI adapters. |
 | `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
