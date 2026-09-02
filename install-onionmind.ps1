@@ -1464,6 +1464,19 @@ for (const name of ['lookup', 'resolve', 'resolve4', 'resolve6']) {
 """
 
 
+# The ceiling on all of the above, printed wherever the agent starts rather than
+# left in TECHNICAL.md. Every layer here is environment handed to a process
+# running as the user, so anything that does not read that environment is not
+# covered. Only the kernel covers it.
+CONTAINMENT_CEILING = (
+    "[onionmind] ceiling: this is enforced by the agent's ENVIRONMENT, not the OS.\n"
+    "[onionmind]      A compiled binary, `python -S`, or a tool that ignores proxies\n"
+    "[onionmind]      still reaches the network directly. Only an OS egress rule -\n"
+    "[onionmind]      firewall by user, container, netns - or the Matchstick live USB\n"
+    "[onionmind]      closes that for every runtime at once."
+)
+
+
 def _write_shims():
     """Drop the two shims next to the log and return (PYTHONPATH dir, node file).
 
@@ -1502,20 +1515,26 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable="ollama"):
-    """The harness command. Its network boundary is agent_env(), not this line.
+def agent_argv(model=None, task=None, executable=None):
+    """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
-    ponytail: dsh-onionmind-tor.patch.yml would point the harness's OWN search
-    provider at Tor, but ollama's launcher rejects the patch profile today and
-    rejecting it means no agent at all. There is deliberately no way to force it
-    in from the environment: a profile override smuggled past this function is
-    exactly the silent boundary change it exists to prevent. Nothing leaks
-    meanwhile: that provider is a node http client, so the proxy and the socket
-    shims put it on Tor like everything else the agent runs.
+    This used to be `ollama launch dsh -- --profile headless <task>`. The
+    shipped DSH no longer takes a task or a profile at all - it is a browser-UI
+    server now, and that argv exits 1 with "unknown option '--profile'" - so
+    Agent mode had no working agent behind it. Qwen Code is the agent this file
+    already contains and tests, and its -p mode streams to stdout, which is what
+    the desktop's process reader expects.
+
+    ponytail: no --yolo flag exists on this qwen build; the approval mode is a
+    settings key instead, written by qwen_setup(). Passing it here would be a
+    second way to set the same thing, and the settings file is the one the
+    running agent actually reads.
     """
-    argv = [executable, "launch", "dsh", "--model", model or MODEL, "--"]
+    argv = list(executable) if executable else qwen_launcher()
+    if model:
+        argv += ["--model", model]
     if task:                                     # no task = interactive session
-        argv += ["--profile", "headless", task]
+        argv += ["-p", task]
     return argv
 
 
@@ -1548,17 +1567,40 @@ def agent_env(env=None):
     return _contain_env(env)
 
 
-def run_agent(task=None, model=None):
-    """Run the coding agent over Tor and return its exit code."""
+def run_agent(task=None, model=None, yolo=False, workdir=None):
+    """Run the coding agent over Tor and return its exit code.
+
+    qwen_setup() writes the settings the agent reads (deny list, approval mode,
+    proxy) and agent_env() re-verifies Tor and applies the containment, so both
+    halves of the boundary are composed before the process starts.
+    """
     import subprocess
 
-    env = agent_env()                            # SystemExit if Tor is not verified
+    global MODEL
+    # _code_model() derives the coding variant from the module-level MODEL, so
+    # the asked-for model has to land there BEFORE setup runs. Rebinding the
+    # local instead silently ran whatever MODEL already was.
+    if model:
+        MODEL = model
+    workdir = os.path.abspath(workdir or os.getcwd())
+    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo)  # SystemExit if no Tor
     print("[onionmind] agent web: Tor only. Its search goes over Tor, everything it")
     print("[onionmind]      runs inherits the proxy, and its python and node may only")
     print("[onionmind]      open loopback sockets. Refuses to start when Tor is down.")
+    if yolo:
+        print("[onionmind] YOLO: file edits and shell commands run WITHOUT asking.")
+        print("[onionmind]      The network boundary is unchanged - denied commands are")
+        print("[onionmind]      still refused and everything still leaves through Tor.")
+    else:
+        print("[onionmind] approvals: on. Protected actions wait to be approved, and")
+        print("[onionmind]      stop safely where there is nobody to ask.")
     print(f"[onionmind]      Everything it sends out is logged to {NET_LOG}")
+    print(CONTAINMENT_CEILING)
     print()
-    return subprocess.call(agent_argv(model, task), env=env)
+    # Piped stdout is block-buffered, so without this the desktop's process
+    # reader shows nothing until the agent has already produced output.
+    sys.stdout.flush()
+    return subprocess.call(agent_argv(model, task), env=env, cwd=workdir)
 
 
 def spawn_code(workdir, model=None):
@@ -1579,23 +1621,35 @@ def spawn_code(workdir, model=None):
                   "  onionmind --code " + workdir)
 
 
-def run_code(workdir, ctx=None):
-    """Qwen Code on the local model, with Tor the only way out, in a real terminal."""
+def qwen_launcher():
+    """The argv prefix that starts Qwen Code, or exit saying how to install it."""
     import shutil
-    import subprocess
 
-    ctx = ctx or code_ctx()
     qwen = shutil.which("qwen")
     if not qwen:
-        sys.exit("Qwen Code is missing. Install it with:\n"
-                 "  npm install -g @qwen-code/qwen-code")
+        sys.exit("Qwen Code is missing. Install it with:"
+                 + os.linesep + "  npm install -g @qwen-code/qwen-code")
     # CreateProcess cannot execute the .cmd shim npm writes on Windows.
-    launch = ([os.environ.get("COMSPEC", "cmd.exe"), "/c", qwen]
-              if qwen.lower().endswith((".cmd", ".bat")) else [qwen])
+    return ([os.environ.get("COMSPEC", "cmd.exe"), "/c", qwen]
+            if qwen.lower().endswith((".cmd", ".bat")) else [qwen])
 
+
+def qwen_setup(workdir, ctx=None, yolo=False):
+    """Write Qwen Code's settings and build its environment.
+
+    The one place the agent's boundary is composed, shared by the terminal
+    session (run_code) and Agent mode (run_agent), so a change to the deny list
+    or the proxy cannot reach one and miss the other.
+    """
+    ctx = ctx or code_ctx()
     detect_backend()
-    tor_check()                                  # fails closed before anything starts
-    proxy = f"http://127.0.0.1:{start_tor_bridge()}"
+    # agent_env() is the funnel: it starts the hidden Tor, verifies a circuit and
+    # exits if none, points every proxy variable at the bridge and installs the
+    # socket shims. Composing it here rather than beside it means the terminal
+    # session and Agent mode cannot drift apart, and run_code gains the hidden
+    # Tor start it never had - it used to verify a circuit and give up.
+    env = agent_env()
+    proxy = f"http://127.0.0.1:{start_tor_bridge()}"   # idempotent, same port
     model = _code_model(ctx)
 
     # Both backends expose an OpenAI-compatible /v1; Android has no Ollama, so
@@ -1618,6 +1672,14 @@ def run_code(workdir, ctx=None):
         # the tool call is refused, not queued for approval.
         "permissions": {"deny": ["web_search", "web_fetch"] +
                         [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS]},
+        # YOLO stops qwen asking before it edits a file or runs a command. It
+        # does NOT reach the deny list above: those stay hard denials whichever
+        # mode is set (checked against qwen-code - a denied tool is still
+        # refused with permission_mode "yolo" in force), and it cannot touch the
+        # proxy variables or the socket shims at all, because those are
+        # environment rather than policy. YOLO widens what the agent may do to
+        # this machine, never where it may reach off it.
+        "tools": {"approvalMode": "yolo" if yolo else "default"},
         "privacy": {"usageStatisticsEnabled": False},
         "telemetry": {"enabled": False},
         "proxy": proxy,
@@ -1646,10 +1708,16 @@ def run_code(workdir, ctx=None):
     merged.update(settings)
 
     _write_settings(path, merged)
-    env = os.environ.copy()
     env.update(OPENAI_API_KEY="onionmind", OPENAI_MODEL=model, OPENAI_BASE_URL=base)
-    env.update(_proxy_env(proxy))
-    _contain_env(env)                            # refuse sockets that skip the proxy
+    return env, model, ctx, proxy
+
+
+def run_code(workdir, ctx=None, yolo=False):
+    """Qwen Code on the local model, with Tor the only way out, in a real terminal."""
+    import subprocess
+
+    launch = qwen_launcher()
+    env, model, ctx, proxy = qwen_setup(workdir, ctx, yolo)
 
     print(f"[onionmind] coding agent: {model} on {BACKEND}, editing files in {workdir}")
     if model.endswith("-code"):
@@ -1661,6 +1729,7 @@ def run_code(workdir, ctx=None):
     print( "[onionmind]      search and fetch go through Tor, everything it runs inherits")
     print( "[onionmind]      the proxy, commands that cannot be proxied are refused, and")
     print( "[onionmind]      its python and node may only open loopback sockets.")
+    print(CONTAINMENT_CEILING)
     print( "[onionmind] you can watch it work in this window; everything it sends")
     print(f"[onionmind]      out is logged to {NET_LOG}\n")
     resume = []
@@ -2054,21 +2123,27 @@ if __name__ == "__main__":
     if "--mcp" in sys.argv:
         run_mcp()
         raise SystemExit
+    # --yolo is read the same way for both agents: approvals off, boundary intact.
+    yolo = "--yolo" in sys.argv
     if "--code" in sys.argv:
-        rest = [a for a in sys.argv[1:] if a != "--code"]
+        rest = [a for a in sys.argv[1:] if a not in ("--code", "--yolo")]
         if "--model" in rest:
             i = rest.index("--model")
             MODEL = rest.pop(i + 1)
             rest.pop(i)
-        run_code(os.path.abspath(rest[0] if rest else os.getcwd()))
+        run_code(os.path.abspath(rest[0] if rest else os.getcwd()), yolo=yolo)
         raise SystemExit
     if "--agent" in sys.argv:
-        args = [a for a in sys.argv[1:] if a != "--agent"]
+        args = [a for a in sys.argv[1:] if a not in ("--agent", "--yolo")]
         model = None
+        workdir = None
         if len(args) >= 2 and args[0] == "--model":
             model, args = args[1], args[2:]      # task is everything after it
+        if len(args) >= 2 and args[0] == "--cwd":
+            workdir, args = args[1], args[2:]
         try:
-            raise SystemExit(run_agent(" ".join(args).strip() or None, model))
+            raise SystemExit(run_agent(" ".join(args).strip() or None, model,
+                                       yolo=yolo, workdir=workdir))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:
@@ -2170,6 +2245,7 @@ __all__ = [
     "WorkspaceSnapshot",
     "WorkspaceInspector",
     "HARNESS_LIMITATION",
+    "TOR_CONTAINMENT_CEILING",
     "HarnessAvailability",
     "HarnessCommand",
     "HarnessSpec",
@@ -3189,12 +3265,32 @@ class WorkspaceInspector:
         return "".join(chunks)
 
 
+# The honest ceiling on the Tor boundary, said in the user's face rather than
+# only in TECHNICAL.md. Every layer that routes the agent through Tor - the proxy
+# variables, the loopback bridge, the python and node socket shims - is
+# environment handed to a process running as the user, so anything that does not
+# read that environment is not covered. Only the kernel can cover it.
+TOR_CONTAINMENT_CEILING = (
+    "Tor is enforced by the environment the agent runs in, not by the operating "
+    "system. Proxy variables and the injected Python and Node socket shims cover "
+    "every runtime the agent normally reaches for, but a compiled binary, "
+    "python -S, or a tool that ignores proxies outright (ping, nslookup, "
+    "traceroute) can still reach the network directly. Closing that needs an OS "
+    "egress rule - a firewall rule for this user, a container, a network "
+    "namespace - or the Matchstick live USB, whose nftables ruleset already does it."
+)
+
+
 HARNESS_LIMITATION = (
     "Onionmind Agent is an early-access local coding workflow. It starts in the "
     "selected working directory, while its own tools govern what it can access. "
-    "Interactive approval prompts are not available in this build, so protected "
-    "actions stop safely. The agent reaches the web only through Tor: it verifies "
-    "a circuit before it starts and refuses to run without one."
+    "Approvals are on by default: it asks before a protected action, and where "
+    "there is nobody to ask it stops instead of continuing. Ticking YOLO lets it "
+    "edit files and run commands unattended - that widens what it may do to this "
+    "machine, and moves the network boundary not at all. "
+    "The agent reaches the web only through Tor: it verifies "
+    "a circuit before it starts and refuses to run without one.\n\n"
+    + TOR_CONTAINMENT_CEILING
 )
 
 
@@ -5341,9 +5437,14 @@ class WorkspaceBridge:
 
 class HarnessBridge:
     FALLBACK_LIMITATION = (
-        "Onionmind Agent is an early-access local coding workflow. Interactive approval "
-        "prompts are not available in this build, so protected actions stop safely. "
-        "The agent reaches the web only through Tor and does not start without it."
+        "Onionmind Agent is an early-access local coding workflow. Approvals are on "
+        "by default, and YOLO runs edits and commands without asking - which never "
+        "moves the network boundary. "
+        "The agent reaches the web only through Tor and does not start without it.\n\n"
+        "Tor is enforced by the environment the agent runs in, not by the operating "
+        "system: a compiled binary, python -S, or a tool that ignores proxies (ping, "
+        "nslookup) can still reach the network directly. Closing that needs an OS "
+        "egress rule - a firewall rule, a container - or the Matchstick live USB."
     )
 
     def __init__(self, desktop_core: Any, core: Any = None) -> None:
@@ -5356,17 +5457,26 @@ class HarnessBridge:
             except Exception:
                 self.spec = None
 
-    def _launcher(self, model: str, task: str) -> Optional[list[str]]:
+    def _launcher(self, model: str, task: str, cwd: str = "",
+                  yolo: bool = False) -> Optional[list[str]]:
         """``onionmind.py --agent``: the one place Tor is verified and enforced.
 
-        Launching the harness directly would inherit this window's environment,
+        Launching the agent directly would inherit this window's environment,
         which has no proxy and no socket containment - the agent would have
         direct web access whether Tor is up or not.
         """
         script = _as_text(getattr(self.core, "__file__", ""))
         if not script or not callable(getattr(self.core, "run_agent", None)):
             return None
-        return [sys.executable, os.path.abspath(script), "--agent", "--model", model, task]
+        argv = [sys.executable, os.path.abspath(script), "--agent",
+                "--model", model]
+        if yolo:
+            argv.append("--yolo")
+        if cwd:
+            # The working directory is an argument, not just the process cwd:
+            # run_agent writes the project settings there before it starts.
+            argv += ["--cwd", cwd]
+        return argv + [task]
 
     @property
     def limitation(self) -> str:
@@ -5405,8 +5515,9 @@ class HarnessBridge:
             else "Onionmind Agent is not ready. Re-run Onionmind setup, then restart the app."
         )
 
-    def build(self, *, model: str, task: str, cwd: str) -> tuple[list[str], str]:
-        launcher = self._launcher(model, task)
+    def build(self, *, model: str, task: str, cwd: str,
+              yolo: bool = False) -> tuple[list[str], str]:
+        launcher = self._launcher(model, task, cwd, yolo)
         if launcher is None:                     # check() refuses first; belt and braces
             raise RuntimeError(
                 "Onionmind Agent has no Tor-verified launcher, so it will not start."
@@ -6616,6 +6727,7 @@ class OnionmindWindow(QMainWindow):
         self.harness_generation = 0
         self.tor_probe_generation = 0
         self.tor_phase = "off"
+        self.tor_stop_event: Optional[threading.Event] = None
         self._project_delete_pending: Optional[str] = None
         self._rail_requested = True
         self._inspector_requested = True
@@ -6723,8 +6835,14 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.model_status)
         self.tor_status = StatusPill("Tor", "Off", "idle")
         self.tor_status.setToolTip(
-            "Local background Tor state. Onionmind starts it without a browser window only after you allow search for a turn."
+            "Local background Tor state. Click to start it without opening a browser window."
         )
+        # The pill emitted clicked into nothing while it drew a pointing-hand
+        # cursor, and Agent mode's own refusal told the user to start Tor from
+        # this toolbar - a control that did not exist. Chat's one-turn search
+        # consent was the only thing that ever started Tor, and Agent mode
+        # cannot reach it.
+        self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
 
         terminal_toggle = QToolButton()
@@ -6951,12 +7069,24 @@ class OnionmindWindow(QMainWindow):
         self.approval_state = QLabel("Protected actions stop safely")
         self.approval_state.setObjectName("accent")
         self.approval_state.setToolTip(
-            "This early-access Agent cannot answer interactive approval prompts, so protected actions stop instead of continuing"
+            "Approvals are on: the agent asks before a protected action, and where there is nobody to ask it stops instead of continuing"
         )
         self.approval_state.setAccessibleName(
             "Onionmind Agent protected actions stop safely"
         )
         controls.addWidget(self.approval_state)
+        self.yolo_consent = QCheckBox("YOLO: run without asking")
+        self.yolo_consent.setChecked(False)
+        self.yolo_consent.setToolTip(
+            "Auto-approve file edits and shell commands for this run. The network "
+            "boundary does not move: commands that cannot be proxied stay refused, "
+            "and everything still leaves through Tor or not at all."
+        )
+        self.yolo_consent.setAccessibleName(
+            "Run Onionmind Agent without approval prompts"
+        )
+        self.yolo_consent.toggled.connect(self._yolo_toggled)
+        controls.addWidget(self.yolo_consent)
         self.search_consent = QCheckBox("Allow Tor search this turn")
         self.search_consent.setChecked(False)
         self.search_consent.setToolTip(
@@ -7061,11 +7191,19 @@ class OnionmindWindow(QMainWindow):
             self._workers.discard(worker)
 
         worker.signals.finished.connect(forget)
-        threading.Thread(
+        thread = threading.Thread(
             target=worker.run,
             name="onionmind-desktop-worker",
             daemon=True,
-        ).start()
+        )
+        # Deferred to the next event-loop turn, not started here. Thread.start()
+        # returns only once the thread is already running, so a job that finishes
+        # without blocking - check() returning "Tor is not up" with no subprocess
+        # to spawn - can emit result BEFORE the caller connects to it, and the
+        # signal goes nowhere: the UI sits on "Preparing..." with no worker alive
+        # and no error. singleShot(0) lets the calling slot finish its connects
+        # first, so every call site is safe whether or not it passes setup.
+        QTimer.singleShot(0, thread.start)
         return worker
 
     def _model_probe_complete(self, payload: tuple[str, list[str]]) -> None:
@@ -7123,28 +7261,152 @@ class OnionmindWindow(QMainWindow):
             self._maybe_autocheck_updates()
             if managed_running:
                 self.tor_status.setToolTip(
-                    "Onionmind's Tor process is running in the background; no Tor Browser or console window is open."
+                    "Onionmind's Tor process is running in the background; no Tor Browser or "
+                    "console window is open. Click to stop it."
                 )
                 self.inspector.append_activity(f"Onionmind-owned background Tor running on local port {port}")
             else:
                 self.tor_status.setToolTip(
-                    "A pre-existing local proxy was verified as Tor. Onionmind did not start or adopt it."
+                    "A pre-existing local proxy was verified as Tor. Onionmind did not start "
+                    "it, so it will not stop it either."
                 )
                 self.inspector.append_activity(f"Pre-existing local Tor proxy verified on port {port}")
         elif port:
             self.tor_phase = "proxy"
             self.tor_status.set_status(f"Proxy · {port}", "warn")
             self.tor_status.setToolTip(
-                "A local SOCKS listener was detected but not externally verified. Search still fails closed."
+                "A local SOCKS listener was detected but not externally verified. Search "
+                "still fails closed. Click to stop it if Onionmind started it."
             )
             self.inspector.append_activity(f"Unverified local SOCKS listener detected on port {port}")
         else:
             self.tor_phase = "off"
             self.tor_status.set_status("Off", "idle")
             self.tor_status.setToolTip(
-                "Tor is off. Onionmind starts it without a browser window only after one-turn search permission."
+                "Tor is off. Click to start it; search still starts it for a "
+                "permitted turn. No browser window is opened."
             )
             self.inspector.append_activity("Background Tor is off; Chat remains local-only")
+
+    def ensure_tor(self, stop_event=None):
+        """Bring Tor up if it is not already, and return the port. Worker-side.
+
+        Honours the core contract underneath: an existing listener is reused
+        and never adopted, and no browser window is opened.
+        """
+        port = getattr(self.core, "_port", None)
+        if port:
+            return port
+        starter = getattr(self.core, "start_tor_hidden", None)
+        if not callable(starter):
+            raise RuntimeError("This Onionmind build cannot start background Tor.")
+        return starter(stop_event=stop_event)
+
+    def announce_tor_starting(self, note: str = "") -> "threading.Event":
+        """Flip the indicator to Starting and hand back the event that cancels it.
+
+        Called on the GUI thread before the worker that does the starting, so
+        the pill never sits on Off while Tor is coming up.
+        """
+        self.tor_probe_generation += 1
+        self.tor_phase = "starting"
+        self.tor_stop_event = threading.Event()
+        self.tor_status.set_status("Starting", "busy")
+        self.tor_status.setToolTip(
+            "Background Tor is starting. Click to stop it. No browser window is opened."
+        )
+        self.set_status(note or "Starting background Tor without opening a browser window…")
+        self.inspector.append_activity(note or "Background Tor start requested")
+        return self.tor_stop_event
+
+    def _toggle_tor(self) -> None:
+        """The indicator is also the control: start when off, stop when up.
+
+        Stop is offered in every phase, mid-start included - start_tor_hidden()
+        polls the stop event while it waits for the SOCKS port, so cancelling a
+        slow bootstrap does not mean waiting out its timeout.
+        """
+        if self.tor_phase == "starting":
+            self.stop_tor("Background Tor start cancelled.")
+            return
+        if self.tor_phase in ("running", "proxy"):
+            self.stop_tor()
+            return
+        # "probing" is the startup detection, not a start in progress: clicking
+        # during it means start, not cancel. announce_tor_starting() bumps the
+        # probe generation, so the in-flight probe's result is discarded rather
+        # than racing the start it just triggered.
+        self._start_tor_from_toolbar()
+
+    def stop_tor(self, note: str = "") -> None:
+        """Stop the Tor this session started, at any point in its life.
+
+        Only ever ours. A listener Onionmind found rather than started is left
+        alone - killing a proxy another program owns is not this app's call -
+        and the indicator says so instead of pretending the click did nothing.
+        """
+        event = getattr(self, "tor_stop_event", None)
+        if event is not None:
+            event.set()                          # unblocks a start still waiting
+        managed = getattr(self.core, "_managed_tor_process", None)
+        stopper = getattr(self.core, "stop_managed_tor", None)
+        self.tor_probe_generation += 1
+        if managed is None and self.tor_phase in ("running", "proxy"):
+            self.tor_status.setToolTip(
+                "This Tor was already running when Onionmind found it. Onionmind did "
+                "not start it and will not stop it; stop it where you started it."
+            )
+            self.set_status("That Tor proxy is not Onionmind's to stop.")
+            self.inspector.append_activity("Stop refused: the Tor proxy was not started by Onionmind")
+            return
+        if callable(stopper):
+            try:
+                stopper()
+            except Exception as exc:             # a dead process is still stopped
+                self.inspector.append_activity(f"Stopping background Tor reported: {exc}")
+        self.tor_stop_event = None
+        self.tor_phase = "off"
+        self.tor_status.set_status("Off", "idle")
+        self.tor_status.setToolTip("Tor is off. Click to start it without opening a browser window.")
+        self.set_status(note or "Background Tor stopped.")
+        self.inspector.append_activity(note or "Background Tor stopped by the user")
+
+    def _start_tor_from_toolbar(self) -> None:
+        """Start background Tor on demand, from the one control that shows it."""
+        if not callable(getattr(self.core, "start_tor_hidden", None)):
+            self.set_status("This Onionmind build cannot start background Tor.")
+            return
+        stop_event = self.announce_tor_starting("Starting background Tor from the toolbar…")
+        generation = self.tor_probe_generation
+
+        def start_job(signals: WorkerSignals) -> Any:
+            del signals
+            return self.ensure_tor(stop_event)
+
+        worker = self._start_worker(start_job)
+        worker.signals.result.connect(
+            lambda port, value=generation: self._toolbar_tor_started(port, value)
+        )
+        worker.signals.error.connect(
+            lambda message, value=generation: self._toolbar_tor_failed(message, value)
+        )
+
+    def _toolbar_tor_started(self, port: Any, generation: int) -> None:
+        if generation != self.tor_probe_generation or self.tor_phase != "starting":
+            return
+        self.tor_stop_event = None
+        self._show_local_tor_state(port)
+
+    def _toolbar_tor_failed(self, message: str, generation: int) -> None:
+        if generation != self.tor_probe_generation or self.tor_phase != "starting":
+            return
+        self.tor_stop_event = None
+        self.tor_phase = "off"
+        self.tor_status.set_status("Off", "idle")
+        message = _brand_runtime_text(message)
+        self.tor_status.setToolTip(message)
+        self.set_status(f"Tor did not start: {message}")
+        self.inspector.append_activity(f"Background Tor failed to start: {message}")
 
     def _poll_tor_liveness(self) -> None:
         """Keep the only Tor indicator honest using local process/socket state."""
@@ -7242,6 +7504,16 @@ class OnionmindWindow(QMainWindow):
             self.settings_bridge.save(self.settings_data)
         self.set_status(f"Model set to {self._describe_model(model)}")
 
+    def _yolo_toggled(self, on: bool) -> None:
+        """The label beside the box states what is actually armed, not a default."""
+        self.approval_state.setText(
+            "YOLO - no approval prompts" if on else "Protected actions stop safely"
+        )
+        self.inspector.append_activity(
+            "YOLO armed: edits and commands run unattended; network boundary unchanged"
+            if on else "Approvals on: protected actions stop safely"
+        )
+
     def set_mode(self, mode: str) -> None:
         mode = "chat" if mode.lower() == "chat" else "agent"
         self.chat_button.setChecked(mode == "chat")
@@ -7249,11 +7521,13 @@ class OnionmindWindow(QMainWindow):
         self.mode = mode
         if mode == "chat":
             self.approval_state.hide()
+            self.yolo_consent.hide()
             self.search_consent.show()
             self.disclosure.setText("Private local chat · Tor search needs one-turn permission")
             self.composer.setPlaceholderText("Ask Onionmind anything…")
         else:
             self.approval_state.show()
+            self.yolo_consent.show()
             self.search_consent.setChecked(False)
             self.search_consent.hide()
             self.disclosure.setText("Early access · Agent network access is separate from Tor search")
@@ -8266,6 +8540,7 @@ class OnionmindWindow(QMainWindow):
             return
         model = self.current_model_id()
         workspace = self.workspace
+        yolo = self.yolo_consent.isChecked()
         self.harness_generation += 1
         generation = self.harness_generation
         self.stream_block = self.transcript.add_message(
@@ -8280,7 +8555,8 @@ class OnionmindWindow(QMainWindow):
             available, reason = self.harness_bridge.check()
             if not available:
                 return {"available": False, "reason": reason}
-            argv, cwd = self.harness_bridge.build(model=model, task=task, cwd=workspace)
+            argv, cwd = self.harness_bridge.build(model=model, task=task,
+                                                  cwd=workspace, yolo=yolo)
             return {"available": True, "argv": argv, "cwd": cwd}
 
         worker = self._start_worker(prepare)
@@ -8597,6 +8873,9 @@ class OnionmindWindow(QMainWindow):
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
         self.model_status.set_status("Local · Ready", "good")
+        # Demo state has to agree with itself now that the pill is a control:
+        # a label saying Running while the phase says off would offer Start.
+        self.tor_phase = "running"
         self.tor_status.set_status("Running · 9150", "good")
         self.workspace = str(Path.home() / "onion" / "leaflink")
         self.repo_label.setText("leaflink")

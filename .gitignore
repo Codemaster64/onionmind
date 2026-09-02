@@ -13,3 +13,7 @@ dist/
 # Stray runtime output if the agent shims ever get written to the repo root;
 # the real ones live in ~/.onionmind/shims (see _write_shims in onionmind.py).
 /shims/
+
+# Qwen Code writes its per-project settings wherever the agent runs; in this
+# repo that is stray output from testing the agent on itself.
+/.qwen/

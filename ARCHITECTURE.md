@@ -83,9 +83,13 @@ no way off.** It is enforced in layers, all funnelled through `agent_env()`:
    and name the only real fix: an **OS egress rule** (firewall-by-user, container,
    netns) — which is what Matchstick's nftables ruleset actually is.
 
-`agent_argv()` also refuses to let a DSH profile override be smuggled in from the
-environment — that would be exactly the silent boundary change the funnel exists
-to prevent.
+Approvals sit *inside* that boundary, not beside it. `qwen_setup()` writes
+`tools.approvalMode` — `default` (ask, and stop where there is nobody to ask) or
+`yolo` (edit and run unattended). YOLO widens what the agent may do to this
+machine and nothing else: `permissions.deny` stays a hard denial in either mode,
+and the proxy variables and socket shims are environment, which an approval
+setting cannot reach. Keep it that way — a YOLO that also relaxed the deny list
+would be exactly the silent boundary change the funnel exists to prevent.
 
 ## The desktop workbench
 
@@ -117,9 +121,8 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   it does not reimplement inference or Tor.
 
 Ollama is the **model seam** (discovery + pulls via its local API, inference via
-the core). Harness is the **agent seam** (`ollama launch dsh --model <raw> --
---profile headless "<task>"`). Raw backend names cross these seams; tier labels
-never do.
+the core). Qwen Code is the **agent seam** (`qwen --model <raw> -p "<task>"`).
+Raw backend names cross these seams; tier labels never do.
 
 ### Self-update over Tor
 

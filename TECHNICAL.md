@@ -79,11 +79,11 @@ means running it again.
 | `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Harness command construction |
 | `onionmind` + desktop icon | native project/session workbench |
 | `onionmind-chat` | compatibility alias for the same native workbench |
-| `onionmind-code "task"` | one-shot DeepSeek Harness headless task through Ollama |
+| `onionmind-code "task"` | Qwen Code in a terminal, with interactive approvals |
 | `onionmind-update` | lightweight code/launcher updater; leaves model weights untouched |
 | Isolated desktop runtime | `requests`, `PySocks`, and `PySide6-Essentials` in `desktop-env` |
 
-Agent mode additionally requires a Node.js version accepted by the current DSH
+Agent mode additionally requires a Node.js version accepted by the current Qwen Code
 package (`^22.19` or `24+`). Both the native preflight and generated CLI launcher
 check this before claiming Harness is ready.
 
@@ -109,10 +109,10 @@ conversation. Keyboard focus, tooltips, visible selection, and standard controls
 remain available without a mouse.
 
 Ollama remains the model seam: discovery and pulls use its public local API and
-inference continues through `onionmind.py`. Harness remains the agent seam:
+inference continues through `onionmind.py`. Qwen Code is the agent seam:
 
 ```text
-ollama launch dsh --model <raw-ollama-name> -- --profile headless "<task>"
+qwen --model <raw-ollama-name> -p "<task>"
 ```
 
 The raw Ollama model name is always passed to external tools. The UI labels a
@@ -122,9 +122,25 @@ those labels are resolved from, not what is shown. Harness output
 is streamed into the native transcript, and its working directory is the active
 project rather than the user's home directory.
 
-The stock DSH headless profile has no interactive approval answerer, so approval
-requests fail closed. Custom DSH profiles can alter that composition. Stop
-terminates the shell or Harness launcher managed by Onionmind; deliberately
+Agent mode previously launched DeepSeek Harness with `--profile headless`. The
+shipped DSH accepts neither that flag nor a task any more - it is a browser-UI
+server, and the old command exits 1 with `unknown option '--profile'` - so Agent
+mode ran Qwen Code instead, the same agent `onionmind-code` drives.
+
+Approvals are a settings key, `tools.approvalMode`, written by `qwen_setup()`.
+The default is `default`: the agent asks before a protected action, and where
+there is nobody to ask (the non-interactive `-p` run Agent mode uses) it stops
+instead of continuing. `--yolo`, or the Agent-mode checkbox, sets `yolo` and the
+agent edits files and runs commands without asking.
+
+**YOLO does not move the network boundary.** The `permissions.deny` list stays a
+hard denial in either mode - verified against qwen-code, where a denied tool is
+still refused with `permission_mode` reported as `yolo` - and YOLO cannot reach
+the proxy variables or the socket shims at all, because those are environment
+rather than policy. It widens what the agent may do to this machine, never where
+it may reach off it.
+
+Stop terminates the shell or agent launcher managed by Onionmind; deliberately
 detached/background child processes can outlive their launcher and may need
 manual termination.
 

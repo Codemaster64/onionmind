@@ -38,6 +38,7 @@ __all__ = [
     "WorkspaceSnapshot",
     "WorkspaceInspector",
     "HARNESS_LIMITATION",
+    "TOR_CONTAINMENT_CEILING",
     "HarnessAvailability",
     "HarnessCommand",
     "HarnessSpec",
@@ -1057,12 +1058,32 @@ class WorkspaceInspector:
         return "".join(chunks)
 
 
+# The honest ceiling on the Tor boundary, said in the user's face rather than
+# only in TECHNICAL.md. Every layer that routes the agent through Tor - the proxy
+# variables, the loopback bridge, the python and node socket shims - is
+# environment handed to a process running as the user, so anything that does not
+# read that environment is not covered. Only the kernel can cover it.
+TOR_CONTAINMENT_CEILING = (
+    "Tor is enforced by the environment the agent runs in, not by the operating "
+    "system. Proxy variables and the injected Python and Node socket shims cover "
+    "every runtime the agent normally reaches for, but a compiled binary, "
+    "python -S, or a tool that ignores proxies outright (ping, nslookup, "
+    "traceroute) can still reach the network directly. Closing that needs an OS "
+    "egress rule - a firewall rule for this user, a container, a network "
+    "namespace - or the Matchstick live USB, whose nftables ruleset already does it."
+)
+
+
 HARNESS_LIMITATION = (
     "Onionmind Agent is an early-access local coding workflow. It starts in the "
     "selected working directory, while its own tools govern what it can access. "
-    "Interactive approval prompts are not available in this build, so protected "
-    "actions stop safely. The agent reaches the web only through Tor: it verifies "
-    "a circuit before it starts and refuses to run without one."
+    "Approvals are on by default: it asks before a protected action, and where "
+    "there is nobody to ask it stops instead of continuing. Ticking YOLO lets it "
+    "edit files and run commands unattended - that widens what it may do to this "
+    "machine, and moves the network boundary not at all. "
+    "The agent reaches the web only through Tor: it verifies "
+    "a circuit before it starts and refuses to run without one.\n\n"
+    + TOR_CONTAINMENT_CEILING
 )
 
 

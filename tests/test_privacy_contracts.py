@@ -253,12 +253,18 @@ class DistributionPrivacyTests(unittest.TestCase):
 
     def test_legacy_agent_cannot_bypass_chat_search_consent(self) -> None:
         core = self.text("onionmind.py")
-        # The coding agent is not a search bypass: run_code verifies a Tor
-        # circuit before anything starts (fails closed), and the launcher is
-        # never given DSH's --patch profile escape hatch.
-        run_code_start = core.index("def run_code(")
-        run_code_end = core.index("\ndef ", run_code_start + 10)
-        self.assertIn("tor_check()", core[run_code_start:run_code_end])
+        # The coding agent is not a search bypass. agent_env() is the funnel:
+        # it starts the hidden Tor and verifies a circuit, failing closed. Both
+        # entry points reach it through qwen_setup(), so the chain is the
+        # contract - checking one function alone would let the other drift.
+        def body(name):
+            start = core.index(name)
+            return core[start:core.index(chr(10) + "def ", start + 10)]
+        self.assertIn("start_tor_hidden()", body("def agent_env("))
+        self.assertIn("tor_check()", body("def agent_env("))
+        self.assertIn("agent_env(", body("def qwen_setup("))
+        for entry in ("def run_code(", "def run_agent("):
+            self.assertIn("qwen_setup(", body(entry), entry)
         self.assertNotIn("--patch", core)
 
     def test_bootstrap_requires_separate_network_consent(self) -> None:

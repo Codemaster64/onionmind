@@ -69,6 +69,124 @@ class DesktopUiTests(unittest.TestCase):
         widget.deleteLater()
         self.app.processEvents()
 
+    def test_tor_pill_click_starts_background_tor(self) -> None:
+        """The pill drew a pointing-hand cursor and its clicked signal went
+        nowhere, so the only way to start Tor was Chat's one-turn search
+        consent - unreachable from Agent mode, whose own refusal told the user
+        to start Tor from this toolbar."""
+        window = self._window()
+        try:
+            calls: list[bool] = []
+
+            def fake_start(*args, **kwargs):
+                del args, kwargs
+                calls.append(True)
+                return 9150
+
+            window.core.start_tor_hidden = fake_start
+            window.tor_phase = "off"             # demo state opens on "running"
+            window.tor_status.clicked.emit()
+            self.assertTrue(
+                self._wait_until(
+                    lambda: bool(calls) and window.tor_phase in ("running", "proxy")
+                )
+            )
+            self.assertIn("9150", window.tor_status.label.text())
+        finally:
+            self._close(window)
+
+    def test_tor_pill_click_during_startup_probe_starts_rather_than_cancels(self) -> None:
+        """A real window opens in the "probing" phase, not "off". Treating that
+        as a start-in-progress made the first click after launch stop Tor."""
+        window = self._window()
+        try:
+            started: list[bool] = []
+            window.core.start_tor_hidden = lambda *a, **k: (started.append(True), 9150)[1]
+            window.tor_phase = "probing"
+            window.tor_status.clicked.emit()
+            self.app.processEvents()
+            self.assertEqual(window.tor_phase, "starting")
+            self.assertTrue(self._wait_until(lambda: bool(started)))
+        finally:
+            self._close(window)
+
+    def test_tor_pill_click_stops_the_tor_onionmind_started(self) -> None:
+        """The same control stops it again, and only ever Onionmind's own."""
+        window = self._window()
+        try:
+            stopped: list[bool] = []
+            window.core.stop_managed_tor = lambda: stopped.append(True)
+            window.core._managed_tor_process = object()   # ours, so ours to stop
+            window.tor_phase = "running"
+            window.tor_status.clicked.emit()
+            self.app.processEvents()
+            self.assertEqual(stopped, [True])
+            self.assertEqual(window.tor_phase, "off")
+
+            # A listener Onionmind only found is left alone.
+            stopped.clear()
+            window.core._managed_tor_process = None
+            window.tor_phase = "running"
+            window.tor_status.clicked.emit()
+            self.app.processEvents()
+            self.assertEqual(stopped, [])
+            self.assertEqual(window.tor_phase, "running")
+        finally:
+            self._close(window)
+
+    def test_agent_yolo_toggle_reaches_the_launcher_and_says_so(self) -> None:
+        """YOLO is a run-shaping choice, so it has to reach the argv that starts
+        the agent - and the label beside it has to name the mode that is armed,
+        not the default."""
+        window = self._window()
+        try:
+            # _launcher refuses without a real core to route through Tor.
+            window.harness_bridge.core = type("C", (), {
+                "__file__": "onionmind.py", "run_agent": staticmethod(lambda *a, **k: 0)})
+            window.set_mode("agent")
+            self.assertTrue(window.yolo_consent.isVisible())
+            self.assertEqual(window.approval_state.text(),
+                             "Protected actions stop safely")
+
+            argv = window.harness_bridge._launcher("m", "task", "C:/work", False)
+            self.assertIsNotNone(argv)
+            self.assertNotIn("--yolo", argv)
+            self.assertIn("--cwd", argv)
+            self.assertEqual(argv[-1], "task")
+
+            window.yolo_consent.setChecked(True)
+            self.app.processEvents()
+            self.assertIn("YOLO", window.approval_state.text())
+
+            armed = window.harness_bridge._launcher("m", "task", "C:/work", True)
+            self.assertIn("--yolo", armed)
+            # The task stays the last argument whichever mode is armed, so the
+            # flag can never be swallowed as part of the prompt.
+            self.assertEqual(armed[-1], "task")
+
+            # Chat mode has no agent to approve for.
+            window.set_mode("chat")
+            self.assertFalse(window.yolo_consent.isVisible())
+        finally:
+            self._close(window)
+
+    def test_instant_worker_result_survives_a_late_connect(self) -> None:
+        """The stall this guards: Agent mode sitting on "Preparing..." forever.
+
+        Every call site connects to the worker AFTER _start_worker returns, and
+        the job that fails fast - harness check() reporting "Tor is not up" with
+        no subprocess to spawn - used to finish before that connect and drop its
+        result on the floor, leaving no worker alive and no message on screen.
+        """
+        window = self._window()
+        try:
+            received: list[object] = []
+            worker = window._start_worker(lambda signals: "done")
+            worker.signals.result.connect(received.append)
+            self.assertTrue(self._wait_until(lambda: received == ["done"]))
+        finally:
+            self._close(window)
+
     def test_left_rail_buttons_emit_and_unavailable_actions_disable(self) -> None:
         rail = ui.LeftRail()
         events: list[tuple[str, str]] = []

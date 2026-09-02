@@ -39,6 +39,7 @@ def run_code_into(root, backend="ollama"):
     os.makedirs(work, exist_ok=True)
     seen = {}
     with mock.patch.object(onionmind, "tor_check"), \
+         mock.patch.object(onionmind, "start_tor_hidden"), \
          mock.patch.object(onionmind, "detect_backend"), \
          mock.patch.object(onionmind, "start_tor_bridge", return_value=9999), \
          mock.patch.object(onionmind, "BACKEND", backend), \
@@ -333,6 +334,7 @@ class McpTests(unittest.TestCase):
         out = io.StringIO()
         lines = "".join(json.dumps(r) + "\n" for r in requests_)
         with mock.patch.object(onionmind, "tor_check"), \
+         mock.patch.object(onionmind, "start_tor_hidden"), \
              mock.patch.object(onionmind.sys, "stdin", io.StringIO(lines)), \
              mock.patch.object(onionmind.sys, "stdout", out):
             onionmind.run_mcp()
@@ -413,9 +415,17 @@ class HarnessAgentTests(unittest.TestCase):
         self.assertTrue(env["ONIONMIND_PYTHON"])
 
     def test_the_command_runs_the_asked_for_model_and_task(self):
-        argv = onionmind.agent_argv("some-model", "fix the parser")
-        self.assertEqual(argv[:5], ["ollama", "launch", "dsh", "--model", "some-model"])
-        self.assertEqual(argv[-3:], ["--profile", "headless", "fix the parser"])
+        # The shipped DSH takes neither a task nor --profile any more (it exits
+        # 1 with "unknown option --profile"), so Agent mode runs Qwen Code
+        # non-interactively instead - the same agent run_code drives.
+        argv = onionmind.agent_argv("some-model", "fix the parser",
+                                    executable=["qwen"])
+        self.assertEqual(argv, ["qwen", "--model", "some-model",
+                                "-p", "fix the parser"])
+        # No task means an interactive session, so no -p at all.
+        self.assertEqual(onionmind.agent_argv("some-model", None,
+                                              executable=["qwen"]),
+                         ["qwen", "--model", "some-model"])
 
     def test_the_search_patch_escape_hatch_is_gone(self):
         # ollama's launcher rejects the patch profile today, and an environment

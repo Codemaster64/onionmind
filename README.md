@@ -46,7 +46,7 @@ model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md
 On desktop, Onionmind is a standalone PySide6 application—not a browser shell,
 WebView, or localhost website. Its three-pane workbench combines project and
 session navigation, a privacy-filtered conversation, integrated terminal, Git changes,
-context inspection, model management, and a one-shot DeepSeek Harness agent mode.
+context inspection, model management, and a one-shot Qwen Code agent mode.
 Each Chat turn immediately opens a textual **Thinking** state in the pending
 Onionmind reply. Model output stays behind that state until the completed response
 has been sanitized for private reasoning markup, then appears in the same reply.
@@ -114,11 +114,10 @@ For repository-aware coding work from a terminal:
 onionmind-code "inspect this repository and explain the failing tests"
 ```
 
-After a direct-network confirmation, it starts DeepSeek Harness in its public
-headless profile using the selected raw Ollama model name. Agent mode currently
-requires Node.js `^22.19` or `24+` and
-reports an actionable setup message when that runtime is missing. DeepSeek
-Harness is currently a developer preview.
+After a direct-network confirmation, it starts Qwen Code on the selected raw
+Ollama model name. Agent mode currently requires Node.js `^22.19` or `24+` and
+reports an actionable setup message when that runtime is missing. Agent mode is
+currently a developer preview.
 
 The agent's only way off the machine is Tor. `onionmind-code` hands over to
 `onionmind.py --agent`, which verifies a circuit first and exits if there is
@@ -187,13 +186,17 @@ export a conversation; the classic CLI still supports `/save notes.txt`.
 - Run a real shell in the selected project with command history and cancel support.
 - Inspect the bounded project tree, Git status and diff, and recent activity beside the conversation.
 - Discover installed Ollama models, see their Onionmind tier names, switch models, and confirm a direct-network pull for another model.
-- Run DeepSeek Harness headlessly in **Agent** mode after confirming its direct-network boundary; no browser window or embedded web UI is involved.
+- Run Qwen Code non-interactively in **Agent** mode after confirming its direct-network boundary; no browser window or embedded web UI is involved.
 
-Stop requests terminate the managed shell or Harness launcher process. A command
+Stop requests terminate the managed shell or agent launcher process. A command
 that deliberately starts detached or background child processes may require
-manual cleanup in the operating system. In the stock DSH headless profile,
-interactive approval requests fail closed; custom DSH profiles can change that
-composition.
+manual cleanup in the operating system.
+
+Approvals are on by default: the agent asks before a protected action, and where
+there is nobody to ask it stops instead of continuing. Ticking **YOLO: run
+without asking** lets it edit files and run commands unattended. YOLO does not
+move the network boundary - commands that cannot be proxied stay refused, and
+everything still leaves through Tor or not at all.
 
 For source development, install `requirements-desktop.txt` and run
 `python onionmind_desktop.py`. GitHub Actions runs the payload check, the core

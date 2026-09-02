@@ -34,9 +34,9 @@ of things you must not get wrong here, and the checks that prove you didn't.
      circuit verifies. Do not add a direct-network fallback.
    - The agent starts in exactly one place (`agent_env()` → `run_agent`/desktop
      *Agent* mode). Do not add a second entry point that skips the funnel.
-   - `agent_argv()` deliberately refuses env-smuggled DSH profile overrides;
-     `_contain_env()` injects the Python/Node socket shims. Don't route around
-     them.
+   - YOLO (`--yolo`, or the Agent-mode checkbox) only sets `tools.approvalMode`.
+     It must never touch `permissions.deny`, the proxy variables or the socket
+     shims `_contain_env()` injects. Don't route around them.
    - Onionmind launches a hidden `tor.exe`/`tor` **it owns** and never Tor
      Browser's `firefox.exe`; it reuses (never kills) a pre-existing SOCKS
      listener. Keep both behaviours.
