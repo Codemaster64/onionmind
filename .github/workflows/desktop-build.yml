@@ -109,6 +109,10 @@ jobs:
       BUNDLE_ASSET: Onionmind-Windows-x64.zip
       MANIFEST_ASSET: onionmind-update.json
     steps:
+      # The installer scripts are attached below, so this job needs the tree as
+      # well as the build artifact.
+      - uses: actions/checkout@v4
+
       - name: Download the built bundle
         uses: actions/download-artifact@v4
         with:
@@ -149,6 +153,11 @@ jobs:
           gh release create desktop-latest \
             --repo "$GITHUB_REPOSITORY" \
             --title "Onionmind desktop (rolling)" \
-            --notes "Rolling Windows build of main, republished on every push. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip." \
+            --notes "Rolling build of main, republished on every push. The installers are attached here because a raw link renders in the browser instead of downloading; release assets are served as attachments. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip." \
             "${BUNDLE_ASSET}" \
-            "${MANIFEST_ASSET}"
+            "${MANIFEST_ASSET}" \
+            onionmind-setup.cmd \
+            install-onionmind.sh \
+            install-onionmind-android.sh \
+            matchstick.cmd \
+            matchstick.sh

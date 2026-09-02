@@ -17,12 +17,12 @@
 [![USB kit](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml)
 [![Ollama Tor plugin](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml)
 
-[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)
-[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)
+[![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/onionmind-setup.cmd)
+[![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/install-onionmind.sh)
 [![Download for Android](https://img.shields.io/badge/Android-releases%20page-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases)
 [![Get the USB stick](https://img.shields.io/badge/USB-Stick%20Matchstick-7D4698?style=for-the-badge&logo=usb&logoColor=white)](#matchstick--the-amnesic-usb-stick)
 
-**Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh)
+**Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.sh)
 
 Windows ships two routes: the one-click `onionmind-setup.cmd` above, and the
 rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip)
@@ -74,7 +74,7 @@ bootstrap creates a command or shortcut. Run `Onionmind.exe` from the extracted
 folder, or create a shortcut to that executable yourself.
 
 **Windows** — one download, one double-click:
-**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/onionmind-setup.cmd)**
+**[⬇ Onionmind-Setup.cmd](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/onionmind-setup.cmd)**
 (about 400 KB — the current installer and its source payloads in one file).
 Double-click it, wait out the
 model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
@@ -97,7 +97,7 @@ destinations before you apply anything — applying is an explicit
 components are installed.
 
 **Linux & macOS** — one download, one command:
-**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind.sh)**,
+**[⬇ install-onionmind.sh](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/install-onionmind.sh)**,
 then `bash install-onionmind.sh` (Arch, Ubuntu/Debian, or macOS with Homebrew;
 run as your normal user). Same deal — the right model for your hardware, an
 `onionmind` command and, on Linux, a desktop launcher. The macOS path is new
@@ -160,7 +160,7 @@ queries are sent to DuckDuckGo with hostname resolution performed by Tor.
 arm64 phones only.
 
 Want a terminal on your phone too? [Termux](https://f-droid.org) +
-**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/install-onionmind-android.sh)**
+**[⬇ install-onionmind-android.sh](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/install-onionmind-android.sh)**
 gives you the same `onionmind` command Android-side.
 
 **Using it**
@@ -260,8 +260,8 @@ nothing of what you did persists. Like Tails, but it runs a 27B AI.
 
 > Strike it anywhere. Burns bright. Leaves only ash.
 
-1. **Download the launcher:** [Windows `matchstick.cmd`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.cmd)
-   or [Linux/macOS `matchstick.sh`](https://github.com/Codemaster64/onionmind/raw/refs/heads/main/matchstick.sh).
+1. **Download the launcher:** [Windows `matchstick.cmd`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.cmd)
+   or [Linux/macOS `matchstick.sh`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.sh).
    Double-click the `.cmd` on Windows, or run `chmod +x matchstick.sh && ./matchstick.sh`
    on Linux/macOS. You do **not** need to clone the repository. Choose one:
 

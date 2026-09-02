@@ -12,6 +12,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerContractTests(unittest.TestCase):
+    def test_download_links_point_at_release_assets_not_raw_files(self) -> None:
+        """A raw github link renders the script; a release asset downloads it.
+
+        github.com/<repo>/raw/... serves text/plain with no Content-Disposition,
+        so clicking a download badge opened the installer as a page of code
+        instead of saving it. Release assets are served as
+        `Content-Disposition: attachment`, so every downloadable script has to
+        be attached to the rolling release AND linked from there.
+        """
+        downloadable = (
+            "onionmind-setup.cmd",
+            "install-onionmind.sh",
+            "install-onionmind-android.sh",
+            "matchstick.cmd",
+            "matchstick.sh",
+        )
+        readme = self.text("README.md")
+        raw = "/raw/refs/heads/main/"
+        for asset in downloadable:
+            self.assertNotIn(
+                raw + asset, readme,
+                f"{asset} is linked as a raw file, so it renders instead of downloading",
+            )
+
+        # The link is only good if the workflow actually publishes the asset.
+        workflow = self.text(".github/workflows/desktop-build.yml")
+        release = workflow[workflow.index("gh release create desktop-latest"):]
+        for asset in downloadable:
+            self.assertIn(asset, release, f"{asset} is linked but never attached to the release")
+        # Attaching needs the tree, which the release job did not check out.
+        self.assertIn("actions/checkout", workflow[:workflow.index("gh release create")])
+
     def test_windows_ships_one_installer_that_gates_on_architecture(self) -> None:
         """One Windows file, and it turns 32-bit away with a reason.
 
