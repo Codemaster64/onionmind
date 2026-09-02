@@ -74,7 +74,11 @@ if [ "$DISTRO" = mac ]; then
   fi
 elif [ "$DISTRO" = arch ]; then
   case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
-  PKGS=(tor python-requests python-pysocks python-tk curl "$OLLAMA_PKG")
+  # tkinter on Arch comes from `tk`, which `python` lists as an optional
+  # dependency ("tk: for tkinter"). There has never been a python-tk package
+  # here - asking for one aborts the whole transaction with "target not found",
+  # so nothing installed. Debian is the odd one out with python3-tk.
+  PKGS=(tor python-requests python-pysocks tk curl "$OLLAMA_PKG")
   MISSING=()
   for p in "${PKGS[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
   if [ ${#MISSING[@]} -gt 0 ]; then

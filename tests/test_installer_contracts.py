@@ -12,6 +12,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerContractTests(unittest.TestCase):
+    def test_linux_installer_uses_distro_correct_package_names(self) -> None:
+        """tkinter is packaged under a different name in every distro.
+
+        Arch shipped `python-tk`, which has never existed there - `python`
+        lists `tk: for tkinter` as its optional dependency - and pacman aborts
+        the WHOLE transaction on an unknown target, so a single wrong name
+        meant tor, ollama and the python deps were never installed either.
+        """
+        sh = self.text("install-onionmind.sh")
+        arch = sh[sh.index('[ "$DISTRO" = arch ]'):]
+        arch = arch[: arch.index("\nelse")]
+        # The package list itself, not the block - the comment above it names
+        # python-tk on purpose, to say why it is not used.
+        pkgs = arch.split("PKGS=(")[1].split(")")[0].split()
+        self.assertIn("tk", pkgs)
+        self.assertNotIn("python-tk", pkgs)
+
+        # Debian is the one that really does prefix it.
+        debian = sh[sh.index("apt-get install -y tor"):]
+        self.assertIn("python3-tk", debian[: debian.index("\n")])
+
     def test_download_links_point_at_release_assets_not_raw_files(self) -> None:
         """A raw github link renders the script; a release asset downloads it.
 
