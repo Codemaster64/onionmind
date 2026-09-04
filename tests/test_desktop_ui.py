@@ -1285,6 +1285,56 @@ class QualityOfLifeTests(unittest.TestCase):
         alert.assert_not_called()
         self._close(window)
 
+    def test_model_manager_accepts_links_and_flags_refusal_removed(self) -> None:
+        dialog = ui.ModelManagerDialog(
+            [],
+            "",
+            reference_normalizer=desktop_core.normalize_model_reference,
+            marker_for=desktop_core.uncensored_marker,
+        )
+        dialog.show()
+        dialog.model_name.setText(
+            "https://huggingface.co/user/tiny-abliterated-gguf/blob/main/file.Q4_K_M.gguf"
+        )
+        self.assertIn("hf.co/user/tiny-abliterated-gguf:Q4_K_M", dialog.reference_hint.text())
+        self.assertIn("abliterated", dialog.reference_hint.text())
+        requested: list[str] = []
+        dialog.pullRequested.connect(requested.append)
+        with mock.patch.object(
+            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.Yes
+        ):
+            dialog._request_pull()
+        self.assertEqual(requested, ["hf.co/user/tiny-abliterated-gguf:Q4_K_M"])
+        self._close(dialog)
+
+    def test_model_catalog_browse_requires_consent_and_fills_the_field(self) -> None:
+        dialog = ui.ModelManagerDialog([], "")
+        dialog.show()
+        fetches: list[bool] = []
+        dialog.catalogRequested.connect(lambda: fetches.append(True))
+        with mock.patch.object(
+            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.No
+        ):
+            dialog._request_catalog()
+        self.assertEqual(fetches, [])
+        with mock.patch.object(
+            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.Yes
+        ):
+            dialog._request_catalog()
+        self.assertEqual(fetches, [True])
+        dialog.set_catalog(
+            [
+                desktop_core.CatalogModel(id="user/hot-gguf", downloads=1_200_000, likes=12),
+                desktop_core.CatalogModel(
+                    id="user/abliterated-x", downloads=5, likes=1, uncensored="abliterated"
+                ),
+            ]
+        )
+        self.assertTrue(dialog.catalog_combo.isEnabled())
+        dialog.catalog_combo.setCurrentIndex(1)
+        self.assertEqual(dialog.model_name.text(), "hf.co/user/abliterated-x")
+        self._close(dialog)
+
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class NativeTitleBarTests(unittest.TestCase):

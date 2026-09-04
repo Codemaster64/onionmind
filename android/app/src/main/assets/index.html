@@ -250,6 +250,13 @@ function downloadDetails(done, total, speed) {
     (speed > 0 ? ' · ' + formatBytes(speed) + '/s' : '') + etaText;
 }
 
+function uncensoredNote(m) {
+  // The flag is a name screen, not a guarantee; say so where it shows.
+  return m.uncensored
+    ? '<div class="model-meta" style="color:#e8b0a0">Flagged by name as refusal-removed (' + m.uncensored + ') - verify yourself</div>'
+    : '';
+}
+
 function renderModelPicker() {
   const ram = Number(status.ramMb || 0);
   const storage = Number(status.freeStorageMb || 0);
@@ -263,6 +270,7 @@ function renderModelPicker() {
     '<div class="model-card ' + (m.id === rec ? 'recommended' : '') + '">' +
       '<div class="model-head"><strong>' + m.name + '</strong>' + (m.id === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
       '<div class="model-meta">' + (m.description ? m.description + '<br>' : '') + (m.bytes ? (Math.round(m.bytes/107374182.4)/10 + ' GB') : 'size detected during download') + '</div>' +
+      uncensoredNote(m) +
       '<button onclick="install(\'' + m.id + '\')">Download</button>' +
     '</div>'
   ).join('');
@@ -337,7 +345,7 @@ $('q').addEventListener('keydown', e => {
   $('form').requestSubmit();
 });
 function renderManager() {
-  $('installed-list').innerHTML = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + m.name + '</strong>' + (m.id === status.model ? '<span>ACTIVE</span>' : '') + '</div><div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + '</div><div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
+  $('installed-list').innerHTML = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + m.name + '</strong>' + (m.id === status.model ? '<span>ACTIVE</span>' : '') + '</div>' + '<div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + '</div>' + uncensoredNote(m) + '<div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
 }
 async function selectModel(id) { await api('/api/select', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
 async function removeModel(id) { if (!confirm('Remove this model from the phone?')) return; await api('/api/remove', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }

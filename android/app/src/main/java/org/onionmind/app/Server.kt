@@ -10,6 +10,7 @@ import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
 import org.onionmind.core.ConversationStore
+import org.onionmind.core.ModelCatalog
 import org.onionmind.core.WorkbenchPreferences
 import java.net.URLDecoder
 import java.security.SecureRandom
@@ -121,6 +122,8 @@ object Server {
                 put("id", m.id); put("name", m.name); put("file", m.file); put("url", m.url)
                 put("bytes", m.bytes); put("description", m.description)
                 put("installed", ProcessManager.isInstalled(ctx, m)); put("builtin", m.builtin)
+                // A name screen, not a guarantee; the UI says exactly that.
+                ModelCatalog.uncensoredMarker(m.id, m.name, m.url)?.let { put("uncensored", it) }
             }}))
         }.toString())
     }

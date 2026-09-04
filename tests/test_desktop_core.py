@@ -845,5 +845,52 @@ class WorkbenchPreferencesTests(unittest.TestCase):
         self.assertFalse(core.animations_enabled("system", False))
 
 
+class ModelDiscoveryTests(unittest.TestCase):
+    def test_markers_are_found_by_name_and_tags(self) -> None:
+        self.assertEqual(
+            core.uncensored_marker("Qwen3.5-9B-abliterated-GGUF"), "abliterated"
+        )
+        self.assertEqual(core.uncensored_marker("plain-name", ["gguf", "uncensored"]), "uncensored")
+        self.assertIsNone(core.uncensored_marker("Qwen3.5-4B", ["gguf", "chat"]))
+        # Absent markers say nothing; the UI must present it that way.
+        self.assertEqual(core.UNCENSORED_MARKERS[0], "abliterated")
+
+    def test_quant_tokens_come_out_of_filenames(self) -> None:
+        self.assertEqual(core.quant_from_filename("model-Q4_K_M.gguf"), "Q4_K_M")
+        self.assertEqual(core.quant_from_filename("IQ2_M-prefix"), "IQ2_M")
+        self.assertEqual(core.quant_from_filename("plainname.gguf"), None)
+
+    def test_references_normalize_to_pull_names(self) -> None:
+        cases = {
+            "llama3.2:3b": "llama3.2:3b",
+            "BLAZE": "BLAZE",
+            "hf.co/user/model-gguf": "hf.co/user/model-gguf",
+            "https://huggingface.co/user/model-gguf": "hf.co/user/model-gguf",
+            "https://huggingface.co/user/model-gguf/blob/main/file.Q5_K_M.gguf": "hf.co/user/model-gguf:Q5_K_M",
+            "https://huggingface.co/user/model-gguf/resolve/main/file.Q8_0.gguf": "hf.co/user/model-gguf:Q8_0",
+            "user/model-gguf": "hf.co/user/model-gguf",
+            "https://example.com/other.gguf": "https://example.com/other.gguf",
+            "  ": "",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(core.normalize_model_reference(raw), expected, raw)
+
+    def test_catalog_rows_parse_flags_and_counts(self) -> None:
+        payload = [
+            {"id": "user/hot-gguf", "downloads": 1_234_000, "likes": 42, "tags": ["gguf"]},
+            {"id": "user/abliterated-llama", "downloads": 90, "likes": 1, "tags": ["gguf", "uncensored"]},
+            {"downloads": 5},
+            "junk",
+        ]
+        rows = core.parse_hf_catalog(payload)
+        self.assertEqual([row.id for row in rows], ["user/hot-gguf", "user/abliterated-llama"])
+        self.assertTrue(rows[0].gguf)
+        # The id's marker wins over a tag's when both are present.
+        self.assertEqual(rows[1].uncensored, "abliterated")
+        self.assertEqual(core.format_downloads(1_234_000), "1.2M")
+        self.assertEqual(core.format_downloads(90), "90")
+        self.assertEqual(core.parse_hf_catalog({"not": "a list"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

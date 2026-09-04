@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any, Callable, Iterable, Mapping, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 import zipfile
 
@@ -35,6 +36,13 @@ __all__ = [
     "text_scale_factor",
     "resolve_startup_mode",
     "animations_enabled",
+    "UNCENSORED_MARKERS",
+    "uncensored_marker",
+    "quant_from_filename",
+    "normalize_model_reference",
+    "CatalogModel",
+    "parse_hf_catalog",
+    "format_downloads",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -383,6 +391,133 @@ def animations_enabled(reduce_motion: str, system_enabled: bool) -> bool:
     if reduce_motion == "full":
         return True
     return bool(system_enabled)
+
+
+# --- Model discovery ---------------------------------------------------
+#
+# Making an unknown model one paste away: references are normalized to what
+# the pull API understands, and names are screened for the vocabulary of
+# refusal-removed models so the workbench can say which is which.
+
+UNCENSORED_MARKERS: tuple[str, ...] = (
+    "abliterated",
+    "abliterate",
+    "uncensored",
+    "unfiltered",
+    "unaligned",
+    "unhinged",
+    "brainwash",
+    "never-resist",
+    "no-refusal",
+)
+
+_QUANT_PATTERN = re.compile(r"(?:IQ|Q)\d+[KMSL]?_(?:[A-Z0-9]+_)*[A-Z0-9]+|(?:IQ|Q)\d+[KMSL]?")
+
+
+def uncensored_marker(*texts: Any) -> Optional[str]:
+    """The first refusal-removal marker found in the given texts, if any.
+
+    This is a name screen, not a guarantee: a marker in a model's name or tags
+    is strong evidence its refusals were removed, and an absent marker says
+    nothing. The UI must present it exactly that way.
+    """
+    for marker in UNCENSORED_MARKERS:
+        for text in texts:
+            if marker in _as_text_core(text).casefold():
+                return marker
+    return None
+
+
+def _as_text_core(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def quant_from_filename(filename: str) -> Optional[str]:
+    """The quantization token in a GGUF filename, e.g. Q4_K_M from
+    Model-Q4_K_M.gguf."""
+    match = _QUANT_PATTERN.search(filename or "")
+    return match.group(0) if match else None
+
+
+def normalize_model_reference(text: str) -> str:
+    """Accept an Ollama name, an hf.co path, a Hugging Face URL, or a bare
+    user/repo path, and return what the pull API understands."""
+    value = _as_text_core(text).strip()
+    if not value:
+        return value
+    lowered = value.casefold()
+    if lowered.startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        host = parsed.netloc.casefold()
+        if not (host == "huggingface.co" or host.endswith(".huggingface.co")):
+            return value  # unknown hosts pass through; the service answers
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2:
+            return value
+        user, repo = parts[0], parts[1].removesuffix(".gguf")
+        reference = f"hf.co/{user}/{repo}"
+        filename = parts[-1] if len(parts) > 2 else ""
+        quant = quant_from_filename(filename)
+        return f"{reference}:{quant}" if quant else reference
+    if lowered.startswith("hf.co/"):
+        return value
+    if value.count("/") == 1 and " " not in value:
+        user, repo = value.split("/", 1)
+        repo = repo.removesuffix(".gguf")
+        if user and repo and ":" not in repo:
+            return f"hf.co/{user}/{repo}"
+    return value
+
+
+@dataclass(frozen=True)
+class CatalogModel:
+    """One popular model from the public Hugging Face catalog."""
+
+    id: str
+    downloads: int = 0
+    likes: int = 0
+    uncensored: Optional[str] = None
+    gguf: bool = False
+
+
+def parse_hf_catalog(payload: Any, limit: int = 24) -> list[CatalogModel]:
+    """Parse the public huggingface.co models API response into catalog rows.
+
+    Junk rows are skipped silently; ordering is the API's (most downloaded
+    first) rather than ours.
+    """
+    if not isinstance(payload, list):
+        return []
+    entries: list[CatalogModel] = []
+    rows = payload if limit is None else payload[: max(0, limit)]
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        model_id = _as_text_core(item.get("id")).strip()
+        if not model_id:
+            continue
+        tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+        entries.append(
+            CatalogModel(
+                id=model_id,
+                downloads=int(item.get("downloads") or 0),
+                likes=int(item.get("likes") or 0),
+                uncensored=uncensored_marker(model_id, *tags),
+                gguf=any("gguf" in _as_text_core(tag).casefold() for tag in tags)
+                or model_id.casefold().endswith("gguf"),
+            )
+        )
+    return entries
+
+
+def format_downloads(count: int) -> str:
+    """A compact human form for catalog counts: 1.2M, 340k, 900."""
+    value = int(count or 0)
+    for divisor, suffix in ((1_000_000, "M"), (1_000, "k")):
+        if value >= divisor:
+            trimmed = value / divisor
+            return f"{trimmed:.1f}".rstrip("0").rstrip(".") + suffix
+    return str(value)
 
 
 @dataclass

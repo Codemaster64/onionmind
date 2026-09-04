@@ -118,6 +118,20 @@ inference continues through `onionmind.py`. Qwen Code is the agent seam:
 qwen --model <raw-ollama-name> -p "<task>"
 ```
 
+Adding an unknown model is one paste: the manager accepts an Onionmind tier, an
+Ollama name, a bare `user/repo`, or a huggingface.co link, and normalizes all of
+them to the pull reference the service understands (a linked `file.Q4_K_M.gguf`
+becomes `hf.co/user/repo:Q4_K_M`). **Browse popular models** asks huggingface.co's
+public models API for its most-downloaded GGUF list over direct HTTPS, behind the
+same explicit confirmation as a model download - it is never Tor-routed and never
+automatic. Both surfaces screen names for refusal-removal vocabulary
+(`abliterated`, `uncensored`, `unfiltered`, …) and show the matched marker;
+**that flag is a name screen, not a guarantee** - an absent marker says nothing,
+and the UI says so where it shows. Verified by
+`tests/test_desktop_core.py::ModelDiscoveryTests` and
+`android/core/src/test/.../ModelCatalogTest.kt`; the live catalog fetch itself is
+unverified against the real API from this machine.
+
 The raw Ollama model name is always passed to external tools. The UI labels a
 model with what it actually is plus its weight class (`Qwen3.8 27B · heavy -
 ~12-16 GB VRAM`); SPARK, EMBER, BLAZE, and INFERNO are the internal size ladder
