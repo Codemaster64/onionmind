@@ -4121,6 +4121,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import (
+    QByteArray,
     QObject,
     QPointF,
     QProcess,
@@ -5894,12 +5895,14 @@ class LeftRail(QWidget):
         models = QPushButton("Models")
         models.setObjectName("railAction")
         models.setIcon(_icon("model"))
+        models.setToolTip("Manage local models")
         models.setAccessibleName("Manage local models")
         models.clicked.connect(self.modelsRequested)
         self.models_button = models
         settings = QPushButton("Settings")
         settings.setObjectName("railAction")
         settings.setIcon(_icon("settings"))
+        settings.setToolTip("Settings (Ctrl+,)")
         settings.setAccessibleName("Open Onionmind settings")
         settings.clicked.connect(self.settingsRequested)
         self.settings_button = settings
@@ -6527,6 +6530,25 @@ class SettingsDialog(QDialog):
         form.addRow("Session storage", storage)
         outer.addLayout(form)
 
+        window_heading = QLabel("Window")
+        window_heading.setObjectName("brand")
+        outer.addWidget(window_heading)
+        window_row = QHBoxLayout()
+        window_note = QLabel(
+            "Window size, pane widths, and pane visibility are remembered between launches."
+        )
+        window_note.setWordWrap(True)
+        window_row.addWidget(window_note, 1)
+        self.reset_layout_button = QPushButton("Reset window layout")
+        self.reset_layout_button.setAccessibleName("Reset the remembered Onionmind window layout")
+        self.reset_layout_button.clicked.connect(self._reset_window_layout)
+        window_row.addWidget(self.reset_layout_button)
+        outer.addLayout(window_row)
+        self.window_feedback = QLabel()
+        self.window_feedback.setObjectName("meta")
+        self.window_feedback.setWordWrap(True)
+        outer.addWidget(self.window_feedback)
+
         updates_heading = QLabel("Updates")
         updates_heading.setObjectName("brand")
         outer.addWidget(updates_heading)
@@ -6589,6 +6611,18 @@ class SettingsDialog(QDialog):
     def _window(self) -> Any:
         parent = self.parent()
         return parent if isinstance(parent, OnionmindWindow) else None
+
+    def _reset_window_layout(self) -> None:
+        window = self._window()
+        if window is None:
+            self.window_feedback.setText(
+                "The workbench window is unavailable; the layout was not reset."
+            )
+            return
+        window.reset_window_layout()
+        self.window_feedback.setText(
+            "Window layout reset: size, panes, and pane widths are back to the default workbench."
+        )
 
     def _permission_toggled(self, checked: bool) -> None:
         window = self._window()
@@ -7186,6 +7220,7 @@ class OnionmindWindow(QMainWindow):
             ("Ctrl+O", self.open_folder),
             ("Ctrl+L", self.focus_composer),
             ("Ctrl+Shift+S", self.export_conversation),
+            ("Ctrl+,", self.open_settings),
             ("Ctrl+`", lambda: self.toggle_terminal(not self.terminal.isVisible())),
             ("Ctrl+Shift+I", lambda: self.toggle_inspector(not self.inspector.isVisible())),
             ("Escape", self.stop_active),
@@ -7198,6 +7233,7 @@ class OnionmindWindow(QMainWindow):
             self.shortcuts.append(shortcut)
 
     def _restore_state(self) -> None:
+        self._restore_window_layout()
         model = _as_text(self.settings_data.get("model") or getattr(self.core, "MODEL", "inferno"))
         self.set_model_options([model], model)
         recent = self.settings_data.get("recent_projects") or []
@@ -7634,6 +7670,62 @@ class OnionmindWindow(QMainWindow):
         self.terminal_toggle.setChecked(target)
         if target:
             self.terminal.command.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    # --- Remembered window layout --------------------------------------
+    #
+    # Size, pane widths, and the *requested* pane visibility persist between
+    # launches; the responsive rules in resizeEvent still win at narrow widths,
+    # so a remembered layout can never force an unusable window.
+
+    def _save_window_layout(self) -> None:
+        if self.demo:
+            # Demo windows run on empty settings; saving them would clobber a
+            # real settings file with layout keys alone.
+            return
+        self.settings_data["window_geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        self.settings_data["splitter_state"] = bytes(self.main_splitter.saveState().toBase64()).decode("ascii")
+        self.settings_data["rail_visible"] = bool(self._rail_requested)
+        self.settings_data["inspector_visible"] = bool(self._inspector_requested)
+        self.settings_bridge.save(self.settings_data)
+
+    def _restore_window_layout(self) -> None:
+        geometry = _as_text(self.settings_data.get("window_geometry") or "")
+        if geometry:
+            try:
+                self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+            except (ValueError, RuntimeError):
+                pass  # an unreadable blob falls back to the default workbench
+        splitter_state = _as_text(self.settings_data.get("splitter_state") or "")
+        if splitter_state:
+            try:
+                self.main_splitter.restoreState(QByteArray.fromBase64(splitter_state.encode("ascii")))
+            except (ValueError, RuntimeError):
+                pass
+        self._rail_requested = bool(self.settings_data.get("rail_visible", True))
+        self._inspector_requested = bool(self.settings_data.get("inspector_visible", True))
+        self.toggle_rail(self._rail_requested)
+        self.toggle_inspector(self._inspector_requested)
+
+    def reset_window_layout(self) -> None:
+        """Put the workbench back to the shipped layout and forget the rest."""
+        for key in ("window_geometry", "splitter_state", "rail_visible", "inspector_visible"):
+            self.settings_data.pop(key, None)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self.showNormal()
+        self.resize(1420, 900)
+        screen = self.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.move(
+                available.center().x() - self.width() // 2,
+                max(available.top(), available.center().y() - self.height() // 2),
+            )
+        self._rail_requested = True
+        self._inspector_requested = True
+        self.toggle_rail(True)
+        self.toggle_inspector(True)
+        self.main_splitter.setSizes([224, 860, 292])
 
     def _sync_action_states(self) -> None:
         has_draft = bool(self.composer.toPlainText().strip() or self.attachments)
@@ -9048,6 +9140,7 @@ class OnionmindWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self.transcript.verticalScrollBar().setValue(0))
 
     def closeEvent(self, event: Any) -> None:
+        self._save_window_layout()
         self.save_current_session()
         timer = getattr(self, "tor_liveness_timer", None)
         if timer is not None:

@@ -847,6 +847,123 @@ class UpdatePermissionTests(unittest.TestCase):
 
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
+class WindowLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        QStandardPaths.setTestModeEnabled(True)
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyle("Fusion")
+        cls.app.setStyleSheet(ui.STYLE_SHEET)
+
+    def _close(self, widget: QWidget) -> None:
+        widget.close()
+        widget.deleteLater()
+        self.app.processEvents()
+
+    def _window(self, bridge: "ui.SettingsBridge") -> "ui.OnionmindWindow":
+        window = ui.OnionmindWindow(_CoreStub(), desktop_core, demo=True)
+        window.save_current_session = lambda: True
+        # Demo mode skips persistence by design; point the window at an
+        # isolated store and opt back in so save and restore run exactly the
+        # production code paths.
+        window.settings_bridge = bridge
+        window.settings_data = bridge.load()
+        window.demo = False
+        window.show()
+        self.app.processEvents()
+        return window
+
+    def test_layout_is_remembered_and_restored_between_launches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+
+            first = self._window(bridge)
+            first.resize(1180, 741)
+            first.main_splitter.setSizes([190, 660, 330])
+            self.app.processEvents()
+            self._close(first)
+
+            stored = bridge.load()
+            for key in ("window_geometry", "splitter_state", "rail_visible", "inspector_visible"):
+                self.assertIn(key, stored)
+            self.assertTrue(stored["rail_visible"])
+            self.assertTrue(stored["inspector_visible"])
+
+            second = self._window(bridge)
+            second._restore_window_layout()
+            self.app.processEvents()
+            # restoreGeometry clamps to the available screen so a remembered
+            # layout can never land bigger than the display; the exact clamp
+            # margin is Qt's, so assert the contract rather than the constant.
+            screen = second.screen() or self.app.primaryScreen()
+            self.assertEqual(second.height(), 741)
+            self.assertLessEqual(second.width(), screen.availableGeometry().width())
+            self.assertNotEqual(second.width(), 1420)
+            sizes = second.main_splitter.sizes()
+            # The remembered rail width applies; the inspector lands on its
+            # remembered width when the screen fits it, or its pane minimum
+            # when the offscreen test screen cannot.
+            self.assertAlmostEqual(sizes[0], 190, delta=10)
+            self.assertGreaterEqual(sizes[2], 250)
+            self.assertLessEqual(sizes[2], 330)
+            self.assertFalse(second.left_rail.isHidden())
+            self.assertFalse(second.inspector.isHidden())
+
+            second.toggle_rail(False)
+            second.toggle_inspector(False)
+            self._close(second)
+            self.assertFalse(bridge.load()["rail_visible"])
+            self.assertFalse(bridge.load()["inspector_visible"])
+
+            third = self._window(bridge)
+            third._restore_window_layout()
+            self.app.processEvents()
+            self.assertTrue(third.left_rail.isHidden())
+            self.assertTrue(third.inspector.isHidden())
+            self._close(third)
+
+    def test_settings_reset_button_restores_the_default_workbench(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            window.resize(1005, 700)
+            self.app.processEvents()
+            self._close(window)   # the odd layout is now remembered
+            self.assertIn("window_geometry", bridge.load())
+
+            window = self._window(bridge)
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            reset = next(
+                button
+                for button in dialog.findChildren(QPushButton)
+                if button.accessibleName() == "Reset the remembered Onionmind window layout"
+            )
+            reset.click()
+            self.assertIn("reset", dialog.window_feedback.text().lower())
+            self.assertEqual((window.width(), window.height()), (1420, 900))
+            self.assertFalse(window.left_rail.isHidden())
+            self.assertFalse(window.inspector.isHidden())
+            self.assertAlmostEqual(window.main_splitter.sizes()[0], 224, delta=10)
+            self.assertAlmostEqual(window.main_splitter.sizes()[2], 292, delta=10)
+            stored = bridge.load()
+            for key in ("window_geometry", "splitter_state", "rail_visible", "inspector_visible"):
+                self.assertNotIn(key, stored)
+            self._close(dialog)
+            self._close(window)
+
+    def test_settings_keyboard_shortcut_is_registered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            sequences = {shortcut.key().toString() for shortcut in window.shortcuts}
+            self.assertIn("Ctrl+,", sequences)
+            self._close(window)
+
+
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class NativeTitleBarTests(unittest.TestCase):
     def test_windows_frame_is_pinned_dark_with_the_modern_attribute(self) -> None:
         window = mock.Mock()
