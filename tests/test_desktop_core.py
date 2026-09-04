@@ -289,6 +289,28 @@ class SessionStoreTests(unittest.TestCase):
             self.assertFalse(corrupt.exists())
             self.assertEqual(len(list(root.glob("broken.json.corrupt-*"))), 1)
 
+    def test_only_new_messages_move_a_session_up_the_list(self) -> None:
+        """The list sorts on updated_at and every save stamped it, so a rename
+        - or the desktop re-saving whatever session you had open - jumped that
+        session ahead of ones with newer conversation."""
+        with tempfile.TemporaryDirectory() as temporary:
+            store = core.SessionStore(temporary)
+            older = store.create(
+                title="Older", messages=[{"role": "user", "content": "hi"}]
+            )
+            newer = store.create(title="Newer")
+            stamp = older.updated_at
+
+            older.title = "Renamed"
+            store.save(older)
+            self.assertEqual(older.updated_at, stamp)
+            self.assertEqual([s.id for s in store.list()], [newer.id, older.id])
+
+            older.messages = [*older.messages, {"role": "user", "content": "more"}]
+            store.save(older)
+            self.assertGreater(older.updated_at, stamp)
+            self.assertEqual([s.id for s in store.list()], [older.id, newer.id])
+
     def test_session_ids_cannot_escape_the_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = core.SessionStore(temporary)
@@ -925,6 +947,54 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(core.parameter_billions("model-0.5B-q4"), 0.5)
         self.assertIsNone(core.parameter_billions("user/tinystories-gguf/blob/main"))
         self.assertIsNone(core.parameter_billions(""))
+
+    def test_context_window_accepts_any_count_and_warns_at_the_edges(self) -> None:
+        """The chat context is typed, not chosen from a fence: anything that
+        parses is kept, and only the ranges that go wrong are called out."""
+        self.assertEqual(core.parse_context_window("24k"), 24576)
+        self.assertEqual(core.parse_context_window("21,000 tokens"), 21000)
+        self.assertEqual(core.parse_context_window(21000), 21000)
+        for junk in ("", "plenty", "-5", 0, True, None):
+            self.assertIsNone(core.parse_context_window(junk), junk)
+
+        # A stored preference survives whatever shape it was written in.
+        self.assertEqual(core.load_preferences({"context_window": "8k"})["context_window"], 8192)
+        self.assertEqual(core.load_preferences({"context_window": 21000})["context_window"], 21000)
+        self.assertEqual(
+            core.load_preferences({"context_window": "plenty"})["context_window"],
+            core.PREFERENCE_DEFAULTS["context_window"],
+        )
+
+        self.assertEqual(core.context_window_warning(16384), "")
+        self.assertIn("Below 1k", core.context_window_warning(512))
+        self.assertIn("KV cache", core.context_window_warning(65536))
+        self.assertIn("128k", core.context_window_warning(200000))
+
+    def test_catalog_rows_carry_a_short_description(self) -> None:
+        """The list API has no prose description, so the row composes one from
+        the task, the parameter count, the fit, and the download count."""
+        rows = core.parse_hf_catalog(
+            [
+                {
+                    "id": "user/Qwen2.5-7B-Instruct-GGUF",
+                    "downloads": 1_200_000,
+                    "likes": 30,
+                    "pipeline_tag": "text-generation",
+                    "tags": ["gguf"],
+                }
+            ]
+        )
+        self.assertEqual(rows[0].task, "text-generation")
+        described = core.catalog_description(
+            rows[0], core.catalog_fit(rows[0].id, 12_288, None)[1]
+        )
+        self.assertIn("Text generation", described)
+        self.assertIn("7B parameters", described)
+        self.assertIn("fits this machine", described)
+        self.assertIn("1.2M downloads", described)
+        # A row without a task or a size in its name still describes itself.
+        bare = core.catalog_description(core.CatalogModel(id="user/mystery"))
+        self.assertEqual(bare, "Local model · 0 downloads")
 
     def test_catalog_fit_ranks_against_this_machine(self) -> None:
         fits = core.catalog_fit("user/model-7B-gguf", 12_288, None)

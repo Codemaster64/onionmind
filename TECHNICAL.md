@@ -105,6 +105,40 @@ The desktop rewrite keeps three deliberately narrow seams:
   generation, terminal commands, Git refreshes, model pulls, and Harness tasks
   stay off the UI thread; cancel actions terminate the corresponding operation.
 
+Settings is four tabs - General, Privacy, Updates, Storage - each scrolling
+on its own. Beyond the presentation preferences (text size, send key, startup
+mode, terminal drawer, animation) it carries a chat context window
+(a typed token count - `24000` or `24k`, presets one click away, applied to the
+inference core's `NUM_CTX` for the next turn; the agent keeps its own budget on
+the toolbar slider). Nothing is clamped: a count below 1k or above 32k/128k is
+stored with a warning saying what goes wrong, because the real ceiling is the
+model's own window and this machine's KV cache, neither of which the dialog
+knows, two switches for
+what reaches the disk - **Save conversations to this machine** and **Remember
+an unsent message between launches**, both on by default - and two wipes: **Delete all
+conversations** removes every saved and archived session, and **Wipe
+everything** destroys the lot - sessions, the project list, **the project
+folders with every file in them**, the last opened project, any unsent message,
+the agent's network log, and Tor's state file, cached consensus/descriptors and
+logs (`torrc` and `geoip` survive, so Tor still starts). Files are overwritten
+with random bytes before they are unlinked; a drive root, the home folder,
+Onionmind's own data or program folder, and symlinked folders are skipped and
+counted. A checkbox runs the same wipe on every close (`clear_on_exit`, off by
+default, confirmed once when armed). **The overwrite is best-effort user
+space**: on an SSD, a copy-on-write filesystem, or any volume with snapshots
+the original blocks can survive - full-disk encryption or the Matchstick
+RAM-only image is the actual guarantee, and the dialog says so. Verified by
+`tests/test_desktop_ui.py::WorkbenchPreferencesTests`; recovery after a wipe
+has not been tested with forensic tooling. Turning
+saving off leaves already-saved sessions alone; it only stops new writes. The
+Tor boundary and the per-turn search permission remain deliberately outside
+preferences. Verified by `tests/test_desktop_ui.py::WorkbenchPreferencesTests`.
+
+Saved sessions are scoped to the open project: each session records the project
+it ran in, the rail lists only that project's (headed `SESSIONS · <name>`), and
+switching projects switches the list. A session saved with no project open
+belongs to none and is listed only when no project is open.
+
 The application window is a native, resizable three-pane workbench: projects and
 sessions on the left; conversation, terminal, and composer in the centre; context,
 changes, and activity on the right. Narrow windows collapse inspectors before the
@@ -126,6 +160,12 @@ public models API for its most-downloaded GGUF list **through the verified Tor
 circuit** — socks5h, so hostname resolution also happens inside Tor — and fails
 closed with an actionable message when Tor is not up; there is no direct
 fallback, and no consent modal because the fetch never touches the clearnet.
+Every browse re-fetches; nothing is cached between them, and the row above the
+list says how many models came back and at what time. Results land in a list
+rather than a dropdown: one row per model carrying its name, a plain
+description (task, parameter count, fit against this machine, downloads), and
+its refusal-removal line. **Add selected** pulls the highlighted row through
+the same consented, non-Tor download path as a pasted reference.
 The list is ordered by what this machine can run: total RAM
 (`GlobalMemoryStatusEx` / `/proc/meminfo`) and first-GPU VRAM (`nvidia-smi`)
 are read locally, each model's parameter count is taken from its name, and rows

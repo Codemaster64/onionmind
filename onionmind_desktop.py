@@ -121,6 +121,8 @@ QFrame#card { background: #23211f; border: 1px solid #403c36; border-radius: 5px
 QFrame#toolCard { background: #1e1d1b; border: 1px solid #423e38; border-radius: 5px; }
 QFrame#modeSwitch { background: #191816; border: 1px solid #403c36; border-radius: 4px; }
 QFrame#separator { background: #3b3833; min-width: 1px; max-width: 1px; }
+QScrollArea#settingsPage { background: transparent; border: none; }
+QScrollArea#settingsPage > QWidget > QWidget { background: transparent; }
 QLabel { background: transparent; }
 QLabel#brand { color: #f5efe7; font-size: @BRAND_PT@; font-weight: 650; }
 QLabel#sectionTitle { color: #aaa39a; font-size: @LABEL_PT@; font-weight: 650; }
@@ -250,6 +252,10 @@ _FALLBACK_PREFERENCES: dict[str, Any] = {
     "show_terminal_on_launch": False,
     "startup_mode": "remember",
     "reduce_motion": "system",
+    "save_history": True,
+    "remember_drafts": True,
+    "clear_on_exit": False,
+    "context_window": 16384,
 }
 
 
@@ -632,15 +638,26 @@ def _icon(name: str, size: int = 18) -> QIcon:
 
 
 def _register_system_fonts(app: QApplication) -> None:
-    """Register platform fonts and keep the platform's proportional UI size."""
+    """Register platform fonts and keep the platform's proportional UI size.
+
+    The first proportional family that registers becomes the UI font, so the
+    order is a legibility ranking rather than a list: Verdana and DejaVu Sans
+    (its free cousin) carry a taller x-height and wider spacing than the
+    platform defaults, which reads better at UI sizes without needing a bigger
+    point size - and a bigger point size is what clips the two-line rows in
+    the rail. Both ship with their platform, so nothing is bundled.
+    """
     system_point_size = app.font().pointSizeF()
     candidates = [
+        Path("C:/Windows/Fonts/verdana.ttf"),
+        Path("C:/Windows/Fonts/verdanab.ttf"),
         Path("C:/Windows/Fonts/segoeui.ttf"),
         Path("C:/Windows/Fonts/segoeuib.ttf"),
         Path("C:/Windows/Fonts/consola.ttf"),
         Path("C:/Windows/Fonts/consolab.ttf"),
-        Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
     ]
     ui_family = ""
@@ -1230,16 +1247,20 @@ class SessionBridge:
             "updated_at": now,
         }
 
-    def list(self) -> list[Any]:
+    def list(self, *, archived: bool = False) -> list[Any]:
         if self.store is not None:
             try:
-                return [self._clean_session(item) for item in self.store.list()]
+                return [
+                    self._clean_session(item)
+                    for item in self.store.list(archived=archived)
+                ]
             except Exception:
                 return []
+        key = "archived_sessions" if archived else "sessions"
         try:
             return [
                 self._clean_session(item)
-                for item in json.loads(self.fallback.value("sessions", "[]"))
+                for item in json.loads(self.fallback.value(key, "[]"))
             ]
         except (TypeError, ValueError):
             return []
@@ -1811,6 +1832,7 @@ class LeftRail(QWidget):
         session_header = QHBoxLayout()
         session_label = QLabel("SESSIONS")
         session_label.setObjectName("sectionTitle")
+        self.session_label = session_label
         add_session = QToolButton()
         add_session.setObjectName("bareButton")
         add_session.setIcon(_icon("new_task"))
@@ -2028,9 +2050,25 @@ class LeftRail(QWidget):
                 return True
         return False
 
+    def clear_projects(self) -> int:
+        """Forget every remembered project. The folders themselves are not
+        touched - this list is only Onionmind's memory of them."""
+        removed = self.projects.count()
+        self.projects.clear()
+        return removed
+
     def clear_session_selection(self) -> None:
         self.sessions.clearSelection()
         self.sessions.setCurrentRow(-1)
+
+    def set_session_scope(self, project: Optional[str]) -> None:
+        """Name the project whose sessions are listed, so a short list reads as
+        scoping rather than loss."""
+        name = Path(project).name if project else ""
+        self.session_label.setText(f"SESSIONS · {name}" if name else "SESSIONS")
+        self.session_label.setToolTip(
+            f"Sessions saved in {project}" if project else "Sessions saved with no project open"
+        )
 
     def set_sessions(self, sessions: Iterable[Any], current_id: Optional[str] = None) -> None:
         self.sessions.clear()
@@ -2428,7 +2466,7 @@ class ModelManagerDialog(QDialog):
         )
         self.setWindowTitle("Onionmind models")
         self.setModal(True)
-        self.resize(520, 470)
+        self.resize(560, 640)
         layout = QVBoxLayout(self)
         heading = QLabel("Onionmind models")
         heading.setObjectName("brand")
@@ -2450,6 +2488,9 @@ class ModelManagerDialog(QDialog):
         layout.addWidget(self.models, 1)
         self.set_models(models, current)
 
+        popular_label = QLabel("POPULAR")
+        popular_label.setObjectName("sectionTitle")
+        layout.addWidget(popular_label)
         browse_row = QHBoxLayout()
         self.browse_button = QPushButton("Browse popular models")
         self.browse_button.setAccessibleName("Fetch the popular model list over Tor")
@@ -2459,14 +2500,30 @@ class ModelManagerDialog(QDialog):
             "machine. Needs Tor up; never falls back to a direct connection."
         )
         self.browse_button.clicked.connect(self._request_catalog)
-        self.catalog_combo = QComboBox()
-        self.catalog_combo.setAccessibleName("Popular models fetched from huggingface.co")
-        self.catalog_combo.setToolTip("Choosing an entry fills the add field with its hf.co reference")
-        self.catalog_combo.setEnabled(False)
-        self.catalog_combo.currentIndexChanged.connect(self._catalog_picked)
+        self.catalog_status = QLabel(
+            "Not fetched yet - the list is checked live every time you browse"
+        )
+        self.catalog_status.setObjectName("meta")
+        self.catalog_status.setWordWrap(True)
+        self.catalog_add = QPushButton("Add selected")
+        self.catalog_add.setAccessibleName("Add the selected popular model")
+        self.catalog_add.setEnabled(False)
+        self.catalog_add.clicked.connect(self._request_pull)
         browse_row.addWidget(self.browse_button)
-        browse_row.addWidget(self.catalog_combo, 1)
+        browse_row.addStretch(1)
+        browse_row.addWidget(self.catalog_add)
         layout.addLayout(browse_row)
+        layout.addWidget(self.catalog_status)
+        self.catalog_list = QListWidget()
+        self.catalog_list.setAccessibleName("Popular models fetched from huggingface.co")
+        self.catalog_list.setToolTip(
+            "Selecting a model fills the add field with its hf.co reference; "
+            "Add selected downloads it"
+        )
+        self.catalog_list.setWordWrap(True)
+        self.catalog_list.currentItemChanged.connect(self._catalog_picked)
+        self.catalog_list.itemDoubleClicked.connect(lambda item: self._request_pull())
+        layout.addWidget(self.catalog_list, 1)
 
         row = QHBoxLayout()
         self.model_name = QLineEdit()
@@ -2530,40 +2587,60 @@ class ModelManagerDialog(QDialog):
         self.reference_hint.setText(" · ".join(parts))
 
     def _request_catalog(self) -> None:
-        # The click is the action: the list is fetched through the same
-        # verified Tor circuit as search and updates, never directly.
+        # The click is the action: every browse re-fetches the live list
+        # through the same verified Tor circuit as search and updates, never
+        # directly and never from a stored copy.
         self.browse_button.setEnabled(False)
-        self.catalog_combo.setEnabled(False)
-        self.catalog_combo.clear()
-        self.catalog_combo.addItem("Fetching the popular list over Tor…")
+        self.catalog_add.setEnabled(False)
+        self.catalog_list.clear()
+        self.catalog_status.setText("Fetching the current list over Tor…")
         self.catalogRequested.emit()
 
-    def _catalog_picked(self, index: int) -> None:
-        entry = self.catalog_combo.itemData(index)
+    def _catalog_picked(self, current: Any = None, previous: Any = None) -> None:
+        del previous
+        entry = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        self.catalog_add.setEnabled(entry is not None)
         if entry is None:
             return
         model_id = _as_text(_field(entry, "id"))
         if model_id:
             self.model_name.setText(f"hf.co/{model_id}")
 
+    @staticmethod
+    def _catalog_flag(entry: Any) -> str:
+        """State the refusal-removal screen on every row, here rather than in
+        an injected labeller, so no caller can drop it."""
+        marker = _as_text(_field(entry, "uncensored"))
+        if marker:
+            return (
+                f"UNCENSORED / ABLITERATED - flagged by name ({marker}); "
+                "its refusals have been removed"
+            )
+        return "No refusal-removal flag in its name (not a guarantee)"
+
     def set_catalog(self, entries: Iterable[Any]) -> None:
         self.browse_button.setEnabled(True)
-        self.catalog_combo.clear()
+        self.browse_button.setText("Refresh popular models")
+        self.catalog_list.clear()
         rows = list(entries)
         if not rows:
-            self.catalog_combo.setEnabled(False)
-            self.catalog_combo.addItem("No models came back")
+            self.catalog_status.setText("No models came back")
             return
         for entry in rows:
-            self.catalog_combo.addItem(self._catalog_entry_label(entry), entry)
-        self.catalog_combo.setEnabled(True)
-        self.catalog_combo.setCurrentIndex(-1)
+            text = f"{self._catalog_entry_label(entry)}\n{self._catalog_flag(entry)}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            item.setToolTip(text)
+            self.catalog_list.addItem(item)
+        self.catalog_status.setText(
+            f"{len(rows)} models · checked over Tor at {time.strftime('%H:%M')}"
+        )
 
     def set_catalog_error(self, message: str) -> None:
         self.browse_button.setEnabled(True)
-        self.catalog_combo.setEnabled(False)
-        self.catalog_combo.clear()
-        self.catalog_combo.addItem("Could not fetch the list")
+        self.catalog_add.setEnabled(False)
+        self.catalog_list.clear()
+        self.catalog_status.setText("Could not fetch the list")
         self.reference_hint.setText(_brand_runtime_text(message)[:120])
 
     def _request_pull(self) -> None:
@@ -2625,47 +2702,65 @@ class SettingsDialog(QDialog):
         self.update_staging: Optional[str] = None
         self._update_stop: Optional[threading.Event] = None
         self.setWindowTitle("Onionmind settings")
-        # The stacked sections must fit the screen the dialog appears on: a
-        # small laptop panel cannot show 660px of content, so the body scrolls
-        # and the size clamps to the available geometry instead of pushing the
-        # Close row out of reach.
+        # One tab per concern, and each tab scrolls: a small laptop panel
+        # cannot show the whole of any of them, so the size clamps to the
+        # available geometry instead of pushing the Close row out of reach.
         screen = self.screen() or QApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else None
         self.resize(
             min(560, available.width() - 40) if available else 560,
             min(660, available.height() - 80) if available else 660,
         )
-        scroll = QScrollArea(self)
+        preferences = dict(getattr(self._window(), "preferences", {}) or {})
+        tabs = QTabWidget(self)
+        tabs.setAccessibleName("Onionmind settings sections")
+        tabs.addTab(self._page(self._general_page(preferences)), "General")
+        tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
+        tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
+        tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
+
+        self.storage_feedback = QLabel()
+        self.storage_feedback.setObjectName("meta")
+        self.storage_feedback.setWordWrap(True)
+        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        open_folder = actions.addButton("Open storage folder", QDialogButtonBox.ButtonRole.ActionRole)
+        open_folder.setAccessibleName("Open Onionmind storage folder")
+        open_folder.clicked.connect(self._open_storage_folder)
+        actions.rejected.connect(self.reject)
+        root = QVBoxLayout(self)
+        root.addWidget(tabs, 1)
+        root.addWidget(self.storage_feedback)
+        root.addWidget(actions)
+
+        if update_bridge is None or not update_bridge.available:
+            self.check_updates_button.setEnabled(False)
+            self.update_feedback.setText("")
+        pending = update_bridge.pending() if update_bridge and update_bridge.available else None
+        if pending is not None:
+            self._offer_restart(str(pending))
+
+    @staticmethod
+    def _page(content: QWidget) -> QScrollArea:
+        """Each tab scrolls on its own, so a short laptop panel never pushes
+        the Close row off the screen."""
+        scroll = QScrollArea()
+        # Named so the sheet can keep the page transparent: a bare QWidget in a
+        # scroll area takes the platform's own background, which on a dark app
+        # is a white slab.
+        scroll.setObjectName("settingsPage")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setAccessibleName("Onionmind settings sections")
-        content = QWidget()
-        outer = QVBoxLayout(content)
-        heading = QLabel("Boundaries and storage")
+        scroll.setWidget(content)
+        return scroll
+
+    def _general_page(self, preferences: dict[str, Any]) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Workbench")
         heading.setObjectName("brand")
         outer.addWidget(heading)
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
-        tor = QLabel("Chat search and the coding agent both leave over Tor; a failed Tor check never falls back to a direct request.")
-        tor.setWordWrap(True)
-        form.addRow("Tor", tor)
-        agent = QLabel(_brand_runtime_text(agent_limitation))
-        agent.setWordWrap(True)
-        form.addRow("Agent", agent)
-        form.addRow("Telemetry", QLabel("No Onionmind telemetry or account"))
-        storage = QLabel(str(data_root))
-        storage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        storage.setWordWrap(True)
-        form.addRow("Session storage", storage)
-        outer.addLayout(form)
-
-        workbench_heading = QLabel("Workbench")
-        workbench_heading.setObjectName("brand")
-        outer.addWidget(workbench_heading)
-        preferences = dict(getattr(self._window(), "preferences", {}) or {})
-        workbench_form = QFormLayout()
-        workbench_form.setHorizontalSpacing(18)
 
         self.text_size_combo = QComboBox()
         self.text_size_combo.setAccessibleName("Workbench text size")
@@ -2678,7 +2773,7 @@ class SettingsDialog(QDialog):
         self.text_size_combo.setCurrentIndex(
             max(0, self.text_size_combo.findData(_as_text(preferences.get("text_scale", "system"))))
         )
-        workbench_form.addRow("Text size", self.text_size_combo)
+        form.addRow("Text size", self.text_size_combo)
 
         self.enter_sends_box = QCheckBox("Enter sends the message")
         self.enter_sends_box.setToolTip(
@@ -2689,7 +2784,7 @@ class SettingsDialog(QDialog):
             "Enter sends the message; when off, Ctrl+Enter sends"
         )
         self.enter_sends_box.setChecked(bool(preferences.get("enter_sends", True)))
-        workbench_form.addRow("Composer", self.enter_sends_box)
+        form.addRow("Composer", self.enter_sends_box)
 
         self.startup_combo = QComboBox()
         self.startup_combo.setAccessibleName("Composer mode to start in")
@@ -2703,11 +2798,11 @@ class SettingsDialog(QDialog):
         self.startup_combo.setCurrentIndex(
             max(0, self.startup_combo.findData(_as_text(preferences.get("startup_mode", "remember"))))
         )
-        workbench_form.addRow("Start in", self.startup_combo)
+        form.addRow("Start in", self.startup_combo)
 
         self.terminal_box = QCheckBox("Show the terminal drawer on launch")
         self.terminal_box.setChecked(bool(preferences.get("show_terminal_on_launch", False)))
-        workbench_form.addRow("Terminal", self.terminal_box)
+        form.addRow("Terminal", self.terminal_box)
 
         self.motion_combo = QComboBox()
         self.motion_combo.setAccessibleName("Workbench animation")
@@ -2724,8 +2819,35 @@ class SettingsDialog(QDialog):
         self.motion_combo.setCurrentIndex(
             max(0, self.motion_combo.findData(_as_text(preferences.get("reduce_motion", "system"))))
         )
-        workbench_form.addRow("Animation", self.motion_combo)
-        outer.addLayout(workbench_form)
+        form.addRow("Animation", self.motion_combo)
+
+        self.context_combo = QComboBox()
+        self.context_combo.setAccessibleName("Chat context window in tokens")
+        self.context_combo.setToolTip(
+            "How much conversation the local model keeps in mind in Chat. Pick a "
+            "preset or type any token count - 24000 and 24k both work. Bigger "
+            "remembers more and costs more memory on this machine; it applies to "
+            "the next turn. The agent has its own budget - the toolbar slider."
+        )
+        # Editable: the presets are stops worth one click, not a fence. Anything
+        # that parses as a positive count is accepted and only warned about.
+        self.context_combo.setEditable(True)
+        self.context_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        presets = getattr(self.desktop_core(), "CONTEXT_WINDOW_PRESETS", None) or (
+            4096, 8192, 16384, 32768, 65536, 131072
+        )
+        for value in presets:
+            self.context_combo.addItem(str(value), value)
+        self.context_combo.setCurrentText(
+            str(self._context_tokens(preferences.get("context_window", 16384)))
+        )
+        form.addRow("Chat context", self.context_combo)
+        self.context_hint = QLabel()
+        self.context_hint.setObjectName("meta")
+        self.context_hint.setWordWrap(True)
+        form.addRow("", self.context_hint)
+        self._describe_context(self.context_combo.currentText())
+        outer.addLayout(form)
 
         # States are set above; wiring afterwards keeps the constructor's
         # initial values from firing preference writes of their own.
@@ -2744,6 +2866,13 @@ class SettingsDialog(QDialog):
         self.motion_combo.currentIndexChanged.connect(
             lambda _index: self._set_preference("reduce_motion", self.motion_combo.currentData())
         )
+        # Typing only previews; the value is stored when the field is left or a
+        # preset is chosen, so a half-typed "2" never becomes the setting.
+        self.context_combo.currentTextChanged.connect(self._describe_context)
+        self.context_combo.activated.connect(lambda _index: self._commit_context())
+        line = self.context_combo.lineEdit()
+        if line is not None:
+            line.editingFinished.connect(self._commit_context)
 
         window_heading = QLabel("Window")
         window_heading.setObjectName("brand")
@@ -2763,7 +2892,60 @@ class SettingsDialog(QDialog):
         self.window_feedback.setObjectName("meta")
         self.window_feedback.setWordWrap(True)
         outer.addWidget(self.window_feedback)
+        outer.addStretch(1)
+        return page
 
+    def _privacy_page(self, preferences: dict[str, Any], agent_limitation: str) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Boundaries")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
+        tor = QLabel(
+            "Chat search and the coding agent both leave over Tor; a failed Tor "
+            "check never falls back to a direct request."
+        )
+        tor.setWordWrap(True)
+        form.addRow("Tor", tor)
+        agent = QLabel(_brand_runtime_text(agent_limitation))
+        agent.setWordWrap(True)
+        form.addRow("Agent", agent)
+        form.addRow("Telemetry", QLabel("No Onionmind telemetry or account"))
+        outer.addLayout(form)
+
+        on_disk_heading = QLabel("What is written to disk")
+        on_disk_heading.setObjectName("brand")
+        outer.addWidget(on_disk_heading)
+        self.save_history_box = QCheckBox("Save conversations to this machine")
+        self.save_history_box.setAccessibleName("Save conversations to this machine")
+        self.save_history_box.setToolTip(
+            "Off: conversations stay in memory only and are gone when the window "
+            "closes. Sessions already saved are kept until you delete them."
+        )
+        self.save_history_box.setChecked(bool(preferences.get("save_history", True)))
+        outer.addWidget(self.save_history_box)
+        self.draft_box = QCheckBox("Remember an unsent message between launches")
+        self.draft_box.setAccessibleName("Remember an unsent composer draft")
+        self.draft_box.setToolTip(
+            "Off: whatever is typed but not sent is dropped when Onionmind closes."
+        )
+        self.draft_box.setChecked(bool(preferences.get("remember_drafts", True)))
+        outer.addWidget(self.draft_box)
+        self.save_history_box.toggled.connect(
+            lambda checked: self._set_preference("save_history", checked)
+        )
+        self.draft_box.toggled.connect(
+            lambda checked: self._set_preference("remember_drafts", checked)
+        )
+        outer.addStretch(1)
+        return page
+
+    def _updates_page(self, update_bridge: Optional[UpdateBridge]) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
         updates_heading = QLabel("Updates")
         updates_heading.setObjectName("brand")
         outer.addWidget(updates_heading)
@@ -2790,8 +2972,8 @@ class SettingsDialog(QDialog):
             "Check for updates; while on, Onionmind looks for updates over Tor for as "
             "long as it stays open."
         )
-        window = self.parent()
-        if isinstance(window, OnionmindWindow):
+        window = self._window()
+        if window is not None:
             self.autocheck_box.setChecked(window.update_permission_enabled())
         self.autocheck_box.toggled.connect(self._permission_toggled)
         outer.addWidget(self.autocheck_box)
@@ -2805,31 +2987,203 @@ class SettingsDialog(QDialog):
         self.update_progress.hide()
         outer.addWidget(self.update_progress)
         outer.addStretch(1)
-        self.storage_feedback = QLabel()
-        self.storage_feedback.setObjectName("meta")
-        self.storage_feedback.setWordWrap(True)
-        outer.addWidget(self.storage_feedback)
-        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        open_folder = actions.addButton("Open storage folder", QDialogButtonBox.ButtonRole.ActionRole)
-        open_folder.setAccessibleName("Open Onionmind storage folder")
-        open_folder.clicked.connect(self._open_storage_folder)
-        actions.rejected.connect(self.reject)
-        outer.addWidget(actions)
-        scroll.setWidget(content)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(scroll)
+        return page
 
-        if update_bridge is None or not update_bridge.available:
-            self.check_updates_button.setEnabled(False)
-            self.update_feedback.setText("")
-        pending = update_bridge.pending() if update_bridge and update_bridge.available else None
-        if pending is not None:
-            self._offer_restart(str(pending))
+    def _storage_page(self, data_root: Path) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Storage")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        storage = QLabel(str(data_root))
+        storage.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        storage.setWordWrap(True)
+        form.addRow("Session storage", storage)
+        outer.addLayout(form)
+        note = QLabel(
+            "Conversations, settings, and the saved window layout live in that "
+            "folder and nowhere else."
+        )
+        note.setObjectName("meta")
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        wipe_row = QHBoxLayout()
+        wipe_note = QLabel("Remove every saved and archived conversation from this machine.")
+        wipe_note.setWordWrap(True)
+        wipe_row.addWidget(wipe_note, 1)
+        self.wipe_button = QPushButton("Delete all conversations")
+        self.wipe_button.setAccessibleName("Delete every saved Onionmind conversation")
+        self.wipe_button.clicked.connect(self._delete_all_sessions)
+        wipe_row.addWidget(self.wipe_button)
+        outer.addLayout(wipe_row)
+
+        wipe_heading = QLabel("Wipe this machine")
+        wipe_heading.setObjectName("brand")
+        outer.addWidget(wipe_heading)
+        clear_row = QHBoxLayout()
+        clear_note = QLabel(
+            "Destroys your work on this machine: every conversation, the project "
+            "list, and the project folders with every file inside them, plus the "
+            "last opened project, any unsent message, the agent's network log, and "
+            "Tor's state, caches and logs. Files are overwritten before they are "
+            "removed. This cannot be undone."
+        )
+        clear_note.setWordWrap(True)
+        clear_row.addWidget(clear_note, 1)
+        self.clear_button = QPushButton("Wipe everything")
+        self.clear_button.setAccessibleName(
+            "Wipe sessions, projects and their files from this machine"
+        )
+        self.clear_button.clicked.connect(self._wipe_machine_data)
+        clear_row.addWidget(self.clear_button)
+        outer.addLayout(clear_row)
+        self.clear_on_exit_box = QCheckBox(
+            "Wipe automatically every time Onionmind closes"
+        )
+        self.clear_on_exit_box.setAccessibleName(
+            "Wipe sessions, projects and their files automatically when Onionmind closes"
+        )
+        self.clear_on_exit_box.setToolTip(
+            "On: every close destroys the conversations, the project list, and the "
+            "project folders themselves - without asking again. Off: nothing is "
+            "removed until you press the button above."
+        )
+        window = self._window()
+        self.clear_on_exit_box.setChecked(
+            bool(getattr(window, "preferences", {}).get("clear_on_exit", False))
+            if window is not None
+            else False
+        )
+        self.clear_on_exit_box.toggled.connect(self._clear_on_exit_toggled)
+        outer.addWidget(self.clear_on_exit_box)
+        limit = QLabel(
+            "Overwriting is best effort: on an SSD or a copy-on-write filesystem "
+            "the old blocks can survive. Full-disk encryption, or the Matchstick "
+            "RAM-only image, is the guarantee."
+        )
+        limit.setObjectName("meta")
+        limit.setWordWrap(True)
+        outer.addWidget(limit)
+        outer.addStretch(1)
+        return page
+
+    _WIPE_DETAIL = (
+        "Removes every saved and archived conversation, the remembered projects, "
+        "and each project folder with all of its files - overwritten first, then "
+        "deleted. The last opened project, any unsent message, and the agent's "
+        "network log go too, along with Tor's state file, cached consensus and "
+        "descriptors, and any Tor log on this machine.\n\n"
+        "A drive root, your home folder, Onionmind's own data or program folder, "
+        "and linked folders are skipped.\n\n"
+        "Overwriting is best effort: on an SSD or a copy-on-write filesystem the "
+        "original blocks can survive."
+    )
+
+    def _wipe_machine_data(self) -> None:
+        window = self._window()
+        if window is None:
+            self.storage_feedback.setText(
+                "The workbench window is unavailable; nothing was wiped."
+            )
+            return
+        if not window._confirm_permanent_deletion(
+            title="Wipe everything from this machine",
+            text="Permanently destroy every conversation and every project folder?",
+            detail=self._WIPE_DETAIL,
+            confirm_label="Wipe everything",
+        ):
+            self.storage_feedback.setText("Nothing was wiped.")
+            return
+        result = window.wipe_machine_data()
+        skipped = result.get("skipped", 0)
+        self.storage_feedback.setText(
+            f"Wiped {result.get('sessions', 0)} conversation(s), "
+            f"{result.get('projects', 0)} project folder(s) and "
+            f"{result.get('tor', 0)} Tor state file(s) from this machine."
+            + (f" {skipped} protected path(s) were skipped." if skipped else "")
+        )
+
+    def _clear_on_exit_toggled(self, checked: bool) -> None:
+        """Arming an unattended folder-destroying wipe is itself confirmed once;
+        after that every close runs it without asking, which is the point."""
+        window = self._window()
+        if checked and window is not None:
+            if not window._confirm_permanent_deletion(
+                title="Wipe on every close",
+                text="Destroy every conversation and every project folder each time Onionmind closes?",
+                detail=self._WIPE_DETAIL,
+                confirm_label="Wipe on close",
+            ):
+                self.clear_on_exit_box.setChecked(False)
+                self.storage_feedback.setText("Automatic wipe stays off.")
+                return
+        self._set_preference("clear_on_exit", checked)
+        self.storage_feedback.setText(
+            "Every close will wipe conversations and project folders."
+            if checked
+            else "Automatic wipe is off."
+        )
+
+    def _delete_all_sessions(self) -> None:
+        window = self._window()
+        if window is None:
+            self.storage_feedback.setText(
+                "The workbench window is unavailable; nothing was deleted."
+            )
+            return
+        removed = window.delete_all_sessions()
+        self.storage_feedback.setText(
+            f"Deleted {removed} saved conversation(s) from this machine."
+            if removed
+            else "There were no saved conversations to delete."
+        )
+
 
     def _window(self) -> Any:
         parent = self.parent()
         return parent if isinstance(parent, OnionmindWindow) else None
+
+    def desktop_core(self) -> Any:
+        window = self._window()
+        return getattr(window, "desktop_core", None)
+
+    def _context_tokens(self, value: Any) -> int:
+        parser = _optional_callable(self.desktop_core(), "parse_context_window")
+        parsed = parser(value) if callable(parser) else None
+        if parsed is None:
+            try:
+                parsed = int(_as_text(value).strip() or 0)
+            except ValueError:
+                parsed = 0
+        return parsed if parsed and parsed > 0 else 16384
+
+    def _describe_context(self, text: str) -> None:
+        """Say what the typed value means, and warn when it is out of range -
+        the field itself refuses nothing."""
+        parser = _optional_callable(self.desktop_core(), "parse_context_window")
+        tokens = parser(text) if callable(parser) else self._context_tokens(text)
+        if tokens is None:
+            self.context_hint.setStyleSheet("color: #d88675;")
+            self.context_hint.setText("Enter a token count, for example 24000 or 24k.")
+            return
+        warner = _optional_callable(self.desktop_core(), "context_window_warning")
+        warning = warner(tokens) if callable(warner) else ""
+        self.context_hint.setStyleSheet("color: #d88675;" if warning else "")
+        self.context_hint.setText(
+            warning or f"{tokens:,} tokens · type any count, or pick a preset from the list"
+        )
+
+    def _commit_context(self) -> None:
+        parser = _optional_callable(self.desktop_core(), "parse_context_window")
+        tokens = parser(self.context_combo.currentText()) if callable(parser) else None
+        if tokens is None:
+            self._describe_context(self.context_combo.currentText())
+            return
+        self._set_preference("context_window", tokens)
+        self.context_combo.setCurrentText(str(tokens))
+        self._describe_context(str(tokens))
 
     def _set_preference(self, key: str, value: Any) -> None:
         window = self._window()
@@ -3478,7 +3832,7 @@ class OnionmindWindow(QMainWindow):
                 self.left_rail.add_project(_as_text(path), select=False)
         sessions = self.session_bridge.list()
         self.session_objects = {_as_text(_field(session, "id")): session for session in sessions}
-        self.left_rail.set_sessions(sessions)
+        self.left_rail.set_sessions(self._project_sessions(sessions))
         workspace = _as_text(self.settings_data.get("workspace"))
         if workspace and Path(workspace).is_dir():
             self.select_workspace(workspace)
@@ -3989,6 +4343,11 @@ class OnionmindWindow(QMainWindow):
             else 1.0
         )
         apply_text_scale(scale)
+        tokens = getattr(self.desktop_core, "context_window_tokens", None)
+        if callable(tokens) and hasattr(self.core, "NUM_CTX"):
+            # The adapters read NUM_CTX per request, so this lands on the next
+            # turn without restarting anything.
+            self.core.NUM_CTX = tokens(preferences.get("context_window", 16384))
 
     def set_preference(self, key: str, value: Any) -> None:
         """Validate, persist, and live-apply one workbench preference."""
@@ -4047,7 +4406,8 @@ class OnionmindWindow(QMainWindow):
             if self.current_session is not None
             else None
         )
-        self.left_rail.set_sessions(sessions, current_id)
+        self.left_rail.set_session_scope(self.workspace)
+        self.left_rail.set_sessions(self._project_sessions(sessions), current_id)
 
     def _retry_last_turn(self) -> None:
         """Ask again after a failed chat turn: the error bubble comes off the
@@ -4078,7 +4438,7 @@ class OnionmindWindow(QMainWindow):
 
     def _remember_draft(self) -> None:
         draft = self.composer.toPlainText()
-        if draft.strip():
+        if draft.strip() and self.preferences.get("remember_drafts", True):
             self.settings_data["composer_draft"] = draft
         else:
             self.settings_data.pop("composer_draft", None)
@@ -4307,14 +4667,7 @@ class OnionmindWindow(QMainWindow):
         was_open = _path_is_within(self.workspace, deleted_path)
         self._forget_project_reference(deleted_path)
         if was_open:
-            self.workspace = None
-            self.current_snapshot = {}
-            self.repo_label.setText("No project")
-            self.repo_label.setToolTip("")
-            self.branch_label.setText("Open a folder")
-            self.scope_status.setText("No project selected")
-            self.terminal.set_workspace(str(Path.home()))
-            self.inspector.update_snapshot({})
+            self.close_project()
         name = Path(deleted_path).name or deleted_path
         self.set_status(f"Deleted project folder from this machine: {name}")
         self.inspector.append_activity(
@@ -4361,6 +4714,7 @@ class OnionmindWindow(QMainWindow):
         self.settings_data.update(workspace=self.workspace, recent_projects=recent[:10])
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
+        self._refresh_session_rows()
         self.refresh_workspace()
 
     def refresh_workspace(self) -> None:
@@ -4421,6 +4775,11 @@ class OnionmindWindow(QMainWindow):
         if self.active_kind:
             self.set_status("Stop the active run before adding a session.")
             return
+        if not self.preferences.get("save_history", True):
+            self.set_status(
+                "Saving conversations to this machine is off in settings; nothing was written."
+            )
+            return
         if not self.save_current_session():
             self.set_status(
                 "A new session was not added because the current history could not be saved."
@@ -4451,7 +4810,7 @@ class OnionmindWindow(QMainWindow):
         self.session_objects = {
             _as_text(_field(item, "id")): item for item in sessions
         }
-        self.left_rail.set_sessions(sessions, session_id)
+        self.left_rail.set_sessions(self._project_sessions(sessions), session_id)
         self.set_status("Added saved session")
         self.inspector.append_activity("Saved session added locally")
 
@@ -4460,8 +4819,26 @@ class OnionmindWindow(QMainWindow):
         first = re.sub(r"\s+", " ", first).strip()
         return first[:48] + ("…" if len(first) > 48 else "")
 
+    def _session_is_unchanged(self, model: str) -> bool:
+        """Opening or leaving a session must not reorder the list; only new
+        history may. The list sorts on updated_at and every save stamps it,
+        so an unchanged session is not written back at all. The title is not
+        compared: it is derived from the first message, and a renamed session
+        must not be re-saved (and re-titled) just for being opened."""
+        session = self.current_session
+        return (
+            session is not None
+            and _as_text(_field(session, "model")) == model
+            and _as_text(_field(session, "workspace")) == _as_text(self.workspace)
+            and list(_field(session, "messages", ()) or ()) == self.chat_messages
+        )
+
     def save_current_session(self) -> bool:
         if not self.chat_messages:
+            return True
+        if not self.preferences.get("save_history", True):
+            # Nothing to report: the user turned off writing conversations to
+            # disk, so an unwritten history is the expected outcome.
             return True
         try:
             # This is the final persistence boundary. A live tool round keeps
@@ -4470,6 +4847,8 @@ class OnionmindWindow(QMainWindow):
             self.chat_messages = _sanitize_assistant_messages(self.chat_messages)
             title = self._session_title()
             model = self.current_model_id()
+            if self._session_is_unchanged(model):
+                return True
             if self.current_session is None:
                 self.current_session = self.session_bridge.create(
                     title, model, self.workspace, self.chat_messages
@@ -4483,13 +4862,196 @@ class OnionmindWindow(QMainWindow):
             )
             session_id = _as_text(_field(self.current_session, "id"))
             self.session_objects[session_id] = self.current_session
-            self.left_rail.set_sessions(self.session_bridge.list(), session_id)
+            self.left_rail.set_sessions(
+                self._project_sessions(self.session_bridge.list()), session_id
+            )
             return True
         except Exception as exc:
             message = f"Session history could not be saved: {exc}"
             self.set_status(message)
             self.inspector.append_activity(message)
             return False
+
+    def _await_workers(self, timeout_ms: int = 3000) -> None:
+        """Wait, bounded, for background jobs to finish. Used before a wipe:
+        a worker reading the project folder keeps it undeletable."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while self._workers and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+    def close_project(self) -> None:
+        """Leave the workbench with no project open."""
+        self.workspace = None
+        self.current_snapshot = {}
+        self.repo_label.setText("No project")
+        self.repo_label.setToolTip("")
+        self.branch_label.setText("Open a folder")
+        self.scope_status.setText("No project selected")
+        self.terminal.set_workspace(str(Path.home()))
+        self.inspector.update_snapshot({})
+        self._refresh_session_rows()
+
+    def wipe_machine_data(self) -> dict[str, int]:
+        """Destroy this user's work on this machine: every saved and archived
+        session, the project list, **the project folders and everything in
+        them**, the last opened project, any unsent draft, and the agent's
+        network log. Files are overwritten before they are unlinked.
+
+        A project that fails the same safety check the per-project delete uses
+        (a drive root, your home folder, Onionmind's own data or program
+        folder, a symlinked folder) is skipped and counted, not obeyed - the
+        wipe is for your work, not for the machine.
+
+        ponytail: the overwrite is best-effort user space. On an SSD or a
+        copy-on-write filesystem the old blocks can survive; full-disk
+        encryption or the Matchstick RAM-only image is the real guarantee.
+        """
+        targets: list[str] = []
+        for index in range(self.left_rail.projects.count()):
+            item = self.left_rail.projects.item(index)
+            targets.append(_as_text(item.data(Qt.ItemDataRole.UserRole)))
+        targets.extend(
+            _as_text(item) for item in self.settings_data.get("recent_projects", [])
+        )
+        targets.append(_as_text(self.workspace))
+
+        # Release the folders first: a running shell keeps its working
+        # directory open, and Windows will not remove a directory in use.
+        self.terminal.stop()
+        terminal_process = getattr(self.terminal, "process", None)
+        if terminal_process is not None and (
+            terminal_process.state() != QProcess.ProcessState.NotRunning
+        ):
+            terminal_process.kill()
+            terminal_process.waitForFinished(2000)
+        self.close_project()
+        # A workspace/Git snapshot runs inside the project folder; a folder
+        # being read cannot be removed, so let in-flight jobs land first.
+        self._await_workers()
+
+        sessions = self.delete_all_sessions()
+        shred_tree = _optional_callable(self.desktop_core, "shred_tree")
+        shred_file = _optional_callable(self.desktop_core, "shred_file")
+        store_root = getattr(getattr(self.session_bridge, "store", None), "root", None)
+        if callable(shred_tree) and store_root is not None:
+            # Sweeps the archive and any quarantined leftovers with it.
+            shred_tree(store_root)
+
+        wiped, skipped, seen = 0, 0, set()
+        for raw in targets:
+            key = _path_key(raw)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            try:
+                target = self._validated_project_delete_target(raw)
+            except (ValueError, OSError):
+                skipped += 1
+                continue
+            for attempt in range(3):
+                if callable(shred_tree):
+                    shred_tree(target)
+                if target.exists():
+                    # Something still held a handle while the files went; take
+                    # the empty shell of the folder with the blunt tool.
+                    shutil.rmtree(target, ignore_errors=True)
+                if not target.exists():
+                    break
+                time.sleep(0.15)      # Windows releases handles a beat later
+            wiped += 0 if target.exists() else 1
+
+        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
+        if net_log and callable(shred_file) and Path(net_log).is_file():
+            shred_file(net_log)
+        tor = self.wipe_tor_state()
+
+        self.left_rail.clear_projects()
+        for key in ("recent_projects", "workspace", "composer_draft"):
+            self.settings_data.pop(key, None)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self.close_project()
+        self.inspector.append_activity(
+            f"Wiped from this machine: {sessions} session(s), {wiped} project folder(s), "
+            f"{tor} Tor state file(s)"
+            + (f", {skipped} protected path(s) skipped" if skipped else "")
+        )
+        return {"sessions": sessions, "projects": wiped, "skipped": skipped, "tor": tor}
+
+    # Tor's own footprint: the state file naming this machine's guard relays,
+    # the cached consensus and descriptors, and any log it wrote.
+    _TOR_TRACE_PREFIXES = ("state", "cached-", "diff-cache", "lock", "unverified-")
+
+    def wipe_tor_state(self) -> int:
+        """Destroy Tor's history on this machine. Onionmind's own data
+        directory goes whole; a Tor Browser one keeps the torrc that makes it
+        runnable and loses every trace of what it did."""
+        shred_tree = _optional_callable(self.desktop_core, "shred_tree")
+        shred_file = _optional_callable(self.desktop_core, "shred_file")
+        if not callable(shred_file):
+            return 0
+        stop_tor = getattr(self.core, "stop_managed_tor", None)
+        if callable(stop_tor):
+            # Tor holds its own files open; it has to be down first.
+            try:
+                stop_tor()
+            except Exception:
+                pass
+        directories = getattr(self.core, "tor_data_dirs", None)
+        try:
+            candidates = list(directories()) if callable(directories) else []
+        except Exception:
+            candidates = []
+        # Discovery is the core's job (tor_data_dirs); this only classifies
+        # what comes back, so a core that names nothing wipes nothing.
+        own = Path.home() / ".onionmind" / "tor"
+        removed = 0
+        for raw in candidates:
+            directory = Path(_as_text(raw))
+            if not directory.is_dir():
+                continue
+            if _path_key(directory) == _path_key(own):
+                removed += shred_tree(directory) if callable(shred_tree) else 0
+                continue
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                name = entry.name.casefold()
+                traces = name.endswith(".log") or name.startswith(self._TOR_TRACE_PREFIXES)
+                if traces and entry.is_file() and shred_file(entry):
+                    removed += 1
+        return removed
+
+    def _project_sessions(self, sessions: Iterable[Any]) -> list[Any]:
+        """The saved sessions belonging to the open project.
+
+        Every session records the project it ran in, so the rail can show that
+        project's work only and switching projects switches the list. Sessions
+        saved with no project open belong to no project and show only then.
+        """
+        current = _path_key(self.workspace)
+        return [
+            item for item in sessions if _path_key(_field(item, "workspace")) == current
+        ]
+
+    def delete_all_sessions(self) -> int:
+        """Permanently remove every saved and archived conversation."""
+        removed = 0
+        for archived in (False, True):
+            for item in self.session_bridge.list(archived=archived):
+                if self.session_bridge.delete(_as_text(_field(item, "id"))):
+                    removed += 1
+        self.current_session = None
+        self.session_objects = {}
+        self.left_rail.set_sessions([])
+        if removed:
+            self.inspector.append_activity(
+                f"Deleted {removed} saved conversation(s) from local storage"
+            )
+        return removed
 
     def archive_session(self, session_id: str) -> None:
         if self.active_kind:
@@ -4522,7 +5084,10 @@ class OnionmindWindow(QMainWindow):
             self.new_task(save_current=False)
         sessions = self.session_bridge.list()
         self.session_objects = {_as_text(_field(item, "id")): item for item in sessions}
-        self.left_rail.set_sessions(sessions, _as_text(_field(self.current_session, "id")) if self.current_session else None)
+        self.left_rail.set_sessions(
+            self._project_sessions(sessions),
+            _as_text(_field(self.current_session, "id")) if self.current_session else None,
+        )
         self.set_status(f"Removed session from Sessions: {title}")
         self.inspector.append_activity(
             f"Session removed from the list and kept in local archive storage: {title}"
@@ -4547,7 +5112,7 @@ class OnionmindWindow(QMainWindow):
             )
         if session is None:
             self.set_status("That saved session is no longer available.")
-            self.left_rail.set_sessions(self.session_bridge.list())
+            self.left_rail.set_sessions(self._project_sessions(self.session_bridge.list()))
             return
         title = _as_text(_field(session, "title", "this session"))
         if not self._confirm_permanent_deletion(
@@ -4582,7 +5147,7 @@ class OnionmindWindow(QMainWindow):
             if self.current_session
             else None
         )
-        self.left_rail.set_sessions(sessions, current_id)
+        self.left_rail.set_sessions(self._project_sessions(sessions), current_id)
         self.set_status(f"Deleted session from this machine: {title}")
         self.inspector.append_activity(
             f"Session permanently deleted from this machine: {title}"
@@ -5270,20 +5835,19 @@ class OnionmindWindow(QMainWindow):
         self._model_dialog = None
 
     def _catalog_entry_label(self, entry: Any) -> str:
-        formatter = _optional_callable(self.desktop_core, "format_downloads")
+        """Name on the first line, a plain description on the second. The
+        refusal-removal flag is the dialog's own line, not this one."""
         fit = _optional_callable(self.desktop_core, "catalog_fit")
-        downloads = _field(entry, "downloads", 0) or 0
-        likes = _field(entry, "likes", 0) or 0
-        counts = (
-            f"{formatter(downloads)} downloads" if callable(formatter) else f"{downloads} downloads"
-        )
-        marker = _field(entry, "uncensored")
-        flag = f"refusal-removed: {marker}" if marker else "no refusal-removal flag"
-        parts = [f"{_as_text(_field(entry, 'id'))} · {counts} · {likes} likes · {flag}"]
+        describe = _optional_callable(self.desktop_core, "catalog_description")
+        model_id = _as_text(_field(entry, "id"))
+        fit_label = ""
         if callable(fit):
             vram, ram = self._catalog_specs
-            parts.append(fit(_as_text(_field(entry, "id")), vram, ram)[1])
-        return " · ".join(parts)
+            fit_label = fit(model_id, vram, ram)[1]
+        if callable(describe):
+            return f"{model_id}\n{describe(entry, fit_label)}"
+        downloads = _field(entry, "downloads", 0) or 0
+        return f"{model_id}\n{downloads} downloads · {fit_label}".rstrip(" ·")
 
     def _fetch_model_catalog(self, dialog: ModelManagerDialog) -> None:
         """Fetch the popular GGUF list over Tor - fail closed, ordered by what
@@ -5617,6 +6181,9 @@ class OnionmindWindow(QMainWindow):
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        if self.preferences.get("clear_on_exit", False):
+            # Last, so it takes what this very close just wrote with it.
+            self.wipe_machine_data()
         stop_tor = getattr(self.core, "stop_managed_tor", None)
         if callable(stop_tor):
             try:
