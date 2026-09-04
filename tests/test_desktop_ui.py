@@ -18,12 +18,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import QEvent, QProcess, QStandardPaths, Qt, QTimer
-    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtGui import QFontDatabase, QKeyEvent
     from PySide6.QtWidgets import (
         QApplication,
         QDialogButtonBox,
         QPushButton,
         QScrollArea,
+        QTabWidget,
         QToolButton,
         QWidget,
     )
@@ -291,6 +292,58 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(window.session_bridge.list(), [])
             self.assertEqual(window.left_rail.sessions.count(), 0)
             self.assertIsNone(window.current_session)
+        self._close(window)
+
+    def test_opening_a_session_leaves_the_list_order_alone(self) -> None:
+        """Switching sessions re-saved the one being left, and every save
+        stamps updated_at, so merely looking at a session shuffled it to the
+        top of a list sorted by that stamp."""
+        window = self._window()
+        del window.save_current_session          # use the real one here
+        with tempfile.TemporaryDirectory() as temporary:
+            window.session_bridge = ui.SessionBridge(
+                desktop_core, Path(temporary) / "sessions"
+            )
+            messages = [
+                {"role": "user", "content": "older"},
+                {"role": "assistant", "content": "answer"},
+            ]
+
+            model = window.current_model_id()
+
+            def store(title: str) -> object:
+                session = window.session_bridge.create(
+                    title, model, window.workspace, messages
+                )
+                return window.session_bridge.save(
+                    session,
+                    title=title,
+                    model=model,
+                    workspace=window.workspace,
+                    messages=messages,
+                )
+
+            older = store("Older")
+            newer = store("Newer")
+            window.session_objects = {
+                item.id: item for item in window.session_bridge.list()
+            }
+            window.current_session = older
+            window.chat_messages = list(messages)
+
+            window.load_session(newer.id)          # just looking
+            self.assertEqual(
+                [item.id for item in window.session_bridge.list()],
+                [newer.id, older.id],
+            )
+
+            window.load_session(older.id)          # now continue on the older one
+            window.chat_messages.append({"role": "user", "content": "continue"})
+            self.assertTrue(window.save_current_session())
+            self.assertEqual(
+                [item.id for item in window.session_bridge.list()],
+                [older.id, newer.id],
+            )
         self._close(window)
 
     def test_project_remove_keeps_folder_and_machine_delete_removes_it(self) -> None:
@@ -1115,6 +1168,261 @@ class WorkbenchPreferencesTests(unittest.TestCase):
             self.assertTrue(window.terminal.isHidden())
             self._close(window)
 
+    def test_ui_font_is_the_most_readable_installed_family(self) -> None:
+        """The workbench text was the platform default at the platform size,
+        which is hard to read; the readable families are preferred instead -
+        at the same point size, because a larger one clips the rail rows."""
+        before = self.app.font()
+        try:
+            ui._register_system_fonts(self.app)
+            chosen = self.app.font()
+            self.assertAlmostEqual(chosen.pointSizeF(), before.pointSizeF(), places=3)
+            installed = set(QFontDatabase.families())
+            readable = [
+                family for family in ("Verdana", "DejaVu Sans") if family in installed
+            ]
+            if readable:
+                self.assertIn(chosen.family(), readable)
+            self.assertFalse(QFontDatabase.isFixedPitch(chosen.family()))
+        finally:
+            self.app.setFont(before)
+
+    def test_wipe_destroys_sessions_projects_and_their_files(self) -> None:
+        """The wipe is meant to leave nothing recoverable: conversations, the
+        project list, and the project folders themselves - but never a drive
+        root, the home folder, or Onionmind's own storage."""
+        root = Path(tempfile.mkdtemp())
+        project = root / "work"
+        project.mkdir()
+        (project / "source.txt").write_text("secret", encoding="utf-8")
+        bridge = ui.SettingsBridge(desktop_core, root / "settings.json")
+        window = self._window(bridge)
+        window.session_bridge = ui.SessionBridge(desktop_core, root / "sessions")
+        store = window.session_bridge.store
+        store.create(title="Work", model="inferno", workspace=project)
+        archived = store.create(title="Older", model="inferno", workspace=project)
+        store.archive(archived.id)
+        window.left_rail.clear_projects()          # drop the demo rows
+        window.select_workspace(str(project))
+        window.composer.setPlainText("unsent")
+        window._remember_draft()
+        # A protected path in the list must be counted and left alone.
+        window.left_rail.add_project(str(Path.home()), select=False)
+        dialog = ui.SettingsDialog(
+            window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+        )
+        dialog.show()
+
+        with mock.patch.object(window, "_confirm_permanent_deletion", return_value=False):
+            dialog.clear_button.click()
+        self.assertTrue(project.is_dir())
+        self.assertIn("Nothing was wiped", dialog.storage_feedback.text())
+
+        with mock.patch.object(window, "_confirm_permanent_deletion", return_value=True):
+            dialog.clear_button.click()
+        self.assertFalse(project.exists())
+        self.assertFalse((root / "sessions").exists())
+        self.assertEqual(window.session_bridge.list(), [])
+        self.assertEqual(window.session_bridge.list(archived=True), [])
+        self.assertEqual(window.left_rail.projects.count(), 0)
+        self.assertIsNone(window.workspace)
+        stored = bridge.load()
+        for key in ("recent_projects", "workspace", "composer_draft"):
+            self.assertNotIn(key, stored)
+        self.assertTrue(Path.home().is_dir())
+        self.assertIn("1 project folder", dialog.storage_feedback.text())
+        self.assertIn("protected path", dialog.storage_feedback.text())
+        self._close(dialog)
+        self._close(window)
+
+    def test_wipe_takes_tor_history_but_leaves_tor_runnable(self) -> None:
+        """Tor's state file names this machine's guard relays and its caches
+        name what it fetched; a wipe that leaves those behind is not a wipe.
+        The torrc that makes Tor start again is not history."""
+        tor_dir = Path(tempfile.mkdtemp()) / "Data" / "Tor"
+        tor_dir.mkdir(parents=True)
+        for name in ("state", "cached-microdesc-consensus", "cached-certs", "notice.log", "lock"):
+            (tor_dir / name).write_text("trace", encoding="utf-8")
+        for name in ("torrc", "torrc-defaults", "geoip"):
+            (tor_dir / name).write_text("config", encoding="utf-8")
+        window = self._window(
+            ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "settings.json")
+        )
+        stopped: list[bool] = []
+        window.core.stop_managed_tor = lambda: stopped.append(True)
+        window.core.tor_data_dirs = lambda: [str(tor_dir)]
+
+        self.assertEqual(window.wipe_tor_state(), 5)
+        self.assertEqual(stopped, [True])            # Tor holds its own files
+        for name in ("state", "cached-microdesc-consensus", "cached-certs", "notice.log", "lock"):
+            self.assertFalse((tor_dir / name).exists(), name)
+        for name in ("torrc", "torrc-defaults", "geoip"):
+            self.assertTrue((tor_dir / name).is_file(), name)
+        self._close(window)
+
+    def test_wipe_on_exit_is_confirmed_once_then_runs_on_every_close(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        project = root / "nightly"
+        project.mkdir()
+        (project / "notes.md").write_text("draft", encoding="utf-8")
+        bridge = ui.SettingsBridge(desktop_core, root / "settings.json")
+        window = self._window(bridge)
+        sessions = ui.SessionBridge(desktop_core, root / "sessions")
+        window.session_bridge = sessions
+        sessions.store.create(title="Work", model="inferno", workspace=project)
+        window.left_rail.clear_projects()
+        window.select_workspace(str(project))
+        dialog = ui.SettingsDialog(
+            window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+        )
+        dialog.show()
+        self.assertFalse(dialog.clear_on_exit_box.isChecked())
+
+        # Arming it asks once; declining leaves it off.
+        with mock.patch.object(window, "_confirm_permanent_deletion", return_value=False):
+            dialog.clear_on_exit_box.setChecked(True)
+        self.assertFalse(dialog.clear_on_exit_box.isChecked())
+        self.assertFalse(bridge.load().get("clear_on_exit", False))
+
+        with mock.patch.object(window, "_confirm_permanent_deletion", return_value=True):
+            dialog.clear_on_exit_box.setChecked(True)
+        self.assertTrue(bridge.load()["clear_on_exit"])
+        self._close(dialog)
+
+        self._close(window)                        # closeEvent does the wipe
+        self.assertFalse(project.exists())
+        self.assertEqual(sessions.list(), [])
+        stored = bridge.load()
+        self.assertNotIn("recent_projects", stored)
+        self.assertNotIn("workspace", stored)
+        self.assertTrue(stored["clear_on_exit"])   # the setting itself survives
+
+    def test_chat_context_takes_any_number_and_only_warns(self) -> None:
+        """The presets were a fence: four values and nothing between them. Any
+        positive count is accepted now; too small or too large only warns."""
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            window.core.NUM_CTX = 16384
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            edit = dialog.context_combo.lineEdit()
+
+            # A preset is still one click.
+            index = dialog.context_combo.findData(8192)
+            dialog.context_combo.setCurrentIndex(index)
+            dialog.context_combo.activated.emit(index)
+            self.assertEqual(window.preferences["context_window"], 8192)
+
+            # An in-between value nobody offered.
+            edit.setText("21000")
+            edit.editingFinished.emit()
+            self.assertEqual(bridge.load()["context_window"], 21000)
+            self.assertEqual(window.core.NUM_CTX, 21000)
+            self.assertIn("21,000 tokens", dialog.context_hint.text())
+
+            # Far too big: stored anyway, with a warning that says why.
+            edit.setText("200000")
+            edit.editingFinished.emit()
+            self.assertEqual(window.preferences["context_window"], 200000)
+            self.assertIn("128k", dialog.context_hint.text())
+
+            # Far too small: same deal.
+            edit.setText("500")
+            edit.editingFinished.emit()
+            self.assertEqual(window.preferences["context_window"], 500)
+            self.assertIn("Below 1k", dialog.context_hint.text())
+
+            # Junk is not a number, so it changes nothing.
+            edit.setText("plenty")
+            edit.editingFinished.emit()
+            self.assertEqual(window.preferences["context_window"], 500)
+            self.assertIn("token count", dialog.context_hint.text())
+            self._close(dialog)
+            self._close(window)
+
+    def test_settings_tabs_group_the_sections(self) -> None:
+        """One long scrolling column made every control equally hard to find;
+        the sections are tabs now, and each one scrolls on its own."""
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            tabs = dialog.findChild(QTabWidget)
+            self.assertIsNotNone(tabs)
+            assert tabs is not None
+            self.assertEqual(
+                [tabs.tabText(index) for index in range(tabs.count())],
+                ["General", "Privacy", "Updates", "Storage"],
+            )
+            for index in range(tabs.count()):
+                page = tabs.widget(index)
+                self.assertIsInstance(page, QScrollArea)
+                self.assertTrue(page.widgetResizable())
+            self._close(dialog)
+            self._close(window)
+
+    def test_privacy_settings_stop_writing_history_and_drafts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            del window.save_current_session          # the real one, not the stub
+            window.session_bridge = ui.SessionBridge(
+                desktop_core, Path(temporary) / "sessions"
+            )
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            dialog.save_history_box.setChecked(False)
+            dialog.draft_box.setChecked(False)
+
+            window.chat_messages = [{"role": "user", "content": "kept off disk"}]
+            self.assertTrue(window.save_current_session())
+            self.assertEqual(window.session_bridge.list(), [])
+            window.composer.setPlainText("unsent")
+            window._remember_draft()
+            self.assertNotIn("composer_draft", bridge.load())
+
+            # Turning saving back on writes the conversation as before.
+            dialog.save_history_box.setChecked(True)
+            self.assertTrue(window.save_current_session())
+            self.assertEqual(len(window.session_bridge.list()), 1)
+            self._close(dialog)
+            self._close(window)
+
+    def test_delete_all_conversations_clears_active_and_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            window.session_bridge = ui.SessionBridge(
+                desktop_core, Path(temporary) / "sessions"
+            )
+            store = window.session_bridge.store
+            keep = store.create(title="Active")
+            gone = store.create(title="Archived")
+            store.archive(gone.id)
+            window.left_rail.set_sessions(window.session_bridge.list())
+
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            dialog.wipe_button.click()
+            self.assertIn("2", dialog.storage_feedback.text())
+            self.assertEqual(window.session_bridge.list(), [])
+            self.assertEqual(window.session_bridge.list(archived=True), [])
+            self.assertIsNone(store.load(keep.id))
+            self.assertIsNone(store.load(gone.id, archived=True))
+            self.assertEqual(window.left_rail.sessions.count(), 0)
+            self._close(dialog)
+            self._close(window)
+
     def test_settings_dialog_controls_write_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
@@ -1141,6 +1449,13 @@ class WorkbenchPreferencesTests(unittest.TestCase):
 
                 dialog.motion_combo.setCurrentIndex(dialog.motion_combo.findData("reduced"))
                 self.assertFalse(ui._ui_animations_enabled())
+
+                window.core.NUM_CTX = 16384          # what the real core carries
+                edit = dialog.context_combo.lineEdit()
+                edit.setText("24k")
+                edit.editingFinished.emit()
+                self.assertEqual(bridge.load()["context_window"], 24576)
+                self.assertEqual(window.core.NUM_CTX, 24576)
             finally:
                 dialog.text_size_combo.setCurrentIndex(
                     dialog.text_size_combo.findData("system")
@@ -1210,11 +1525,47 @@ class QualityOfLifeTests(unittest.TestCase):
         self.assertEqual(emitted, [("b2", "Renamed session")])
         self._close(rail)
 
+    def test_sessions_are_scoped_to_the_open_project(self) -> None:
+        """One flat list mixed every project's work together; the rail shows
+        the open project's sessions and follows a project switch."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alpha, beta = root / "alpha", root / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            window = self._window(ui.SettingsBridge(desktop_core, root / "settings.json"))
+            window.session_bridge = ui.SessionBridge(desktop_core, root / "sessions")
+            store = window.session_bridge.store
+            store.create(title="Alpha work", model="inferno", workspace=alpha)
+            store.create(title="Beta work", model="inferno", workspace=beta)
+            store.create(title="No project", model="inferno")
+
+            def listed() -> list[str]:
+                rail = window.left_rail.sessions
+                return [rail.item(row).text().split("\n")[0] for row in range(rail.count())]
+
+            window.select_workspace(str(alpha))
+            self.assertEqual(listed(), ["Alpha work"])
+            self.assertIn("alpha", window.left_rail.session_label.text())
+
+            window.select_workspace(str(beta))
+            self.assertEqual(listed(), ["Beta work"])
+
+            # A session saved with no project open belongs to no project.
+            window.workspace = None
+            window._refresh_session_rows()
+            self.assertEqual(listed(), ["No project"])
+            self.assertEqual(window.left_rail.session_label.text(), "SESSIONS")
+            self._close(window)
+
     def test_window_renames_a_saved_session_in_the_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sessions_bridge = ui.SessionBridge(desktop_core, Path(temporary) / "sessions")
-            created = sessions_bridge.store.create(title="Old name", model="inferno")
             window = self._window(ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json"))
+            # The rail lists the open project's sessions, so this one belongs to it.
+            created = sessions_bridge.store.create(
+                title="Old name", model="inferno", workspace=window.workspace
+            )
             window.session_bridge = sessions_bridge
             window.session_objects = {created.id: created}
             window.current_session = None
@@ -1308,7 +1659,16 @@ class QualityOfLifeTests(unittest.TestCase):
         self._close(dialog)
 
     def test_model_catalog_browse_fetches_over_tor_and_fits_the_machine(self) -> None:
-        dialog = ui.ModelManagerDialog([], "")
+        window = self._window(
+            ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json")
+        )
+        dialog = ui.ModelManagerDialog(
+            [],
+            "",
+            parent=window,
+            reference_normalizer=desktop_core.normalize_model_reference,
+            catalog_entry_label=window._catalog_entry_label,
+        )
         dialog.show()
         fetches: list[bool] = []
         dialog.catalogRequested.connect(lambda: fetches.append(True))
@@ -1320,14 +1680,43 @@ class QualityOfLifeTests(unittest.TestCase):
             [
                 desktop_core.CatalogModel(id="user/hot-gguf", downloads=1_200_000, likes=12),
                 desktop_core.CatalogModel(
-                    id="user/abliterated-x", downloads=5, likes=1, uncensored="abliterated"
+                    id="user/abliterated-7B",
+                    downloads=5,
+                    likes=1,
+                    uncensored="abliterated",
+                    task="text-generation",
                 ),
             ]
         )
-        self.assertTrue(dialog.catalog_combo.isEnabled())
-        dialog.catalog_combo.setCurrentIndex(1)
-        self.assertEqual(dialog.model_name.text(), "hf.co/user/abliterated-x")
+        self.assertEqual(dialog.catalog_list.count(), 2)
+        self.assertIn("checked over Tor at", dialog.catalog_status.text())
+        self.assertFalse(dialog.catalog_add.isEnabled())
+
+        dialog.catalog_list.setCurrentRow(1)
+        row = dialog.catalog_list.item(1).text()
+        self.assertIn("UNCENSORED / ABLITERATED", row)
+        self.assertIn("abliterated", row)
+        self.assertIn("Text generation", row)          # the short description
+        self.assertIn("7B parameters", row)
+        self.assertIn("No refusal-removal flag", dialog.catalog_list.item(0).text())
+        self.assertEqual(dialog.model_name.text(), "hf.co/user/abliterated-7B")
+
+        # Add selected pulls the highlighted row without retyping its name.
+        requested: list[str] = []
+        dialog.pullRequested.connect(requested.append)
+        self.assertTrue(dialog.catalog_add.isEnabled())
+        with mock.patch.object(
+            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.Yes
+        ):
+            dialog.catalog_add.click()
+        self.assertEqual(requested, ["hf.co/user/abliterated-7B"])
+
+        # Browsing again re-checks the live list instead of reusing this one.
+        dialog._request_catalog()
+        self.assertEqual(dialog.catalog_list.count(), 0)
+        self.assertEqual(fetches, [True, True])
         self._close(dialog)
+        self._close(window)
 
     def test_model_catalog_refuses_to_fetch_without_tor(self) -> None:
         window = self._window(ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json"))

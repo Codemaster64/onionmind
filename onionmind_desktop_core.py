@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -34,6 +35,10 @@ __all__ = [
     "PREFERENCE_DEFAULTS",
     "load_preferences",
     "text_scale_factor",
+    "CONTEXT_WINDOW_PRESETS",
+    "context_window_tokens",
+    "parse_context_window",
+    "context_window_warning",
     "resolve_startup_mode",
     "animations_enabled",
     "UNCENSORED_MARKERS",
@@ -49,6 +54,9 @@ __all__ = [
     "gpu_vram_mb",
     "parameter_billions",
     "catalog_fit",
+    "catalog_description",
+    "shred_file",
+    "shred_tree",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -350,6 +358,10 @@ PREFERENCE_DEFAULTS: dict[str, Any] = {
     "show_terminal_on_launch": False,
     "startup_mode": "remember",
     "reduce_motion": "system",
+    "save_history": True,
+    "remember_drafts": True,
+    "clear_on_exit": False,
+    "context_window": 16384,
 }
 
 _PREFERENCE_CHOICES: dict[str, tuple[str, ...]] = {
@@ -357,6 +369,10 @@ _PREFERENCE_CHOICES: dict[str, tuple[str, ...]] = {
     "startup_mode": ("remember", "chat", "agent"),
     "reduce_motion": ("system", "reduced", "full"),
 }
+
+# Offered as presets; any token count is accepted, these are just the stops
+# worth having one click away.
+CONTEXT_WINDOW_PRESETS: tuple[int, ...] = (4096, 8192, 16384, 32768, 65536, 131072)
 
 TEXT_SCALE_FACTORS: dict[str, float] = {
     "system": 1.0,
@@ -374,9 +390,69 @@ def load_preferences(settings: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(default, bool):
             preferences[key] = bool(value)
+        elif isinstance(default, int):
+            # ponytail: context_window is the only free-number preference, so
+            # its parser is named here rather than behind a per-key table.
+            tokens = parse_context_window(value)
+            if tokens is not None:
+                preferences[key] = tokens
         elif isinstance(value, str) and value in _PREFERENCE_CHOICES[key]:
             preferences[key] = value
     return preferences
+
+
+def parse_context_window(value: Any) -> Optional[int]:
+    """Tokens from whatever the field holds: 24000, "24000", "24k", "16 K".
+
+    Returns None for anything that is not a positive count, so a typo falls
+    back to the stored value instead of silently becoming a number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = _as_text_core(value).strip().lower().replace(",", "").replace(" ", "")
+    if text.endswith("tokens"):
+        text = text[: -len("tokens")]
+    multiplier = 1
+    if text.endswith("k"):
+        multiplier, text = 1024, text[:-1]
+    try:
+        tokens = int(float(text) * multiplier)
+    except ValueError:
+        return None
+    return tokens if tokens > 0 else None
+
+
+def context_window_warning(tokens: int) -> str:
+    """What is worth saying about a hand-typed context window, or "".
+
+    The real ceiling is the model's own trained window and this machine's KV
+    cache, neither of which is known here - so this warns about the ranges
+    that go wrong rather than pretending to a number it cannot compute.
+    """
+    if tokens < 1024:
+        return (
+            "Below 1k tokens the system prompt alone may not fit; replies get "
+            "cut short."
+        )
+    if tokens > 131072:
+        return (
+            "Above 128k tokens is beyond what nearly any local model was trained "
+            "for; the backend will clamp it or fail to load the model."
+        )
+    if tokens > 32768:
+        return (
+            "Above 32k tokens the KV cache grows fast - if it outgrows VRAM the "
+            "model spills onto the CPU and slows down."
+        )
+    return ""
+
+
+def context_window_tokens(context_window: Any) -> int:
+    """Tokens the backend is asked to hold. A bigger window remembers more of
+    the conversation and costs proportionally more memory on this machine."""
+    return parse_context_window(context_window) or PREFERENCE_DEFAULTS["context_window"]
 
 
 def text_scale_factor(text_scale: str) -> float:
@@ -484,6 +560,7 @@ class CatalogModel:
     likes: int = 0
     uncensored: Optional[str] = None
     gguf: bool = False
+    task: str = ""
 
 
 def parse_hf_catalog(payload: Any, limit: int = 24) -> list[CatalogModel]:
@@ -511,6 +588,7 @@ def parse_hf_catalog(payload: Any, limit: int = 24) -> list[CatalogModel]:
                 uncensored=uncensored_marker(model_id, *tags),
                 gguf=any("gguf" in _as_text_core(tag).casefold() for tag in tags)
                 or model_id.casefold().endswith("gguf"),
+                task=_as_text_core(item.get("pipeline_tag")).strip(),
             )
         )
     return entries
@@ -622,6 +700,24 @@ def parameter_billions(text: str) -> Optional[float]:
     return float(match.group(1)) if match else None
 
 
+def catalog_description(entry: Any, fit_label: str = "") -> str:
+    """One plain line describing a catalog row: what it does, how big it is,
+    how popular it is. Hugging Face's list API carries no prose description,
+    so this is composed from the fields it does return."""
+    task = _as_text_core(getattr(entry, "task", "")).replace("-", " ").strip()
+    params = parameter_billions(_as_text_core(getattr(entry, "id", "")))
+    parts = [task.capitalize() if task else "Local model"]
+    if params is not None:
+        parts.append(f"{params:g}B parameters")
+    if fit_label:
+        parts.append(fit_label)
+    parts.append(f"{format_downloads(getattr(entry, 'downloads', 0) or 0)} downloads")
+    likes = int(getattr(entry, "likes", 0) or 0)
+    if likes:
+        parts.append(f"{format_downloads(likes)} likes")
+    return " · ".join(parts)
+
+
 def catalog_fit(id_or_name: str, vram_mb: Optional[int], ram_mb: Optional[int]) -> tuple[int, str]:
     """(rank, label) for a catalog row against this machine's memory.
 
@@ -640,6 +736,81 @@ def catalog_fit(id_or_name: str, vram_mb: Optional[int], ram_mb: Optional[int]) 
     if fits:
         return 0, f"~{shown}GB at Q4, fits this machine's {kind}"
     return 2, f"~{shown}GB at Q4, beyond this machine's {kind}"
+
+
+def shred_file(path: PathInput) -> bool:
+    """Overwrite a file's bytes, then remove it. True when it is gone.
+
+    A symlink is unlinked, never written through - the file it points at is
+    not this program's to destroy.
+
+    ponytail: overwrite-then-unlink is as far as user space reaches. On an SSD,
+    a copy-on-write filesystem, or any volume with snapshots, the original
+    blocks can survive untouched; full-disk encryption, or Matchstick's
+    RAM-only image, is the real guarantee. TECHNICAL.md states the same limit.
+    """
+    target = Path(path)
+    if target.is_symlink():
+        try:
+            target.unlink()
+            return True
+        except OSError:
+            return False
+    try:
+        size = target.stat().st_size
+        with open(target, "r+b", buffering=0) as handle:
+            written = 0
+            while written < size:
+                chunk = min(1 << 20, size - written)
+                handle.write(os.urandom(chunk))
+                written += chunk
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass                      # unwritable is not a reason to keep the file
+    for attempt in (0, 1):
+        try:
+            target.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            if attempt:
+                return False
+            try:
+                os.chmod(target, stat.S_IWRITE)    # Windows read-only flag
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+def shred_tree(root: PathInput) -> int:
+    """Shred every file under root and remove the directories. Returns the
+    number of files removed; a directory that will not go is left behind
+    rather than failing the whole wipe."""
+    base = Path(root)
+    if not base.exists() and not base.is_symlink():
+        return 0
+    if base.is_symlink() or base.is_file():
+        return 1 if shred_file(base) else 0
+    removed = 0
+    for parent, directories, files in os.walk(base, topdown=False):
+        for name in files:
+            if shred_file(Path(parent) / name):
+                removed += 1
+        for name in directories:
+            entry = Path(parent) / name
+            try:
+                entry.unlink() if entry.is_symlink() else entry.rmdir()
+            except OSError:
+                pass
+    try:
+        base.rmdir()
+    except OSError:
+        pass
+    return removed
 
 
 @dataclass
@@ -935,7 +1106,17 @@ class SessionStore:
             updated_at=_utc_now(),
         )
         target = self._path(normalized.id, archived=normalized.archived_at is not None)
-        _atomic_write_json(target, normalized.to_dict())
+        payload = normalized.to_dict()
+        stored = _read_json_object(target)
+        if stored is not None and stored.get("messages") == payload["messages"]:
+            # Sessions list newest-conversation-first, so a write that adds no
+            # history - a rename, a model swap, re-saving one just opened -
+            # must not promote it past sessions with newer conversation.
+            kept = stored.get("updated_at")
+            if isinstance(kept, str) and kept:
+                normalized = replace(normalized, updated_at=kept)
+                payload["updated_at"] = kept
+        _atomic_write_json(target, payload)
 
         # Keep the mutable value object useful to callers that retain it.
         session.title = normalized.title

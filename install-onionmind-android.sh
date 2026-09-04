@@ -101,6 +101,23 @@ _bridge_port = None
 _managed_tor_process = None
 
 
+def tor_data_dirs():
+    """Directories a managed Tor keeps its state, caches and logs in.
+
+    Onionmind's own DataDirectory first, then the Tor Browser data directory
+    it reuses on Windows. Read-only: nothing here starts or stops Tor - it
+    exists so the desktop wipe knows what to destroy.
+    """
+    dirs = [os.path.join(os.path.expanduser("~"), ".onionmind", "tor")]
+    try:
+        roots = _tor_browser_roots()
+    except Exception:
+        roots = []
+    for root in roots:
+        dirs.append(os.path.join(root, "Browser", "TorBrowser", "Data", "Tor"))
+    return [path for path in dirs if os.path.isdir(path)]
+
+
 def tor_proxy_port():
     """Return a locally listening SOCKS port without making an internet request."""
     for port in PORTS:
