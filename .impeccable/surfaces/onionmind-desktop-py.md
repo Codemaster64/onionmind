@@ -38,6 +38,7 @@ The balanced workbench keeps the transcript primary, with projects and sessions 
 
 - Keyboard first: Ctrl+N new task, Ctrl+O open folder, Ctrl+L focus composer, Ctrl+, settings, Ctrl+` toggle terminal, Ctrl+Shift+I toggle inspector, Escape stops an active run.
 - The workbench remembers window size, splitter widths, and requested pane visibility between launches; Settings offers Reset window layout, and the responsive width rules still override a remembered layout at narrow sizes.
+- Workbench preferences — text size (System default / Compact / Comfortable, scaled from the captured platform font), Enter-to-send (Ctrl+Enter sends when off), the mode to start in, the terminal drawer on launch, and animation (system / reduced / full) — live in Settings, apply immediately, and persist in settings.json. The Tor boundary and the updater permission are deliberately not preferences.
 - At narrow widths the inspector collapses first, then the left rail; both remain reachable from toolbar actions.
 - Chat mode uses the existing local streaming engine and Tor search tool. Agent mode starts the repository workflow in the selected workspace; Agent tools govern their own access. Missing prerequisites and protected-action stops are reported plainly in Onionmind product language.
 - Git and project inspection are read-only. Onionmind never claims a change until it observes it on disk.

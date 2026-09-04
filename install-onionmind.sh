@@ -2309,6 +2309,11 @@ __all__ = [
     "describe_model",
     "model_displays",
     "SettingsStore",
+    "PREFERENCE_DEFAULTS",
+    "load_preferences",
+    "text_scale_factor",
+    "resolve_startup_mode",
+    "animations_enabled",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -2596,6 +2601,67 @@ class SettingsStore:
         result.update(copy.deepcopy(dict(settings)))
         _atomic_write_json(self.path, result)
         return copy.deepcopy(result)
+
+
+# --- Workbench preferences -------------------------------------------
+#
+# Presentation-only knobs persisted in settings.json. Everything defaults to
+# the shipped workbench, and the Tor boundary plus the updater permission are
+# deliberately not part of this surface: privacy behavior is never a theme.
+
+PREFERENCE_DEFAULTS: dict[str, Any] = {
+    "text_scale": "system",
+    "enter_sends": True,
+    "show_terminal_on_launch": False,
+    "startup_mode": "remember",
+    "reduce_motion": "system",
+}
+
+_PREFERENCE_CHOICES: dict[str, tuple[str, ...]] = {
+    "text_scale": ("system", "compact", "comfortable"),
+    "startup_mode": ("remember", "chat", "agent"),
+    "reduce_motion": ("system", "reduced", "full"),
+}
+
+TEXT_SCALE_FACTORS: dict[str, float] = {
+    "system": 1.0,
+    "compact": 0.9,
+    "comfortable": 1.15,
+}
+
+
+def load_preferences(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """A validated preference view over raw settings; junk falls back silently."""
+    preferences = dict(PREFERENCE_DEFAULTS)
+    for key, default in PREFERENCE_DEFAULTS.items():
+        value = settings.get(key)
+        if value is None:
+            continue
+        if isinstance(default, bool):
+            preferences[key] = bool(value)
+        elif isinstance(value, str) and value in _PREFERENCE_CHOICES[key]:
+            preferences[key] = value
+    return preferences
+
+
+def text_scale_factor(text_scale: str) -> float:
+    return TEXT_SCALE_FACTORS.get(text_scale, 1.0)
+
+
+def resolve_startup_mode(startup_mode: str, last_mode: str) -> str:
+    """The composer mode to open in: an explicit choice, else the last used."""
+    if startup_mode in {"chat", "agent"}:
+        return startup_mode
+    return last_mode if last_mode in {"chat", "agent"} else "agent"
+
+
+def animations_enabled(reduce_motion: str, system_enabled: bool) -> bool:
+    """The preference decides when it has an opinion; the system decides otherwise."""
+    if reduce_motion == "reduced":
+        return False
+    if reduce_motion == "full":
+        return True
+    return bool(system_enabled)
 
 
 @dataclass
@@ -4137,6 +4203,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
+    QFont,
     QFontDatabase,
     QIcon,
     QKeyEvent,
@@ -4198,7 +4265,7 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "dist", "bu
 _SCREENSHOT_PATH: Optional[str] = None
 
 
-STYLE_SHEET = r"""
+_STYLE_TEMPLATE = r"""
 * {
     color: #eee8df;
 }
@@ -4214,8 +4281,8 @@ QFrame#toolCard { background: #1e1d1b; border: 1px solid #423e38; border-radius:
 QFrame#modeSwitch { background: #191816; border: 1px solid #403c36; border-radius: 4px; }
 QFrame#separator { background: #3b3833; min-width: 1px; max-width: 1px; }
 QLabel { background: transparent; }
-QLabel#brand { color: #f5efe7; font-size: 11pt; font-weight: 650; }
-QLabel#sectionTitle { color: #aaa39a; font-size: 8.5pt; font-weight: 650; }
+QLabel#brand { color: #f5efe7; font-size: @BRAND_PT@; font-weight: 650; }
+QLabel#sectionTitle { color: #aaa39a; font-size: @LABEL_PT@; font-weight: 650; }
 QLabel#muted, QLabel#meta, QLabel#disclosure { color: #aaa39a; }
 QLabel#title { color: #f2ece4; font-weight: 650; }
 QLabel#avatarUser { background: #74579a; color: #f9f5ef; border-radius: 16px; font-weight: 650; }
@@ -4282,7 +4349,7 @@ QTextEdit, QPlainTextEdit {
 QTextEdit#composer { background: #24211f; border: 1px solid #4a453e; padding: 10px; }
 QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView {
     font-family: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
-    font-size: 9pt;
+    font-size: @MONO_PT@;
     background: #171615;
     border: none;
     border-radius: 0;
@@ -4314,6 +4381,35 @@ QScrollBar:horizontal { background: #191816; height: 10px; }
 QScrollBar::handle:horizontal { background: #49443e; min-width: 30px; border-radius: 4px; margin: 2px; }
 QToolTip { background: #2a2825; color: #f2ece4; border: 1px solid #514c45; padding: 5px; }
 """
+
+
+def build_style_sheet(scale: float = 1.0) -> str:
+    """The committed stylesheet with its three fixed point sizes scaled.
+
+    Every other rule inherits the application font, which apply_text_scale
+    scales from the captured platform base - so one knob moves all text
+    without a second size system.
+    """
+    scale = max(0.75, min(1.5, float(scale)))
+    return (
+        _STYLE_TEMPLATE.replace("@BRAND_PT@", f"{11 * scale:g}pt")
+        .replace("@LABEL_PT@", f"{8.5 * scale:g}pt")
+        .replace("@MONO_PT@", f"{9 * scale:g}pt")
+    )
+
+
+STYLE_SHEET = build_style_sheet(1.0)
+
+# Mirrors the core's PREFERENCE_DEFAULTS for the rare window that runs without
+# a desktop_core; preferences are presentation-only and never touch the Tor
+# boundary or the updater permission.
+_FALLBACK_PREFERENCES: dict[str, Any] = {
+    "text_scale": "system",
+    "enter_sends": True,
+    "show_terminal_on_launch": False,
+    "startup_mode": "remember",
+    "reduce_motion": "system",
+}
 
 
 def _now_iso() -> str:
@@ -4720,6 +4816,28 @@ def _register_system_fonts(app: QApplication) -> None:
         app.setFont(ui_font)
 
 
+# The platform UI font captured before the first text-scale application, so
+# every later scale multiplies the system's own point size instead of compound
+# scaling whatever the previous preference left behind.
+_BASE_APP_FONT: Optional[QFont] = None
+
+
+def apply_text_scale(scale: float) -> None:
+    """Scale all workbench text from the captured platform base font."""
+    global _BASE_APP_FONT
+    app = QApplication.instance()
+    if app is None:
+        return
+    if _BASE_APP_FONT is None:
+        _BASE_APP_FONT = QFont(app.font())
+    font = QFont(_BASE_APP_FONT)
+    size = _BASE_APP_FONT.pointSizeF()
+    if size > 0:
+        font.setPointSizeF(size * scale)
+    app.setFont(font)
+    app.setStyleSheet(build_style_sheet(scale))
+
+
 class WorkerSignals(QObject):
     result = Signal(object)
     error = Signal(str)
@@ -4817,7 +4935,24 @@ class StatusPill(QFrame):
         super().mouseReleaseEvent(event)
 
 
+# The reduce-motion preference as a process-wide override. None means follow
+# the system (and the ONIONMIND_REDUCE_MOTION environment variable).
+_MOTION_OVERRIDE: Optional[bool] = None
+
+
+def set_motion_override(reduce_motion: str) -> None:
+    global _MOTION_OVERRIDE
+    if reduce_motion == "reduced":
+        _MOTION_OVERRIDE = False
+    elif reduce_motion == "full":
+        _MOTION_OVERRIDE = True
+    else:
+        _MOTION_OVERRIDE = None
+
+
 def _ui_animations_enabled() -> bool:
+    if _MOTION_OVERRIDE is not None:
+        return _MOTION_OVERRIDE
     override = os.environ.get("ONIONMIND_REDUCE_MOTION", "").strip().lower()
     if override in {"1", "true", "yes", "on"}:
         return False
@@ -4962,14 +5097,21 @@ class ComposerEdit(QTextEdit):
         self.setAcceptDrops(True)
         self.setAccessibleName("Task composer")
         self.setTabChangesFocus(True)
+        # A workbench preference: Enter sends (Shift+Enter is always a newline),
+        # or Ctrl+Enter sends when Enter-to-send is turned off.
+        self.enterSends = True
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
-            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
-        ):
-            self.sendRequested.emit()
-            event.accept()
-            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            control = bool(
+                event.modifiers()
+                & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+            )
+            if not shift and (self.enterSends or control):
+                self.sendRequested.emit()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def dragEnterEvent(self, event: Any) -> None:
@@ -6509,7 +6651,7 @@ class SettingsDialog(QDialog):
         self.update_staging: Optional[str] = None
         self._update_stop: Optional[threading.Event] = None
         self.setWindowTitle("Onionmind settings")
-        self.resize(560, 430)
+        self.resize(560, 660)
         outer = QVBoxLayout(self)
         heading = QLabel("Boundaries and storage")
         heading.setObjectName("brand")
@@ -6529,6 +6671,91 @@ class SettingsDialog(QDialog):
         storage.setWordWrap(True)
         form.addRow("Session storage", storage)
         outer.addLayout(form)
+
+        workbench_heading = QLabel("Workbench")
+        workbench_heading.setObjectName("brand")
+        outer.addWidget(workbench_heading)
+        preferences = dict(getattr(self._window(), "preferences", {}) or {})
+        workbench_form = QFormLayout()
+        workbench_form.setHorizontalSpacing(18)
+
+        self.text_size_combo = QComboBox()
+        self.text_size_combo.setAccessibleName("Workbench text size")
+        for label, value in (
+            ("System default", "system"),
+            ("Compact", "compact"),
+            ("Comfortable", "comfortable"),
+        ):
+            self.text_size_combo.addItem(label, value)
+        self.text_size_combo.setCurrentIndex(
+            max(0, self.text_size_combo.findData(_as_text(preferences.get("text_scale", "system"))))
+        )
+        workbench_form.addRow("Text size", self.text_size_combo)
+
+        self.enter_sends_box = QCheckBox("Enter sends the message")
+        self.enter_sends_box.setToolTip(
+            "On: Enter sends and Shift+Enter makes a newline. "
+            "Off: Ctrl+Enter sends and Enter makes a newline."
+        )
+        self.enter_sends_box.setAccessibleName(
+            "Enter sends the message; when off, Ctrl+Enter sends"
+        )
+        self.enter_sends_box.setChecked(bool(preferences.get("enter_sends", True)))
+        workbench_form.addRow("Composer", self.enter_sends_box)
+
+        self.startup_combo = QComboBox()
+        self.startup_combo.setAccessibleName("Composer mode to start in")
+        self.startup_combo.setToolTip("Applies the next time Onionmind opens.")
+        for label, value in (
+            ("Remember last", "remember"),
+            ("Chat", "chat"),
+            ("Agent", "agent"),
+        ):
+            self.startup_combo.addItem(label, value)
+        self.startup_combo.setCurrentIndex(
+            max(0, self.startup_combo.findData(_as_text(preferences.get("startup_mode", "remember"))))
+        )
+        workbench_form.addRow("Start in", self.startup_combo)
+
+        self.terminal_box = QCheckBox("Show the terminal drawer on launch")
+        self.terminal_box.setChecked(bool(preferences.get("show_terminal_on_launch", False)))
+        workbench_form.addRow("Terminal", self.terminal_box)
+
+        self.motion_combo = QComboBox()
+        self.motion_combo.setAccessibleName("Workbench animation")
+        self.motion_combo.setToolTip(
+            "Reduced keeps pending states static; Follow the system honours the "
+            "operating system's animation setting."
+        )
+        for label, value in (
+            ("Follow the system", "system"),
+            ("Reduced", "reduced"),
+            ("Full", "full"),
+        ):
+            self.motion_combo.addItem(label, value)
+        self.motion_combo.setCurrentIndex(
+            max(0, self.motion_combo.findData(_as_text(preferences.get("reduce_motion", "system"))))
+        )
+        workbench_form.addRow("Animation", self.motion_combo)
+        outer.addLayout(workbench_form)
+
+        # States are set above; wiring afterwards keeps the constructor's
+        # initial values from firing preference writes of their own.
+        self.text_size_combo.currentIndexChanged.connect(
+            lambda _index: self._set_preference("text_scale", self.text_size_combo.currentData())
+        )
+        self.enter_sends_box.toggled.connect(
+            lambda checked: self._set_preference("enter_sends", checked)
+        )
+        self.startup_combo.currentIndexChanged.connect(
+            lambda _index: self._set_preference("startup_mode", self.startup_combo.currentData())
+        )
+        self.terminal_box.toggled.connect(
+            lambda checked: self._set_preference("show_terminal_on_launch", checked)
+        )
+        self.motion_combo.currentIndexChanged.connect(
+            lambda _index: self._set_preference("reduce_motion", self.motion_combo.currentData())
+        )
 
         window_heading = QLabel("Window")
         window_heading.setObjectName("brand")
@@ -6611,6 +6838,11 @@ class SettingsDialog(QDialog):
     def _window(self) -> Any:
         parent = self.parent()
         return parent if isinstance(parent, OnionmindWindow) else None
+
+    def _set_preference(self, key: str, value: Any) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_preference(key, value)
 
     def _reset_window_layout(self) -> None:
         window = self._window()
@@ -6840,6 +7072,8 @@ class OnionmindWindow(QMainWindow):
         self._model_dialog: Optional[ModelManagerDialog] = None
         self._update_timer: Optional[QTimer] = None
         self._build_window()
+        self.preferences = self._load_preferences()
+        self._apply_preferences()
         self._install_shortcuts()
         if demo:
             self._populate_demo()
@@ -7234,6 +7468,7 @@ class OnionmindWindow(QMainWindow):
 
     def _restore_state(self) -> None:
         self._restore_window_layout()
+        self._apply_startup_preferences()
         model = _as_text(self.settings_data.get("model") or getattr(self.core, "MODEL", "inferno"))
         self.set_model_options([model], model)
         recent = self.settings_data.get("recent_projects") or []
@@ -7726,6 +7961,60 @@ class OnionmindWindow(QMainWindow):
         self.toggle_rail(True)
         self.toggle_inspector(True)
         self.main_splitter.setSizes([224, 860, 292])
+
+    # --- Workbench preferences -----------------------------------------
+    #
+    # Presentation-only knobs: they apply live, persist through the settings
+    # bridge, and default to the shipped workbench. The Tor boundary and the
+    # updater permission live elsewhere on purpose - privacy is not a theme.
+
+    def _load_preferences(self) -> dict[str, Any]:
+        loader = getattr(self.desktop_core, "load_preferences", None)
+        if callable(loader):
+            return {**_FALLBACK_PREFERENCES, **dict(loader(self.settings_data))}
+        return dict(_FALLBACK_PREFERENCES)
+
+    def _apply_preferences(self) -> None:
+        preferences = self.preferences
+        self.composer.enterSends = bool(preferences.get("enter_sends", True))
+        set_motion_override(_as_text(preferences.get("reduce_motion", "system")))
+        factor = getattr(self.desktop_core, "text_scale_factor", None)
+        scale = (
+            factor(_as_text(preferences.get("text_scale", "system")))
+            if callable(factor)
+            else 1.0
+        )
+        apply_text_scale(scale)
+
+    def set_preference(self, key: str, value: Any) -> None:
+        """Validate, persist, and live-apply one workbench preference."""
+        loader = getattr(self.desktop_core, "load_preferences", None)
+        if callable(loader):
+            self.preferences = {
+                **_FALLBACK_PREFERENCES,
+                **dict(loader({**self.settings_data, key: value})),
+            }
+        else:
+            self.preferences = {**_FALLBACK_PREFERENCES, key: value}
+        for name, pref in self.preferences.items():
+            if name in _FALLBACK_PREFERENCES:
+                self.settings_data[name] = pref
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_preferences()
+
+    def _apply_startup_preferences(self) -> None:
+        """The composer mode and terminal state to open with."""
+        preferences = self.preferences
+        resolver = getattr(self.desktop_core, "resolve_startup_mode", None)
+        last = _as_text(self.settings_data.get("mode", ""))
+        if callable(resolver):
+            mode = resolver(_as_text(preferences.get("startup_mode", "remember")), last)
+        else:
+            mode = last if last in {"chat", "agent"} else "agent"
+        self.set_mode(mode)
+        if bool(preferences.get("show_terminal_on_launch", False)):
+            self.toggle_terminal(True)
 
     def _sync_action_states(self) -> None:
         has_draft = bool(self.composer.toPlainText().strip() or self.attachments)

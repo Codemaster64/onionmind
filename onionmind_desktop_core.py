@@ -30,6 +30,11 @@ __all__ = [
     "describe_model",
     "model_displays",
     "SettingsStore",
+    "PREFERENCE_DEFAULTS",
+    "load_preferences",
+    "text_scale_factor",
+    "resolve_startup_mode",
+    "animations_enabled",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -317,6 +322,67 @@ class SettingsStore:
         result.update(copy.deepcopy(dict(settings)))
         _atomic_write_json(self.path, result)
         return copy.deepcopy(result)
+
+
+# --- Workbench preferences -------------------------------------------
+#
+# Presentation-only knobs persisted in settings.json. Everything defaults to
+# the shipped workbench, and the Tor boundary plus the updater permission are
+# deliberately not part of this surface: privacy behavior is never a theme.
+
+PREFERENCE_DEFAULTS: dict[str, Any] = {
+    "text_scale": "system",
+    "enter_sends": True,
+    "show_terminal_on_launch": False,
+    "startup_mode": "remember",
+    "reduce_motion": "system",
+}
+
+_PREFERENCE_CHOICES: dict[str, tuple[str, ...]] = {
+    "text_scale": ("system", "compact", "comfortable"),
+    "startup_mode": ("remember", "chat", "agent"),
+    "reduce_motion": ("system", "reduced", "full"),
+}
+
+TEXT_SCALE_FACTORS: dict[str, float] = {
+    "system": 1.0,
+    "compact": 0.9,
+    "comfortable": 1.15,
+}
+
+
+def load_preferences(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """A validated preference view over raw settings; junk falls back silently."""
+    preferences = dict(PREFERENCE_DEFAULTS)
+    for key, default in PREFERENCE_DEFAULTS.items():
+        value = settings.get(key)
+        if value is None:
+            continue
+        if isinstance(default, bool):
+            preferences[key] = bool(value)
+        elif isinstance(value, str) and value in _PREFERENCE_CHOICES[key]:
+            preferences[key] = value
+    return preferences
+
+
+def text_scale_factor(text_scale: str) -> float:
+    return TEXT_SCALE_FACTORS.get(text_scale, 1.0)
+
+
+def resolve_startup_mode(startup_mode: str, last_mode: str) -> str:
+    """The composer mode to open in: an explicit choice, else the last used."""
+    if startup_mode in {"chat", "agent"}:
+        return startup_mode
+    return last_mode if last_mode in {"chat", "agent"} else "agent"
+
+
+def animations_enabled(reduce_motion: str, system_enabled: bool) -> bool:
+    """The preference decides when it has an opinion; the system decides otherwise."""
+    if reduce_motion == "reduced":
+        return False
+    if reduce_motion == "full":
+        return True
+    return bool(system_enabled)
 
 
 @dataclass

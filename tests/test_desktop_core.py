@@ -794,5 +794,56 @@ class BundleUpdaterTests(unittest.TestCase):
             self.assertEqual(core.pending_staging_dir(work), None)
 
 
+class WorkbenchPreferencesTests(unittest.TestCase):
+    def test_empty_settings_yield_the_shipped_defaults(self) -> None:
+        self.assertEqual(core.load_preferences({}), dict(core.PREFERENCE_DEFAULTS))
+
+    def test_valid_values_survive_and_junk_falls_back(self) -> None:
+        preferences = core.load_preferences(
+            {
+                "text_scale": "comfortable",
+                "enter_sends": False,
+                "show_terminal_on_launch": True,
+                "startup_mode": "chat",
+                "reduce_motion": "reduced",
+            }
+        )
+        self.assertEqual(preferences["text_scale"], "comfortable")
+        self.assertFalse(preferences["enter_sends"])
+        self.assertTrue(preferences["show_terminal_on_launch"])
+        self.assertEqual(preferences["startup_mode"], "chat")
+        self.assertEqual(preferences["reduce_motion"], "reduced")
+
+        junk = core.load_preferences(
+            {
+                "text_scale": "enormous",
+                "startup_mode": 7,
+                "reduce_motion": None,
+                "unknown_knob": "ignored",
+            }
+        )
+        self.assertEqual(junk["text_scale"], "system")
+        self.assertEqual(junk["startup_mode"], "remember")
+        self.assertEqual(junk["reduce_motion"], "system")
+        self.assertNotIn("unknown_knob", junk)
+
+    def test_startup_mode_resolution(self) -> None:
+        self.assertEqual(core.resolve_startup_mode("agent", "chat"), "agent")
+        self.assertEqual(core.resolve_startup_mode("remember", "chat"), "chat")
+        self.assertEqual(core.resolve_startup_mode("remember", ""), "agent")
+        self.assertEqual(core.resolve_startup_mode("remember", "bogus"), "agent")
+        self.assertEqual(core.resolve_startup_mode("bogus", "chat"), "chat")
+
+    def test_scale_factors_and_motion_resolution(self) -> None:
+        self.assertEqual(core.text_scale_factor("system"), 1.0)
+        self.assertEqual(core.text_scale_factor("compact"), 0.9)
+        self.assertEqual(core.text_scale_factor("comfortable"), 1.15)
+        self.assertEqual(core.text_scale_factor("unheard-of"), 1.0)
+        self.assertFalse(core.animations_enabled("reduced", True))
+        self.assertTrue(core.animations_enabled("full", False))
+        self.assertTrue(core.animations_enabled("system", True))
+        self.assertFalse(core.animations_enabled("system", False))
+
+
 if __name__ == "__main__":
     unittest.main()

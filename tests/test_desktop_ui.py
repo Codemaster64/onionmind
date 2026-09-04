@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QProcess, QStandardPaths, QTimer
+    from PySide6.QtCore import QEvent, QProcess, QStandardPaths, Qt, QTimer
+    from PySide6.QtGui import QKeyEvent
     from PySide6.QtWidgets import (
         QApplication,
         QDialogButtonBox,
@@ -960,6 +961,146 @@ class WindowLayoutTests(unittest.TestCase):
             window = self._window(bridge)
             sequences = {shortcut.key().toString() for shortcut in window.shortcuts}
             self.assertIn("Ctrl+,", sequences)
+            self._close(window)
+
+
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
+class WorkbenchPreferencesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        QStandardPaths.setTestModeEnabled(True)
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyle("Fusion")
+        cls.app.setStyleSheet(ui.STYLE_SHEET)
+
+    def _close(self, widget: QWidget) -> None:
+        widget.close()
+        widget.deleteLater()
+        self.app.processEvents()
+
+    def _window(self, bridge: "ui.SettingsBridge") -> "ui.OnionmindWindow":
+        window = ui.OnionmindWindow(_CoreStub(), desktop_core, demo=True)
+        window.save_current_session = lambda: True
+        # Demo mode skips persistence by design; point the window at an
+        # isolated store and opt back in so preferences persist for real.
+        window.settings_bridge = bridge
+        window.settings_data = bridge.load()
+        window.preferences = window._load_preferences()
+        window.demo = False
+        window.show()
+        self.app.processEvents()
+        return window
+
+    def test_preferences_apply_live_and_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            try:
+                base_size = self.app.font().pointSizeF()
+                window.set_preference("text_scale", "comfortable")
+                self.assertEqual(window.preferences["text_scale"], "comfortable")
+                if base_size > 0:
+                    self.assertGreater(self.app.font().pointSizeF(), base_size)
+                self.assertIn(f"{11 * 1.15:g}pt", self.app.styleSheet())
+                self.assertEqual(bridge.load()["text_scale"], "comfortable")
+
+                window.set_preference("enter_sends", False)
+                self.assertFalse(window.composer.enterSends)
+                self.assertFalse(bridge.load()["enter_sends"])
+
+                window.set_preference("reduce_motion", "reduced")
+                self.assertFalse(ui._ui_animations_enabled())
+                window.set_preference("reduce_motion", "full")
+                self.assertTrue(ui._ui_animations_enabled())
+                window.set_preference("reduce_motion", "system")
+                self.assertIsNone(ui._MOTION_OVERRIDE)
+
+                window.set_preference("text_scale", "system")
+                if base_size > 0:
+                    self.assertAlmostEqual(self.app.font().pointSizeF(), base_size)
+                self.assertEqual(self.app.styleSheet(), ui.STYLE_SHEET)
+            finally:
+                ui.set_motion_override("system")
+                ui.apply_text_scale(1.0)
+            self._close(window)
+
+    def test_composer_send_key_follows_the_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            composer = window.composer
+            sent: list[bool] = []
+            composer.sendRequested.connect(lambda: sent.append(True))
+
+            def press(key: int, modifiers: Qt.KeyboardModifier) -> None:
+                composer.keyPressEvent(
+                    QKeyEvent(QEvent.Type.KeyPress, key, modifiers)
+                )
+
+            press(Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+            self.assertEqual(len(sent), 1)
+            press(Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+            self.assertEqual(len(sent), 1)
+
+            window.set_preference("enter_sends", False)
+            press(Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+            self.assertEqual(len(sent), 1)
+            press(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(len(sent), 2)
+            self._close(window)
+
+    def test_startup_preferences_set_mode_and_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            bridge.save({"mode": "chat", "startup_mode": "agent", "show_terminal_on_launch": True})
+            window = self._window(bridge)
+            window._apply_startup_preferences()
+            self.assertEqual(window.mode, "agent")
+            self.assertFalse(window.terminal.isHidden())
+
+            bridge.save({"mode": "chat", "startup_mode": "remember"})
+            window.settings_data = bridge.load()
+            window.preferences = window._load_preferences()
+            window.toggle_terminal(False)
+            window._apply_startup_preferences()
+            self.assertEqual(window.mode, "chat")
+            self.assertTrue(window.terminal.isHidden())
+            self._close(window)
+
+    def test_settings_dialog_controls_write_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            window = self._window(bridge)
+            dialog = ui.SettingsDialog(
+                window.data_root, desktop_core.HARNESS_LIMITATION, parent=window
+            )
+            dialog.show()
+            try:
+                dialog.text_size_combo.setCurrentIndex(
+                    dialog.text_size_combo.findData("comfortable")
+                )
+                self.assertEqual(window.preferences["text_scale"], "comfortable")
+                self.assertEqual(bridge.load()["text_scale"], "comfortable")
+
+                dialog.enter_sends_box.setChecked(False)
+                self.assertFalse(window.composer.enterSends)
+
+                dialog.startup_combo.setCurrentIndex(dialog.startup_combo.findData("agent"))
+                self.assertEqual(window.preferences["startup_mode"], "agent")
+
+                dialog.terminal_box.setChecked(True)
+                self.assertTrue(bridge.load()["show_terminal_on_launch"])
+
+                dialog.motion_combo.setCurrentIndex(dialog.motion_combo.findData("reduced"))
+                self.assertFalse(ui._ui_animations_enabled())
+            finally:
+                dialog.text_size_combo.setCurrentIndex(
+                    dialog.text_size_combo.findData("system")
+                )
+                dialog.motion_combo.setCurrentIndex(dialog.motion_combo.findData("system"))
+                ui.set_motion_override("system")
+                ui.apply_text_scale(1.0)
+                self._close(dialog)
             self._close(window)
 
 
