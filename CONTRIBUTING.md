@@ -11,6 +11,7 @@ there is nothing to buy.
   python build.py --check        # installers carry the canonical payloads?
   python -m unittest discover -s tests -p "test_*.py"
   python -m pytest ollama-tor/tests
+  (cd android && ./gradlew :core:test :app:testDebugUnitTest)  # Kotlin suites; needs a JDK 17
   bash -n install-onionmind.sh install-onionmind-android.sh matchstick.sh usb/build.sh
   ```
 - **The one rule:** `onionmind.py`, the icon and the logo payloads are
