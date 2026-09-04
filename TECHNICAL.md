@@ -340,6 +340,10 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   served only under a high-entropy capability URL handed to this app's own
   WebView, and the JSON API additionally requires a header token that never
   appears in a URL; both secrets are random per app start and not persisted.
+- **Workbench preferences:** text size, the send key, and animation
+  (`/api/preferences`, behind the same token) are presentation-only, persist
+  in the app's private storage, and never cross the network. The Tor boundary
+  and the per-turn search permission are deliberately not preferences.
 - **Child ownership:** a listening port is not ownership evidence on Android.
   `OwnedLoopbackProcess` (core) treats `llama-server`'s port as ready only
   while the exact child this app launched is alive: an already-listening

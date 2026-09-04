@@ -1,6 +1,7 @@
 package org.onionmind.app
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.app.ActivityManager
 import android.os.StatFs
 import fi.iki.elonen.NanoHTTPD
@@ -8,6 +9,7 @@ import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
+import org.onionmind.core.WorkbenchPreferences
 import java.net.URLDecoder
 import java.security.SecureRandom
 import java.util.Base64
@@ -52,6 +54,7 @@ object Server {
                             session.headers["x-onionmind-token"] != apiToken ->
                             error(Response.Status.FORBIDDEN, "bad or missing token")
                         session.uri == "/api/status" -> status()
+                        session.uri == "/api/preferences" -> preferences(session)
                         session.uri == "/api/install" -> install(session)
                         session.uri == "/api/select" -> select(session)
                         session.uri == "/api/remove" -> remove(session)
@@ -138,6 +141,33 @@ object Server {
         return json(buildJsonObject { put("ok", true); put("id", id) }.toString())
     }
 
+    /**
+     * Presentation-only preferences. They never leave the phone: reads come
+     * from private storage, writes go back to it, and the endpoint sits behind
+     * the API token like every other route - shared loopback sees nothing.
+     * GET returns the current set; POST applies a partial update.
+     */
+    private fun preferences(session: IHTTPSession): Response {
+        val store = ctx.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+        if (session.method == NanoHTTPD.Method.GET) {
+            return json(storedPreferences(store).toJson())
+        }
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        val body = files["postData"] ?: files["content"]
+        fun value(name: String) = session.parms[name] ?: formValue(body, name)
+        val next = storedPreferences(store).patch(
+            textScale = value("textScale"),
+            enterSends = value("enterSends"),
+            reduceMotion = value("reduceMotion"),
+        )
+        store.edit().putString(UI_PREFS_JSON, next.toJson()).apply()
+        return json(next.toJson())
+    }
+
+    private fun storedPreferences(store: SharedPreferences): WorkbenchPreferences =
+        WorkbenchPreferences.fromJson(store.getString(UI_PREFS_JSON, null))
+
     private fun select(session: IHTTPSession): Response {
         val files = HashMap<String, String>(); session.parseBody(files)
         val id = session.parms["id"] ?: formValue(files["postData"] ?: files["content"], "id")
@@ -216,6 +246,9 @@ object Server {
             ?: "unknown server error"
 
     private val API_PATHS = setOf(
-        "/api/status", "/api/install", "/api/select", "/api/remove", "/api/chat"
+        "/api/status", "/api/preferences", "/api/install", "/api/select", "/api/remove", "/api/chat"
     )
+
+    private const val UI_PREFS = "onionmind_ui"
+    private const val UI_PREFS_JSON = "preferences_json"
 }

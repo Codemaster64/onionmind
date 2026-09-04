@@ -14,7 +14,7 @@
   header svg { flex: none; }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
-  #manage { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
+  #manage, #settings-btn { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
   .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -50,11 +50,22 @@
   #busy { text-align: center; color: var(--dim); font-size: 13px; padding: 6px; display: none; }
   .row { display: flex; gap: 10px; justify-content: center; }
   #manager { position: fixed; inset: 0; z-index: 2; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
-  #manager h2 { font-size: 20px; margin-bottom: 4px; } #manager > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
+  #settings { position: fixed; inset: 0; z-index: 3; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
+  #manager h2, #settings h2 { font-size: 20px; margin-bottom: 4px; }
+  #manager > p, #settings > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
   #manager input, #setup input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
   .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
   .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }
   .danger { background: #5b2634; } .muted { background: transparent; border: 1px solid var(--line); }
+  .seg { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .seg button { background: var(--card); border: 1px solid var(--line); color: inherit;
+                 font-weight: 400; padding: 8px 12px; font-size: 13px; }
+  .seg button.on { background: var(--purple); color: #fff; border-color: transparent; font-weight: 600; }
+  .pref-check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: #cdbbd5; margin-top: 8px; }
+  .pref-check input { accent-color: var(--purple); width: 16px; height: 16px; }
+  textarea#q { resize: none; min-height: 44px; max-height: 132px; }
+  html.reduced *, html.reduced *::before { transition: none !important; animation: none !important; }
+  @media (prefers-reduced-motion: reduce) { *, *::before { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
@@ -67,6 +78,7 @@
   </svg>
   <h1>Onionmind</h1>
   <button id="manage" onclick="openManager()">Models</button>
+  <button id="settings-btn" onclick="openSettings()">Settings</button>
   <div id="dots">
     <span class="dot" id="d-tor">tor</span><span class="dot" id="d-model">model</span>
   </div>
@@ -87,6 +99,29 @@
     <input id="custom-url" placeholder="https://…/model.gguf">
     <input id="custom-name" placeholder="Name (optional)">
     <button onclick="addCustom()">Download custom model</button>
+  </div>
+</section>
+
+<section id="settings" hidden>
+  <div class="manage-head"><h2>Settings</h2><button class="muted" onclick="closeSettings()">Done</button></div>
+  <p>These choices apply immediately and stay on this phone. Privacy behavior — Tor and the per-turn search permission — is not a setting.</p>
+  <div class="model-card">
+    <strong>Text size</strong>
+    <div class="seg" id="seg-text">
+      <button data-v="system">System</button><button data-v="compact">Compact</button><button data-v="comfortable">Comfortable</button>
+    </div>
+  </div>
+  <div class="model-card">
+    <strong>Send key</strong>
+    <label class="pref-check"><input id="pref-enter" type="checkbox"> Enter sends the message</label>
+    <p class="model-meta">Off: Enter makes a newline; the Send button (or Ctrl+Enter) sends. Shift+Enter always makes a newline.</p>
+  </div>
+  <div class="model-card">
+    <strong>Animation</strong>
+    <div class="seg" id="seg-motion">
+      <button data-v="system">Follow system</button><button data-v="reduced">Reduced</button><button data-v="full">Full</button>
+    </div>
+    <p class="model-meta">Reduced keeps progress and pending states static. Follow system honours this phone's animation setting.</p>
   </div>
 </section>
 
@@ -119,7 +154,7 @@
     <input id="allow-search" type="checkbox">
     Allow Tor search this turn
   </label>
-  <input id="q" placeholder="Ask anything…" autocomplete="off">
+  <textarea id="q" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
   <button id="send">Send</button>
 </form>
 
@@ -168,7 +203,7 @@ async function poll() {
     if (!ready) { add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn"' + (status.tor ? ' Tor is up.' : '') + ' Ask anything.'); ready = true; }
   }
 }
-setInterval(poll, 2000); poll();
+setInterval(poll, 2000); poll(); loadPrefs();
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -227,6 +262,58 @@ function confirmModelDownload() {
 
 function openManager() { $('manager').hidden = false; renderManager(); }
 function closeManager() { $('manager').hidden = true; }
+function openSettings() { $('settings').hidden = false; }
+function closeSettings() { $('settings').hidden = true; }
+
+// --- Workbench preferences -------------------------------------------
+// Presentation-only: text size, the send key, and animation. They persist on
+// the phone through the token-gated API and apply the moment they change.
+let prefs = {textScale: 'system', enterSends: true, reduceMotion: 'system'};
+const TEXT_FACTORS = {system: 1, compact: 0.9, comfortable: 1.15};
+function markSeg(id, value) {
+  for (const button of $(id).children) button.classList.toggle('on', button.dataset.v === value);
+}
+function applyPrefs() {
+  document.documentElement.classList.toggle('reduced', prefs.reduceMotion === 'reduced');
+  document.body.style.fontSize = Math.round(16 * (TEXT_FACTORS[prefs.textScale] || 1) * 10) / 10 + 'px';
+  $('pref-enter').checked = prefs.enterSends !== false;
+  markSeg('seg-text', prefs.textScale);
+  markSeg('seg-motion', prefs.reduceMotion);
+  autoGrow();
+}
+async function loadPrefs() {
+  try { prefs = await (await api('/api/preferences')).json(); } catch {}
+  applyPrefs();
+}
+async function savePrefs(patch) {
+  prefs = Object.assign({}, prefs, patch);
+  applyPrefs();
+  try { prefs = await (await api('/api/preferences', form(new URLSearchParams(prefs)))).json(); applyPrefs(); } catch {}
+}
+$('seg-text').addEventListener('click', e => {
+  const button = e.target.closest('button'); if (!button) return;
+  savePrefs({textScale: button.dataset.v});
+});
+$('seg-motion').addEventListener('click', e => {
+  const button = e.target.closest('button'); if (!button) return;
+  savePrefs({reduceMotion: button.dataset.v});
+});
+$('pref-enter').addEventListener('change', e => savePrefs({enterSends: e.target.checked}));
+
+// The composer grows with what you type; Enter behaviour follows the
+// preference. Shift+Enter is always a newline.
+function autoGrow() {
+  const q = $('q');
+  q.style.height = 'auto';
+  q.style.height = Math.min(q.scrollHeight, 132) + 'px';
+}
+$('q').addEventListener('input', autoGrow);
+$('q').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  if (prefs.enterSends === false && !(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  $('form').requestSubmit();
+});
 function renderManager() {
   $('installed-list').innerHTML = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + m.name + '</strong>' + (m.id === status.model ? '<span>ACTIVE</span>' : '') + '</div><div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + '</div><div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
 }
@@ -273,7 +360,7 @@ $('form').onsubmit = async e => {
   $('allow-search').checked = false;
   $('allow-search').disabled = true;
   $('send').disabled = true;
-  $('q').value = ''; add('you', q);
+  $('q').value = ''; autoGrow(); add('you', q);
   history.push({role:'user', content:q});
   $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
   $('busy').style.display = 'block';
