@@ -73,33 +73,42 @@ class DesktopUiTests(unittest.TestCase):
         widget.deleteLater()
         self.app.processEvents()
 
-    def test_tor_pill_click_starts_background_tor(self) -> None:
-        """The pill drew a pointing-hand cursor and its clicked signal went
-        nowhere, so the only way to start Tor was Chat's one-turn search
-        consent - unreachable from Agent mode, whose own refusal told the user
-        to start Tor from this toolbar."""
+    def test_explicit_tor_button_starts_background_tor(self) -> None:
+        """Tor is a visible keyboard button, not a hidden click target."""
         window = self._window()
         try:
             calls: list[bool] = []
 
+            class _Process:
+                def poll(self):
+                    return None
+
             def fake_start(*args, **kwargs):
                 del args, kwargs
                 calls.append(True)
+                window.core._managed_tor_process = _Process()
                 return 9150
 
             window.core.start_tor_hidden = fake_start
-            window.tor_phase = "off"             # demo state opens on "running"
-            window.tor_status.clicked.emit()
+            window.core._managed_tor_process = None
+            window.core._port = None
+            window._show_local_tor_state(None)    # demo state opens on "running"
+            self.assertTrue(window.tor_toggle.isVisible())
+            self.assertEqual(window.tor_toggle.text(), "Turn on")
+            self.assertEqual(window.tor_toggle.accessibleName(), "Turn on Tor proxy")
+            self.assertNotEqual(window.tor_toggle.focusPolicy(), Qt.FocusPolicy.NoFocus)
+            window.tor_toggle.click()
             self.assertTrue(
                 self._wait_until(
                     lambda: bool(calls) and window.tor_phase in ("running", "proxy")
                 )
             )
             self.assertIn("9150", window.tor_status.label.text())
+            self.assertEqual(window.tor_toggle.text(), "Turn off")
         finally:
             self._close(window)
 
-    def test_tor_pill_click_during_startup_probe_starts_rather_than_cancels(self) -> None:
+    def test_tor_button_click_during_startup_probe_starts_rather_than_cancels(self) -> None:
         """A real window opens in the "probing" phase, not "off". Treating that
         as a start-in-progress made the first click after launch stop Tor."""
         window = self._window()
@@ -107,34 +116,50 @@ class DesktopUiTests(unittest.TestCase):
             started: list[bool] = []
             window.core.start_tor_hidden = lambda *a, **k: (started.append(True), 9150)[1]
             window.tor_phase = "probing"
-            window.tor_status.clicked.emit()
+            window.tor_toggle.click()
             self.app.processEvents()
             self.assertEqual(window.tor_phase, "starting")
+            self.assertEqual(window.tor_toggle.text(), "Cancel")
             self.assertTrue(self._wait_until(lambda: bool(started)))
         finally:
             self._close(window)
 
-    def test_tor_pill_click_stops_the_tor_onionmind_started(self) -> None:
-        """The same control stops it again, and only ever Onionmind's own."""
+    def test_tor_button_stops_owned_tor_and_disconnects_external_tor(self) -> None:
+        """Off kills only Onionmind's process but always blocks Onionmind use."""
         window = self._window()
         try:
             stopped: list[bool] = []
+            enabled = {"value": True}
+            window.core.tor_enabled = lambda: enabled["value"]
+            window.core.set_tor_enabled = lambda value: enabled.update(value=bool(value))
             window.core.stop_managed_tor = lambda: stopped.append(True)
             window.core._managed_tor_process = object()   # ours, so ours to stop
             window.tor_phase = "running"
-            window.tor_status.clicked.emit()
+            window.tor_toggle.click()
             self.app.processEvents()
             self.assertEqual(stopped, [True])
+            self.assertFalse(enabled["value"])
             self.assertEqual(window.tor_phase, "off")
+            self.assertEqual(window.tor_toggle.text(), "Turn on")
 
-            # A listener Onionmind only found is left alone.
+            # A listener Onionmind only found stays alive, but Onionmind's use
+            # of it is switched off just as clearly.
             stopped.clear()
+            enabled["value"] = True
             window.core._managed_tor_process = None
-            window.tor_phase = "running"
-            window.tor_status.clicked.emit()
+            window.core._port = None
+            window._show_local_tor_state(9150)
+            self.assertEqual(window.tor_toggle.text(), "Turn off")
+            window.active_kind = "chat"
+            window.tor_in_use = True
+            window.stop_event = threading.Event()
+            window.tor_toggle.click()
             self.app.processEvents()
             self.assertEqual(stopped, [])
-            self.assertEqual(window.tor_phase, "running")
+            self.assertFalse(enabled["value"])
+            self.assertTrue(window.stop_event.is_set())
+            self.assertEqual(window.tor_phase, "off")
+            self.assertIn("external proxy is still running", window.status_label.text())
         finally:
             self._close(window)
 
@@ -567,6 +592,9 @@ class DesktopUiTests(unittest.TestCase):
 
         window.resize(800, 700)
         self.app.processEvents()
+        self.assertTrue(window.repo_label.isHidden())
+        self.assertFalse(window.tor_status.isHidden())
+        self.assertFalse(window.tor_toggle.isHidden())
         self.assertTrue(window.left_rail.isHidden())
         self.assertTrue(window.inspector.isHidden())
         self.assertFalse(window.rail_toggle.isChecked())
@@ -693,6 +721,9 @@ class DesktopUiTests(unittest.TestCase):
         window.demo = False
         core = window.core
         core._port = None
+        enabled = {"value": True}
+        core.tor_enabled = lambda: enabled["value"]
+        core.set_tor_enabled = lambda value: enabled.update(value=bool(value))
 
         class _Process:
             def __init__(self) -> None:
@@ -709,16 +740,19 @@ class DesktopUiTests(unittest.TestCase):
         window._show_local_tor_state(9150)
         self.assertEqual(window.tor_status.label.text(), "Running · 9150")
         self.assertEqual(window.tor_phase, "running")
+        self.assertEqual(window.tor_toggle.text(), "Turn off")
 
         # A listener that answers but was never verified stays a warning, never "ready".
         core._managed_tor_process = None
         window._show_local_tor_state(9151)
         self.assertEqual(window.tor_status.label.text(), "Proxy · 9151")
         self.assertEqual(window.tor_phase, "proxy")
+        self.assertEqual(window.tor_toggle.text(), "Turn off")
 
         window._show_local_tor_state(None)
         self.assertEqual(window.tor_status.label.text(), "Off")
         self.assertEqual(window.tor_phase, "off")
+        self.assertEqual(window.tor_toggle.text(), "Turn on")
         self.assertFalse(stopped)
         self._close(window)
 

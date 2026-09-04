@@ -83,6 +83,23 @@ class BackgroundTorTests(unittest.TestCase):
     def tearDown(self) -> None:
         onionmind._managed_tor_process = None
         onionmind._port = None
+        onionmind.set_tor_enabled(True)
+
+    def test_explicit_off_fails_closed_before_any_socket_or_network_probe(self) -> None:
+        onionmind._port = 9150
+        onionmind.set_tor_enabled(False)
+        self.assertFalse(onionmind.tor_enabled())
+        self.assertIsNone(onionmind._port)
+
+        with mock.patch.object(onionmind, "tor_proxy_port") as local_probe, \
+             mock.patch.object(onionmind.requests, "get") as network_probe:
+            with self.assertRaisesRegex(RuntimeError, "turned off"):
+                onionmind.start_tor_hidden()
+            with self.assertRaisesRegex(SystemExit, "turned off"):
+                onionmind.tor_check()
+
+        local_probe.assert_not_called()
+        network_probe.assert_not_called()
 
     def test_hidden_start_runs_tor_exe_without_a_window(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

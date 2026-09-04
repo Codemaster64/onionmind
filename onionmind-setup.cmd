@@ -316,6 +316,25 @@ INCOMPLETE_NOTE = "[Incomplete: generation limit reached. Continue to resume fro
 _port = None
 _bridge_port = None
 _managed_tor_process = None
+_tor_enabled = True
+
+
+def tor_enabled():
+    """Return whether this process currently permits Onionmind to use Tor."""
+    return _tor_enabled
+
+
+def set_tor_enabled(enabled):
+    """Enable or fail-close Onionmind's Tor paths for this process.
+
+    Turning Tor off is intentionally session-local. It clears the pinned
+    circuit but does not kill a listener owned by another application; the
+    desktop separately stops only the hidden Tor process this session owns.
+    """
+    global _tor_enabled, _port
+    _tor_enabled = bool(enabled)
+    if not _tor_enabled:
+        _port = None
 
 
 def tor_data_dirs():
@@ -461,6 +480,10 @@ def start_tor_hidden(timeout=30, stop_event=None):
     own instead.
     """
     global _managed_tor_process
+    if not _tor_enabled:
+        raise RuntimeError(
+            "Tor proxy is turned off in Onionmind. Turn it on from the desktop toolbar first."
+        )
     existing = tor_proxy_port()
     if existing:
         return existing
@@ -529,6 +552,9 @@ def _proxies(port, isolate):
 def tor_check():
     """Pin the Tor port, or exit. Fails closed - never falls back to a direct connection."""
     global _port
+    if not _tor_enabled:
+        _port = None
+        sys.exit("Tor proxy is turned off in Onionmind. Turn it on before using a protected feature.")
     for port in PORTS:
         try:
             r = requests.get("https://check.torproject.org/api/ip",
@@ -4792,6 +4818,8 @@ QPushButton#updateStatus { background: transparent; border: 1px solid transparen
 QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
 QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
 QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
+QPushButton#torAction { font-weight: 600; padding-left: 10px; padding-right: 10px; }
+QPushButton#torAction:disabled { font-weight: 400; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
@@ -5371,6 +5399,48 @@ class StatusPill(QFrame):
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+
+def _tor_is_enabled(core: Any) -> bool:
+    getter = getattr(core, "tor_enabled", None)
+    if not callable(getter):
+        return True
+    try:
+        return bool(getter())
+    except Exception:
+        return False
+
+
+def _set_tor_enabled(core: Any, enabled: bool) -> bool:
+    setter = getattr(core, "set_tor_enabled", None)
+    if not callable(setter):
+        return False
+    setter(enabled)
+    return True
+
+
+def _set_tor_action(
+    host: Any,
+    text: str,
+    *,
+    enabled: bool = True,
+    tooltip: str = "",
+) -> None:
+    """Keep the Tor action explicit, keyboard-operable, and truthful."""
+    button = getattr(host, "tor_toggle", None)
+    if button is None:
+        return
+    button.setText(text)
+    button.setEnabled(enabled)
+    accessible = {
+        "Turn on": "Turn on Tor proxy",
+        "Turn off": "Turn off Tor proxy for Onionmind",
+        "Cancel": "Cancel Tor proxy startup",
+        "External": "Tor proxy is managed outside Onionmind",
+        "Unavailable": "Tor proxy control is unavailable",
+    }.get(text, f"Tor proxy action: {text}")
+    button.setAccessibleName(accessible)
+    button.setToolTip(tooltip)
 
 
 # The reduce-motion preference as a process-wide override. None means follow
@@ -7988,6 +8058,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_probe_generation = 0
         self.tor_phase = "off"
         self.tor_stop_event: Optional[threading.Event] = None
+        self.tor_in_use = False
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
         self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
@@ -8099,15 +8170,17 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.model_status)
         self.tor_status = StatusPill("Tor", "Off", "idle")
         self.tor_status.setToolTip(
-            "Local background Tor state. Click to start it without opening a browser window."
+            "Local background Tor state. Use the adjacent button to turn Onionmind's Tor proxy on or off."
         )
-        # The pill emitted clicked into nothing while it drew a pointing-hand
-        # cursor, and Agent mode's own refusal told the user to start Tor from
-        # this toolbar - a control that did not exist. Chat's one-turn search
-        # consent was the only thing that ever started Tor, and Agent mode
-        # cannot reach it.
-        self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
+        self.tor_toggle = QPushButton("Turn on")
+        self.tor_toggle.setObjectName("torAction")
+        self.tor_toggle.setAccessibleName("Turn on Tor proxy")
+        self.tor_toggle.setToolTip(
+            "Start Onionmind's background Tor proxy without opening a browser window."
+        )
+        self.tor_toggle.clicked.connect(self._toggle_tor)
+        toolbar_layout.addWidget(self.tor_toggle)
 
         terminal_toggle = QToolButton()
         terminal_toggle.setObjectName("bareButton")
@@ -8433,6 +8506,12 @@ class OnionmindWindow(QMainWindow):
         checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
             self.tor_status.set_status("Off", "idle")
+            _set_tor_action(
+                self,
+                "Unavailable",
+                enabled=False,
+                tooltip="This Onionmind build cannot manage a Tor proxy.",
+            )
             return
         self.tor_probe_generation += 1
         generation = self.tor_probe_generation
@@ -8503,6 +8582,11 @@ class OnionmindWindow(QMainWindow):
         self.tor_status.setToolTip(
             message + " Onionmind did not make an external request; search remains off."
         )
+        _set_tor_action(
+            self,
+            "Turn on",
+            tooltip="Start Onionmind's background Tor proxy without opening a browser window.",
+        )
         self.inspector.append_activity("Background Tor is off; Chat remains local-only")
 
     def _tor_probe_complete(self, port: Any, generation: Optional[int] = None) -> None:
@@ -8513,6 +8597,22 @@ class OnionmindWindow(QMainWindow):
         self._show_local_tor_state(port)
 
     def _show_local_tor_state(self, port: Any) -> None:
+        if not _tor_is_enabled(self.core):
+            self.tor_phase = "off"
+            self.tor_status.set_status("Off", "idle")
+            note = (
+                "Tor is off for Onionmind. A local proxy is still running elsewhere, but "
+                "Onionmind will not use it until you turn Tor on."
+                if port
+                else "Tor is off for Onionmind. Protected features stay offline until you turn it on."
+            )
+            self.tor_status.setToolTip(note)
+            _set_tor_action(
+                self,
+                "Turn on",
+                tooltip="Allow Onionmind to use Tor and start or reuse a local proxy.",
+            )
+            return
         managed = getattr(self.core, "_managed_tor_process", None)
         try:
             managed_running = managed is not None and managed.poll() is None
@@ -8530,6 +8630,15 @@ class OnionmindWindow(QMainWindow):
         if port and (managed_running or verified):
             self.tor_phase = "running"
             self.tor_status.set_status(f"Running · {port}", "good")
+            _set_tor_action(
+                self,
+                "Turn off",
+                tooltip=(
+                    "Stop Onionmind's background Tor process."
+                    if managed_running
+                    else "Disconnect Onionmind from this external Tor proxy; the external process stays running."
+                ),
+            )
             # Tor being verified is also the self-updater's only window to look
             # for updates, so piggyback the permissioned autocheck on it.
             self._maybe_autocheck_updates()
@@ -8548,17 +8657,35 @@ class OnionmindWindow(QMainWindow):
         elif port:
             self.tor_phase = "proxy"
             self.tor_status.set_status(f"Proxy · {port}", "warn")
+            if callable(getattr(self.core, "set_tor_enabled", None)):
+                _set_tor_action(
+                    self,
+                    "Turn off",
+                    tooltip="Disconnect Onionmind from this external proxy; the external process stays running.",
+                )
+            else:
+                _set_tor_action(
+                    self,
+                    "External",
+                    enabled=False,
+                    tooltip="This proxy is managed outside Onionmind and cannot be stopped here.",
+                )
             self.tor_status.setToolTip(
-                "A local SOCKS listener was detected but not externally verified. Search "
-                "still fails closed. Click to stop it if Onionmind started it."
+                "A local SOCKS listener was detected but not externally verified. Protected "
+                "features still fail closed."
             )
             self.inspector.append_activity(f"Unverified local SOCKS listener detected on port {port}")
         else:
             self.tor_phase = "off"
             self.tor_status.set_status("Off", "idle")
             self.tor_status.setToolTip(
-                "Tor is off. Click to start it; search still starts it for a "
-                "permitted turn. No browser window is opened."
+                "Tor is off. Use Turn on to start it; a permitted search may also start it "
+                "unless you explicitly turned it off. No browser window is opened."
+            )
+            _set_tor_action(
+                self,
+                "Turn on",
+                tooltip="Start Onionmind's background Tor proxy without opening a browser window.",
             )
             self.inspector.append_activity("Background Tor is off; Chat remains local-only")
 
@@ -8587,14 +8714,19 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event = threading.Event()
         self.tor_status.set_status("Starting", "busy")
         self.tor_status.setToolTip(
-            "Background Tor is starting. Click to stop it. No browser window is opened."
+            "Background Tor is starting. Use Cancel to stop it. No browser window is opened."
+        )
+        _set_tor_action(
+            self,
+            "Cancel",
+            tooltip="Cancel background Tor startup.",
         )
         self.set_status(note or "Starting background Tor without opening a browser window…")
         self.inspector.append_activity(note or "Background Tor start requested")
         return self.tor_stop_event
 
     def _toggle_tor(self) -> None:
-        """The indicator is also the control: start when off, stop when up.
+        """The explicit toolbar action starts Tor, cancels startup, or turns it off.
 
         Stop is offered in every phase, mid-start included - start_tor_hidden()
         polls the stop event while it waits for the SOCKS port, so cancelling a
@@ -8613,27 +8745,37 @@ class OnionmindWindow(QMainWindow):
         self._start_tor_from_toolbar()
 
     def stop_tor(self, note: str = "") -> None:
-        """Stop the Tor this session started, at any point in its life.
+        """Turn Tor off for Onionmind, at any point in its life.
 
-        Only ever ours. A listener Onionmind found rather than started is left
-        alone - killing a proxy another program owns is not this app's call -
-        and the indicator says so instead of pretending the click did nothing.
+        Only ever terminate ours. A listener Onionmind found rather than
+        started stays alive, while the core gate prevents Onionmind from using
+        it until the user explicitly turns Tor on again.
         """
+        if self.tor_in_use:
+            self.stop_active()
         event = getattr(self, "tor_stop_event", None)
         if event is not None:
             event.set()                          # unblocks a start still waiting
         managed = getattr(self.core, "_managed_tor_process", None)
         stopper = getattr(self.core, "stop_managed_tor", None)
+        external = managed is None and self.tor_phase in ("running", "proxy")
         self.tor_probe_generation += 1
-        if managed is None and self.tor_phase in ("running", "proxy"):
+        disabled_for_onionmind = _set_tor_enabled(self.core, False)
+        if managed is None and self.tor_phase in ("running", "proxy") and not disabled_for_onionmind:
             self.tor_status.setToolTip(
                 "This Tor was already running when Onionmind found it. Onionmind did "
                 "not start it and will not stop it; stop it where you started it."
             )
+            _set_tor_action(
+                self,
+                "External",
+                enabled=False,
+                tooltip="This proxy is managed outside Onionmind and cannot be stopped here.",
+            )
             self.set_status("That Tor proxy is not Onionmind's to stop.")
             self.inspector.append_activity("Stop refused: the Tor proxy was not started by Onionmind")
             return
-        if callable(stopper):
+        if managed is not None and callable(stopper):
             try:
                 stopper()
             except Exception as exc:             # a dead process is still stopped
@@ -8641,15 +8783,36 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event = None
         self.tor_phase = "off"
         self.tor_status.set_status("Off", "idle")
-        self.tor_status.setToolTip("Tor is off. Click to start it without opening a browser window.")
-        self.set_status(note or "Background Tor stopped.")
-        self.inspector.append_activity(note or "Background Tor stopped by the user")
+        self.tor_status.setToolTip(
+            "Tor is off for Onionmind. The external proxy remains running."
+            if external
+            else "Tor is off. Turn it on again without opening a browser window."
+        )
+        _set_tor_action(
+            self,
+            "Turn on",
+            tooltip="Allow Onionmind to use Tor and start or reuse a local proxy.",
+        )
+        outcome = note or (
+            "Tor turned off for Onionmind; the external proxy is still running."
+            if external
+            else "Background Tor stopped."
+        )
+        self.set_status(outcome)
+        self.inspector.append_activity(outcome)
 
     def _start_tor_from_toolbar(self) -> None:
         """Start background Tor on demand, from the one control that shows it."""
         if not callable(getattr(self.core, "start_tor_hidden", None)):
             self.set_status("This Onionmind build cannot start background Tor.")
+            _set_tor_action(
+                self,
+                "Unavailable",
+                enabled=False,
+                tooltip="This Onionmind build cannot manage a Tor proxy.",
+            )
             return
+        _set_tor_enabled(self.core, True)
         stop_event = self.announce_tor_starting("Starting background Tor from the toolbar…")
         generation = self.tor_probe_generation
 
@@ -8676,9 +8839,15 @@ class OnionmindWindow(QMainWindow):
             return
         self.tor_stop_event = None
         self.tor_phase = "off"
+        _set_tor_enabled(self.core, False)
         self.tor_status.set_status("Off", "idle")
         message = _brand_runtime_text(message)
         self.tor_status.setToolTip(message)
+        _set_tor_action(
+            self,
+            "Turn on",
+            tooltip=f"Tor did not start: {message} Select Turn on to try again.",
+        )
         self.set_status(f"Tor did not start: {message}")
         self.inspector.append_activity(f"Background Tor failed to start: {message}")
 
@@ -9035,10 +9204,12 @@ class OnionmindWindow(QMainWindow):
         width = self.width()
         compact_toolbar = width < 1100
         self.brand_box.setFixedWidth(165 if width < 900 else 205)
+        self.repo_label.setVisible(width >= 900)
         self.branch_label.setVisible(not compact_toolbar)
         self.toolbar_separator.setVisible(not compact_toolbar)
         self.model_status.setVisible(width >= 1280)
         self.tor_status.setVisible(True)
+        self.tor_toggle.setVisible(True)
         self.model_combo.setMinimumWidth(145 if compact_toolbar else 190)
         if width < 820:
             self.left_rail.hide()
@@ -9823,6 +9994,13 @@ class OnionmindWindow(QMainWindow):
             return
         if not task:
             task = "Review the attached local files."
+        search_allowed = self.mode == "chat" and self.search_consent.isChecked()
+        if (self.mode == "agent" or search_allowed) and not _tor_is_enabled(self.core):
+            self.set_status("Tor proxy is off. Turn it on in the toolbar before using a protected feature.")
+            self.inspector.append_activity(
+                "Protected run blocked because Tor was explicitly turned off; no network request was made"
+            )
+            return
         if self.mode == "agent":
             answer = QMessageBox.warning(
                 self,
@@ -9835,7 +10013,6 @@ class OnionmindWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 self.set_status("Agent run cancelled; no process was started.")
                 return
-        search_allowed = self.mode == "chat" and self.search_consent.isChecked()
         self.search_consent.setChecked(False)
         attachment_names = [Path(path).name for path in self.attachments]
         visible_task = task + ("\n\nAttached locally: " + ", ".join(attachment_names) if attachment_names else "")
@@ -10021,6 +10198,7 @@ class OnionmindWindow(QMainWindow):
         self._sync_action_states()
 
     def _start_chat(self, allow_search: bool = False) -> None:
+        self.tor_in_use = allow_search
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
@@ -10031,7 +10209,9 @@ class OnionmindWindow(QMainWindow):
         if allow_search:
             self.tor_probe_generation += 1
             self.tor_phase = "starting"
+            self.tor_stop_event = stop_event
             self.tor_status.set_status("Starting", "busy")
+            _set_tor_action(self, "Cancel", tooltip="Cancel this Tor startup and Chat turn.")
             self.set_status("Starting background Tor without opening a browser window…")
             self.inspector.append_activity("One-turn Tor search permission granted")
         else:
@@ -10129,15 +10309,26 @@ class OnionmindWindow(QMainWindow):
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
             port = event.get("port")
+            self.tor_stop_event = None
             if event.get("managed"):
                 self.tor_phase = "running"
                 self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+                _set_tor_action(
+                    self,
+                    "Turn off",
+                    tooltip="Stop Onionmind's background Tor process.",
+                )
                 self.tor_status.setToolTip(
                     "Tor is running as a background process; no Tor Browser or console window was opened."
                 )
             else:
                 self.tor_phase = "proxy"
                 self.tor_status.set_status(f"Proxy · {port}" if port else "Proxy", "warn")
+                _set_tor_action(
+                    self,
+                    "Turn off",
+                    tooltip="Disconnect Onionmind from this external proxy; the external process stays running.",
+                )
                 self.tor_status.setToolTip(
                     "An existing local SOCKS listener was reused and will be verified before a query is sent."
                 )
@@ -10149,6 +10340,15 @@ class OnionmindWindow(QMainWindow):
             port = event.get("port")
             self.tor_phase = "running"
             self.tor_status.set_status(f"Running · {port}" if port else "Running", "good")
+            _set_tor_action(
+                self,
+                "Turn off",
+                tooltip=(
+                    "Stop Onionmind's background Tor process."
+                    if getattr(self.core, "_managed_tor_process", None) is not None
+                    else "Disconnect Onionmind from this external proxy; the external process stays running."
+                ),
+            )
             self.tor_status.setToolTip(
                 "The background SOCKS path was verified as Tor after explicit search permission."
             )
@@ -10174,6 +10374,8 @@ class OnionmindWindow(QMainWindow):
             self.inspector.append_activity("Tor search request refused; no network request was made")
 
     def _chat_complete(self, payload: dict[str, Any]) -> None:
+        self.tor_in_use = False
+        self.tor_stop_event = None
         answer = _strip_thinking(payload.get("answer"))
         stopped = bool(payload.get("stopped"))
         if not answer and stopped:
@@ -10205,6 +10407,8 @@ class OnionmindWindow(QMainWindow):
         self.save_current_session()
 
     def _chat_failed(self, message: str) -> None:
+        self.tor_in_use = False
+        self.tor_stop_event = None
         message = _brand_runtime_text(_strip_thinking(message))
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
@@ -10230,6 +10434,7 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Agent mode needs a project folder")
             self._set_active(None)
             return
+        self.tor_in_use = True
         model = self.current_model_id()
         workspace = self.workspace
         yolo = self.yolo_consent.isChecked()
@@ -10265,6 +10470,7 @@ class OnionmindWindow(QMainWindow):
         if generation != self.harness_generation or self.active_kind != "agent":
             return
         if not payload.get("available"):
+            self.tor_in_use = False
             reason = payload.get("reason") or "Onionmind Agent is unavailable."
             text = _brand_runtime_text(reason) + "\n\n" + self.harness_bridge.limitation
             if self.stream_block is None:
@@ -10323,6 +10529,7 @@ class OnionmindWindow(QMainWindow):
     def _harness_finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
         if self.active_kind != "agent":
             return
+        self.tor_in_use = False
         normal = status == QProcess.ExitStatus.NormalExit
         suffix = f"\n\nAgent {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
         if self.stream_block is not None:
@@ -10353,6 +10560,7 @@ class OnionmindWindow(QMainWindow):
         if generation is not None and generation != self.harness_generation:
             return
         message = _brand_runtime_text(message)
+        self.tor_in_use = False
         text = f"Onionmind Agent could not start: {message}\n\n{self.harness_bridge.limitation}"
         if self.stream_block is None:
             self.stream_block = self.transcript.add_message("assistant", text, "Onionmind Agent")
@@ -10374,6 +10582,7 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Stopping the local model after the current read…")
         elif self.active_kind == "agent":
             if self.harness_process is None:
+                self.tor_in_use = False
                 self.harness_generation += 1
                 text = "Agent start canceled before a repository action began."
                 if self.stream_block is not None:
@@ -10647,6 +10856,11 @@ class OnionmindWindow(QMainWindow):
         # a label saying Running while the phase says off would offer Start.
         self.tor_phase = "running"
         self.tor_status.set_status("Running · 9150", "good")
+        _set_tor_action(
+            self,
+            "Turn off",
+            tooltip="Stop Onionmind's background Tor process.",
+        )
         self.workspace = str(Path.home() / "onion" / "leaflink")
         self.repo_label.setText("leaflink")
         self.repo_label.setToolTip(self.workspace)

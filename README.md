@@ -38,7 +38,8 @@ external request and starts no network service. Local chat, project context,
 session history, and model inference stay on your computer. Every external
 action is user-triggered: Tor search is enabled per turn, and on Windows
 Onionmind then starts only Tor's background process - no Tor Browser window, no
-console - and shows its state in the Tor indicator. A search sends its query to
+console - and shows its state beside an explicit **Turn on / Turn off** control.
+A search sends its query to
 DuckDuckGo's onion service; model installation downloads weights; and agent
 traffic is routed through Tor or refused. The wrapper code is MIT-licensed;
 model weights retain the upstream licenses documented in `THIRD_PARTY_NOTICES.md`.
@@ -81,11 +82,15 @@ model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
 in new terminals. SmartScreen may grumble at a self-contained script — that's
 what it does; *More info → Run anyway*.
 
-The Tor indicator starts at **Off**, or **Proxy · port** when it detects an
-unverified pre-existing SOCKS listener. Enabling **Allow Tor search this turn**
-can change it to **Starting** and then **Running · 9150**. Onionmind launches
-`tor.exe` hidden, never `firefox.exe`, and stops only the Tor process it owns
-when the app closes. An already-running local Tor proxy is reused and left alone.
+The toolbar keeps Tor's state and action separate: the indicator starts at
+**Off**, or **Proxy · port** when it detects an unverified pre-existing SOCKS
+listener, while the adjacent button says **Turn on**, **Cancel**, or **Turn
+off**. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
+cancels an active protected run, blocks new Onionmind Tor connections, and stops only the Tor
+process this Onionmind session owns. An already-running local proxy stays alive,
+but Onionmind disconnects from it until you explicitly turn Tor on again.
+Enabling **Allow Tor search this turn** can still start Tor when you have not
+explicitly turned it off.
 
 Prefer a portable install? Extract the rolling zip instead and run
 `onionmind-bootstrap.cmd` from the extracted folder. The bootstrap takes an

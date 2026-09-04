@@ -99,6 +99,25 @@ INCOMPLETE_NOTE = "[Incomplete: generation limit reached. Continue to resume fro
 _port = None
 _bridge_port = None
 _managed_tor_process = None
+_tor_enabled = True
+
+
+def tor_enabled():
+    """Return whether this process currently permits Onionmind to use Tor."""
+    return _tor_enabled
+
+
+def set_tor_enabled(enabled):
+    """Enable or fail-close Onionmind's Tor paths for this process.
+
+    Turning Tor off is intentionally session-local. It clears the pinned
+    circuit but does not kill a listener owned by another application; the
+    desktop separately stops only the hidden Tor process this session owns.
+    """
+    global _tor_enabled, _port
+    _tor_enabled = bool(enabled)
+    if not _tor_enabled:
+        _port = None
 
 
 def tor_data_dirs():
@@ -244,6 +263,10 @@ def start_tor_hidden(timeout=30, stop_event=None):
     own instead.
     """
     global _managed_tor_process
+    if not _tor_enabled:
+        raise RuntimeError(
+            "Tor proxy is turned off in Onionmind. Turn it on from the desktop toolbar first."
+        )
     existing = tor_proxy_port()
     if existing:
         return existing
@@ -312,6 +335,9 @@ def _proxies(port, isolate):
 def tor_check():
     """Pin the Tor port, or exit. Fails closed - never falls back to a direct connection."""
     global _port
+    if not _tor_enabled:
+        _port = None
+        sys.exit("Tor proxy is turned off in Onionmind. Turn it on before using a protected feature.")
     for port in PORTS:
         try:
             r = requests.get("https://check.torproject.org/api/ip",

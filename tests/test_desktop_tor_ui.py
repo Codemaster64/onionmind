@@ -13,11 +13,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
-    from PySide6.QtWidgets import QApplication, QCheckBox
+    from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
     import onionmind_desktop as desktop
 except ModuleNotFoundError:
     QApplication = None
     QCheckBox = None
+    QPushButton = None
     desktop = None
 
 
@@ -36,15 +37,19 @@ class TorIndicatorStateTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def state_host(self, *, port=None, managed=None, verified=None):
+        enabled = {"value": True}
         core = SimpleNamespace(
             _managed_tor_process=managed,
             _port=verified,
             tor_proxy_port=lambda: port,
+            tor_enabled=lambda: enabled["value"],
+            set_tor_enabled=lambda value: enabled.update(value=bool(value)),
         )
         self.autochecks = []
         return SimpleNamespace(
             core=core,
             tor_status=desktop.StatusPill("Tor", "Off", "idle"),
+            tor_toggle=QPushButton("Turn on"),
             tor_probe_generation=2,
             tor_phase="off",
             inspector=ActivityRecorder(),
@@ -64,6 +69,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.label.text(), "Proxy · 9150")
         self.assertEqual(host.tor_phase, "proxy")
+        self.assertEqual(host.tor_toggle.text(), "Turn off")
 
     def test_managed_hidden_process_transitions_starting_to_running(self) -> None:
         process = mock.Mock()
@@ -73,6 +79,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.label.text(), "Running · 9150")
         self.assertEqual(host.tor_phase, "running")
+        self.assertEqual(host.tor_toggle.text(), "Turn off")
         # A verified circuit is the updater's only window, so the Running
         # transition is exactly where the permissioned autocheck piggybacks.
         self.assertEqual(self.autochecks, ["autocheck"])
@@ -98,6 +105,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._poll_tor_liveness(host)
         self.assertEqual(host.tor_status.label.text(), "Off")
         self.assertEqual(host.tor_phase, "off")
+        self.assertEqual(host.tor_toggle.text(), "Turn on")
 
     def test_replacement_listener_downgrades_running_to_unverified_proxy(self) -> None:
         process = mock.Mock()

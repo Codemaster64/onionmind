@@ -74,7 +74,7 @@ means running it again.
 | | |
 |---|---|
 | Ollama | via winget, plus a background server on `127.0.0.1:11434` |
-| Tor Browser | via winget, then **started automatically** — it owns the SOCKS proxy on 9150 |
+| Tor Browser | via winget; Onionmind starts only its bundled `tor.exe` on demand, never the browser window |
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | local chat/search engine and compatibility CLI, written next to the weights |
@@ -296,9 +296,23 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 
 ## Web search over Tor
 
-The installer starts Tor Browser and waits for a circuit, so it is already up after a fresh
-install. Just **leave it open** — it owns the SOCKS proxy on port 9150. A standalone `tor`
-daemon on 9050 also works; the script tries both.
+The Windows installer installs Tor Browser as the source of `tor.exe`, but does
+not launch `firefox.exe` or start a network service. The desktop toolbar keeps a
+textual Tor status beside a real button whose action is always explicit:
+**Turn on**, **Cancel**, or **Turn off**. Turn on launches only `tor.exe` hidden
+on port 9150; a standalone daemon on 9050 or an existing listener on 9150 is
+reused instead.
+
+Turn off clears Onionmind's pinned Tor circuit immediately. If this Onionmind
+session started the hidden daemon it stops that process too. If another program
+owns the listener, that process stays alive, but Onionmind's Tor paths remain
+disabled and fail closed until the toolbar explicitly turns them on again. This
+desktop also requests cancellation of an active protected run; a blocking OS
+read may take its normal timeout to unwind, but no new Tor check can pass the
+gate. This session-local gate is not a saved preference. The control transitions and
+external-listener behavior are exercised by `tests/test_desktop_ui.py` and
+`tests/test_desktop_tor_ui.py`; `tests/test_privacy_contracts.py` verifies that
+the off gate refuses before either a socket probe or an external request.
 
 The model decides when to search. Ask it something it already knows and it answers directly;
 ask for something current and it issues its own queries, reads the snippets, and cites them.
@@ -670,9 +684,10 @@ rate-limited — retry for a new circuit.
 
 ### `No Tor proxy on 9150/9050`
 
-Tor Browser isn't running, or is still on its connect screen. Open it, wait for the circuit,
-retry. This message means the tool **refused to search** rather than leaking — working as
-intended.
+In the desktop workbench, select **Turn on** beside the Tor status and retry.
+The workbench starts only the hidden Tor process, not a browser window. In the
+CLI, start a local Tor service or Tor Browser and retry. This message means the
+tool **refused to search** rather than leaking — working as intended.
 
 ### Linux: `ollama create` fails with "no such file" on a path in your home directory
 
