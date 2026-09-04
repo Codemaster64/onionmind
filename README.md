@@ -224,31 +224,26 @@ plan and refuses until rerun with `-AllowDirectNetwork` (then prompts unless
 The models are named for the burn, from least heavy to heaviest:
 **SPARK < EMBER < BLAZE < INFERNO < CINDER < WILDFIRE < FLASHPOINT < PHOENIX < NOVA < PYRE**.
 The models currently shipped map to **SPARK** (2.6B), **EMBER** (4B),
-**BLAZE** (9B), and **INFERNO** (27B, with vision support). The remaining names
-are reserved for progressively heavier models. **CINDER** is reserved for a
-low-and-slow, small embedding model optimized for high recall, search, RAG,
-and vector databases.
-**INFERNO** is the target high-throughput tier: **30–70B MoE**, optimized for
-fast API responses, real-time apps, and customer support agents. **“Full
-flame.”** · **Frontier**
-**WILDFIRE** is reserved for the next frontier tier: **100B+ MoE**, with
-multimodal input, deep reasoning, and long context for research, complex
-agents, and enterprise AI. Multi-agent orchestration, heavy tool use, and
-autonomous workflows, autonomous ops, and deep automation. **Agentic / Swarm** ·
-**“Burn it down.”**
-**FLASHPOINT** is reserved as the next tier: **Experimental**, for limited
-preview models and new capabilities before full release, for beta testers and
-labs. Tagline:
-**“Uncontainable.”**
-**NOVA** is reserved as **Ultra / Premium**, targeting top benchmarks with
-high-cost, specialized training for high-stakes enterprise and scientific
-modeling. Tagline: **“One spark away.”**
-**PHOENIX** is reserved as **Fine-tune / Recovery**, with the tagline
-**“Cosmic burn.”** Distillation, safety tuning, red-teaming, model reset,
-custom models, and safety alignment.
-**PYRE** is reserved as **Legacy / Collector** for archived or
-special-edition models and older versions, for retro access and research
-archives, with the tagline **“Rise.”**
+**BLAZE** (9B), and **INFERNO** (27B, with vision support). The remaining
+names are reserved. What each name stands for:
+
+- **CINDER** — a low-and-slow, small embedding model optimized for high recall,
+  search, RAG, and vector databases.
+- **INFERNO** — the target high-throughput tier: **30–70B MoE**, optimized for
+  fast API responses, real-time apps, and customer support agents.
+  *“Full flame.” · Frontier*
+- **WILDFIRE** — the next frontier tier: **100B+ MoE** with multimodal input,
+  deep reasoning, and long context for research, complex agents, and enterprise
+  AI — multi-agent orchestration, heavy tool use, autonomous workflows, and
+  deep automation. *Agentic / Swarm · “Burn it down.”*
+- **FLASHPOINT** — **experimental**: limited preview models and new capabilities
+  before full release, for beta testers and labs. *“Uncontainable.”*
+- **NOVA** — **ultra / premium**: top benchmarks through high-cost, specialized
+  training for high-stakes enterprise and scientific modeling. *“One spark away.”*
+- **PHOENIX** — **fine-tune / recovery**: distillation, safety tuning,
+  red-teaming, model reset, custom models, and safety alignment. *“Cosmic burn.”*
+- **PYRE** — **legacy / collector**: archived and special-edition models and
+  older versions, for retro access and research archives. *“Rise.”*
 
 ---
 
