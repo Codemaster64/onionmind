@@ -241,6 +241,31 @@ class DistributionPrivacyTests(unittest.TestCase):
                 self.assertNotIn("Starting Tor Browser", text)
                 self.assertNotIn("Start-Process $c", text)
 
+    def test_windows_updater_keeps_the_agent_funnel_and_valid_paths(self) -> None:
+        updater = self.text("update-onionmind.ps1")
+        flattened = " ".join(updater.split())
+
+        # Get-Command can return every matching executable on PATH. Selecting
+        # one is what keeps PowerShell from coercing several paths into one
+        # invalid command line on machines with multiple Python/Node installs.
+        for executable in ("python", "py", "node"):
+            self.assertIn(
+                f"Get-Command {executable} -CommandType Application "
+                "-ErrorAction SilentlyContinue | Select-Object -First 1",
+                flattened,
+            )
+
+        # Updating must not replace the Tor-contained Qwen entry point with the
+        # old direct-network Harness command.
+        self.assertIn("--agent --model $Model $task", updater)
+        self.assertNotIn("ollama launch dsh", updater)
+        self.assertNotIn("Harness traffic is direct", updater)
+
+        # WScript resolves a bare `powershell.exe` relative to the .lnk file,
+        # producing e.g. Desktop\\powershell.exe instead of a runnable target.
+        self.assertIn("$lnk.TargetPath = $powerShellPath", updater)
+        self.assertNotIn("$lnk.TargetPath = 'powershell.exe'", updater)
+
     def test_desktop_startup_uses_only_the_local_tor_probe(self) -> None:
         desktop = self.text("onionmind_desktop.py")
         start = desktop.index("    def _probe_services(self) -> None:")

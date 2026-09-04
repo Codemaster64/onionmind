@@ -121,8 +121,12 @@ if (Test-Path -LiteralPath $old -PathType Leaf) {
   if ($match) { $model = $match.Matches[0].Groups[1].Value }
 }
 
-$pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
-if (-not $pythonCommand) { $pythonCommand = Get-Command py -CommandType Application -ErrorAction SilentlyContinue }
+$pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+  Select-Object -First 1
+if (-not $pythonCommand) {
+  $pythonCommand = Get-Command py -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+}
 $py = if ($pythonCommand) { $pythonCommand.Source } else { $null }
 if (-not $py) { throw 'Python 3 is required to validate and update Onionmind.' }
 
@@ -280,7 +284,8 @@ if (-not $Arguments -or $Arguments.Count -eq 0) {
   Write-Host 'Usage: onionmind-code "task for the coding agent"' -ForegroundColor Yellow
   exit 2
 }
-$nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+$nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue |
+  Select-Object -First 1
 if (-not $nodeCommand) {
   Write-Error 'DeepSeek Harness requires Node.js ^22.19 or 24+. Install a supported Node.js release first.'
   exit 1
@@ -292,10 +297,13 @@ if (-not ($nodeVersion.Major -ge 24 -or ($nodeVersion.Major -eq 22 -and $nodeVer
   exit 1
 }
 $task = $Arguments -join ' '
-Write-Host 'Agent network note: Harness traffic is direct; only Onionmind chat search uses Tor.' -ForegroundColor DarkYellow
-$consent = Read-Host 'Run DeepSeek Harness with direct-network capability? [y/N]'
-if ($consent -notmatch '^(?i:y|yes)$') { Write-Host 'Canceled.'; exit 3 }
-& ollama launch dsh --model $Model -- --profile headless $task
+# Tor is NOT started here. onionmind.py --agent starts only Tor's tor.exe
+# process, hidden, verifies the circuit, and refuses to run without one - the
+# wrapper must never launch Tor Browser's firefox.exe or any visible window.
+$desktopPython = Join-Path $PSScriptRoot 'desktop-env\Scripts\python.exe'
+$onionmindPython = Join-Path $PSScriptRoot 'onionmind.py'
+if (Test-Path -LiteralPath $desktopPython -PathType Leaf) { $python = $desktopPython } else { $python = 'python' }
+& $python $onionmindPython --agent --model $Model $task
 exit $LASTEXITCODE
 '@.Replace('@ONIONMIND_MODEL@', $model) |
   Set-Content (Join-Path $InstallDir 'onionmind-code-launch.ps1') -Encoding UTF8
@@ -327,9 +335,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "`$u=Join-Path `$env:TEMP
 
 $shortcutPath = [IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Onionmind.lnk')
 if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
+  $powerShellPath = Join-Path ([Environment]::GetFolderPath('System')) `
+    'WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+    throw "Windows PowerShell was not found at $powerShellPath."
+  }
   $ws = New-Object -ComObject WScript.Shell
   $lnk = $ws.CreateShortcut($shortcutPath)
-  $lnk.TargetPath = 'powershell.exe'
+  $lnk.TargetPath = $powerShellPath
   $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $InstallDir 'onionmind-launch.ps1')`" -UI"
   $lnk.WindowStyle = 7
   $lnk.WorkingDirectory = $InstallDir
