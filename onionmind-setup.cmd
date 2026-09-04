@@ -7046,6 +7046,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_phase = "off"
         self.tor_stop_event: Optional[threading.Event] = None
         self._project_delete_pending: Optional[str] = None
+        self._pending_redirect = False
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -8569,7 +8570,17 @@ class OnionmindWindow(QMainWindow):
 
     def submit(self) -> None:
         if self.active_kind:
-            self.stop_active()
+            # A send during a live run is a redirect: stop the run, keep the
+            # partial answer in the transcript, and send the typed direction
+            # as the next turn the moment the run finishes unwinding. An empty
+            # composer keeps the old meaning: plain stop.
+            if self.composer.toPlainText().strip() or self.attachments:
+                self._pending_redirect = True
+                self.stop_active()
+                if self._pending_redirect:
+                    self.set_status("Stopping the current run; your direction is sent next.")
+            else:
+                self.stop_active()
             return
         task = self.composer.toPlainText().strip()
         if not task and not self.attachments:
@@ -8742,10 +8753,13 @@ class OnionmindWindow(QMainWindow):
         self.send_button.setAccessibleName("Stop active run" if running else "Send task")
         if kind == "agent":
             self.send_button.setToolTip(
-                "Stop Onionmind Agent; child processes it started may require manual termination"
+                "Stop Onionmind Agent; child processes it started may require manual termination. "
+                "A typed direction is sent when it stops."
             )
         elif kind == "chat":
-            self.send_button.setToolTip("Stop local generation after the current read")
+            self.send_button.setToolTip(
+                "Stop local generation after the current read. A typed direction is sent when it stops."
+            )
         else:
             self.send_button.setToolTip("Send task (Enter)")
         self.chat_button.setEnabled(not running)
@@ -8759,6 +8773,12 @@ class OnionmindWindow(QMainWindow):
         if not running:
             self.stop_event = None
             self.harness_process = None
+        if kind is None and self._pending_redirect:
+            self._pending_redirect = False
+            if self.composer.toPlainText().strip() or self.attachments:
+                # Deferred through the event loop: the finishing run's own
+                # handlers are still unwinding on this stack.
+                QTimer.singleShot(0, self.submit)
         self._sync_action_states()
 
     def _start_chat(self, allow_search: bool = False) -> None:

@@ -15,6 +15,7 @@ import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** The app's whole backend: serves the chat page and a tiny JSON API on
  *  127.0.0.1:8081. The WebView talks only to this. */
@@ -55,6 +56,7 @@ object Server {
                             error(Response.Status.FORBIDDEN, "bad or missing token")
                         session.uri == "/api/status" -> status()
                         session.uri == "/api/preferences" -> preferences(session)
+                        session.uri == "/api/stop" -> stopChat()
                         session.uri == "/api/install" -> install(session)
                         session.uri == "/api/select" -> select(session)
                         session.uri == "/api/remove" -> remove(session)
@@ -207,6 +209,10 @@ object Server {
         val messages = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
             .map { it.jsonObject }.toMutableList()
         // the UI sends plain {role, content} turns; the agent extends the list
+        // Stop belongs to this request only: a fresh flag per chat, so a stop
+        // pressed for one answer can never cancel a different one.
+        val flag = AtomicBoolean()
+        stopFlag = flag
         val answer = try {
             chatLock.submit<String?> {
                 // Starting and checking the child are serialized with its chat.
@@ -215,7 +221,7 @@ object Server {
                 if (!ProcessManager.ensureLlama(ctx) || !ProcessManager.awaitLlamaReady()) {
                     null
                 } else {
-                    Agent.turn(LLAMA, messages, allowSearch) { query ->
+                    Agent.turn(LLAMA, messages, allowSearch, shouldStop = { flag.get() }) { query ->
                         // Starting Tor is lazy: checking the one-turn box merely makes
                         // the tool available. No Tor process or network is touched
                         // unless the model actually asks to search during this turn.
@@ -227,6 +233,8 @@ object Server {
             }.get()
         } catch (e: ExecutionException) {
             return error(Response.Status.INTERNAL_ERROR, rootMessage(e))
+        } finally {
+            stopFlag = null
         }
         if (answer == null) return error(
             Response.Status.SERVICE_UNAVAILABLE,
@@ -246,8 +254,18 @@ object Server {
             ?: "unknown server error"
 
     private val API_PATHS = setOf(
-        "/api/status", "/api/preferences", "/api/install", "/api/select", "/api/remove", "/api/chat"
+        "/api/status", "/api/preferences", "/api/stop", "/api/install", "/api/select", "/api/remove", "/api/chat"
     )
+
+    // Set by /api/stop from outside the chat lock; the running turn polls it
+    // between rounds and before tool calls. A fresh flag per chat request
+    // means a late stop can never kill the next turn.
+    @Volatile private var stopFlag: AtomicBoolean? = null
+
+    private fun stopChat(): Response {
+        stopFlag?.set(true)
+        return json("{\"ok\":true}")
+    }
 
     private const val UI_PREFS = "onionmind_ui"
     private const val UI_PREFS_JSON = "preferences_json"

@@ -175,6 +175,7 @@ const errorText = err => err instanceof Error ? (err.message || String(err)) : S
 // Saying "thinking" for that is indistinguishable from a hang.
 const busyText = () => status.llama === false ? 'loading the model into memory…' : 'thinking locally…';
 let history = [], status = {model:'none', models:[]}, ready = false;
+let busy = false, pendingRedirect = null;
 const $ = id => document.getElementById(id);
 
 async function poll() {
@@ -354,15 +355,29 @@ function add(cls, text) {
   return d;
 }
 
+// While a reply is being computed the button is Stop. Pressing it with text
+// in the composer stops the current answer and sends that direction next;
+// pressed empty it just stops.
+async function stopRun() {
+  const redirect = $('q').value.trim();
+  try { await api('/api/stop', form('')); } catch {}
+  if (redirect) {
+    pendingRedirect = redirect;
+    $('q').value = ''; autoGrow();
+    $('busy').textContent = 'stopping — your message is sent next…';
+  }
+}
+
 $('form').onsubmit = async e => {
   e.preventDefault();
+  if (busy) { stopRun(); return; }
   const q = $('q').value.trim(); if (!q) return;
   const allowSearch = $('allow-search').checked;
   // Consume permission before any asynchronous work. It cannot silently carry
   // into the next message, even if this request fails.
   $('allow-search').checked = false;
   $('allow-search').disabled = true;
-  $('send').disabled = true;
+  busy = true; $('send').textContent = 'Stop';
   $('q').value = ''; autoGrow(); add('you', q);
   history.push({role:'user', content:q});
   $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
@@ -380,7 +395,12 @@ $('form').onsubmit = async e => {
   } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); }
   $('busy').style.display = 'none';
   $('allow-search').disabled = false;
-  $('send').disabled = false;
+  busy = false; $('send').textContent = 'Send';
+  if (pendingRedirect) {
+    const redirect = pendingRedirect; pendingRedirect = null;
+    $('q').value = redirect; autoGrow();
+    $('form').requestSubmit();
+  }
 };
 </script>
 </body>

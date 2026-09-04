@@ -454,11 +454,17 @@ object Agent {
 
     /** One full user turn against llama-server: chat, tool calls, search, repeat.
      *  Search permission is deliberately a required per-call value; callers must
-     *  never infer it from a persistent setting. */
+     *  never infer it from a persistent setting. [shouldStop] is polled before
+     *  the first request, between rounds, and before each tool call; a stop
+     *  returns the best partial answer, marked as stopped, instead of letting
+     *  the turn pretend it finished on its own. */
     fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
              allowSearch: Boolean = false,
+             shouldStop: () -> Boolean = { false },
              search: (String) -> String = { q -> webSearch(q) }): String {
+        var partial = ""
         for (round in 0 until 6) {
+            if (shouldStop()) return stopped(partial)
             val reply = chat(llamaUrl, messages, NUM_PREDICT, allowSearch = allowSearch)
             if (reply.error != null) return reply.error
             val assistant = reply.assistant!!
@@ -470,7 +476,9 @@ object Agent {
                 compact(messages, answer)
                 return answer
             }
+            partial = stripThinking((assistant["content"] as? JsonPrimitive)?.content ?: "").ifBlank { partial }
             for (c in calls) {
+                if (shouldStop()) return stopped(partial)
                 val f = c.jsonObject["function"]!!.jsonObject
                 val name = f["name"]!!.jsonPrimitive.content
                 val args = f["arguments"]?.jsonObject
@@ -488,4 +496,7 @@ object Agent {
         }
         return "(gave up after 6 tool rounds)"
     }
+
+    private fun stopped(partial: String): String =
+        if (partial.isBlank()) "(stopped)" else partial + "\n\n(stopped)"
 }

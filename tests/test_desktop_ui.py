@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -475,6 +476,33 @@ class DesktopUiTests(unittest.TestCase):
             assert scroll is not None
             self.assertTrue(scroll.widgetResizable())
             self._close(dialog)
+
+    def test_send_during_a_run_stops_it_and_sends_the_direction_next(self) -> None:
+        window = self._window()
+        window._set_active("chat")
+        window.stop_event = threading.Event()
+        window.composer.setPlainText("now do it differently")
+        window.submit()
+        # The run is stopping, and the typed direction is held to become the
+        # next turn the moment the run finishes unwinding.
+        self.assertTrue(window.stop_event.is_set())
+        self.assertTrue(window._pending_redirect)
+        self.assertEqual(window.composer.toPlainText(), "now do it differently")
+        with mock.patch.object(window, "submit") as submit:
+            window._set_active(None)
+            # The redirect submit is deferred through the event loop so the
+            # finishing run's handlers can unwind first.
+            self.app.processEvents()
+            submit.assert_called_once()
+
+        # An empty composer during a run keeps the plain-stop meaning.
+        window._set_active("chat")
+        window.stop_event = threading.Event()
+        window.composer.clear()
+        window.submit()
+        self.assertFalse(window._pending_redirect)
+        self.assertTrue(window.stop_event.is_set())
+        self._close(window)
 
     def test_window_actions_modes_and_responsive_toggles(self) -> None:
         window = self._window()
