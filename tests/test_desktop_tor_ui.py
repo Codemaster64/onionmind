@@ -38,6 +38,7 @@ class TorIndicatorStateTests(unittest.TestCase):
 
     def state_host(self, *, port=None, managed=None, verified=None):
         enabled = {"value": True}
+        self.status_messages = []
         core = SimpleNamespace(
             _managed_tor_process=managed,
             _port=verified,
@@ -54,6 +55,7 @@ class TorIndicatorStateTests(unittest.TestCase):
             tor_phase="off",
             inspector=ActivityRecorder(),
             _maybe_autocheck_updates=lambda: self.autochecks.append("autocheck"),
+            set_status=self.status_messages.append,
         )
 
     def test_late_startup_probe_cannot_overwrite_starting(self) -> None:
@@ -89,6 +91,19 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.label.text(), "Proxy · 9150")
         self.assertEqual(self.autochecks, [])
+
+    def test_toolbar_start_replaces_starting_message_after_proxy_is_ready(self) -> None:
+        host = self.state_host(port=9150)
+        host.tor_phase = "starting"
+        host.tor_stop_event = object()
+        host._show_local_tor_state = lambda port: desktop.OnionmindWindow._show_local_tor_state(host, port)
+        desktop.OnionmindWindow._toolbar_tor_started(host, 9150, generation=2)
+        self.assertEqual(host.tor_status.label.text(), "Proxy · 9150")
+        self.assertEqual(host.tor_toggle.text(), "Turn off")
+        self.assertEqual(
+            self.status_messages,
+            ["Tor proxy available on local port 9150; protected features verify it before use."],
+        )
 
     def test_exited_managed_process_transitions_running_to_off(self) -> None:
         process = mock.Mock()

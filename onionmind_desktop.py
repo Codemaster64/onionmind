@@ -4231,6 +4231,14 @@ class OnionmindWindow(QMainWindow):
             return
         self.tor_stop_event = None
         self._show_local_tor_state(port)
+        if self.tor_phase == "running":
+            self.set_status(f"Tor ready on local port {port}.")
+        elif self.tor_phase == "proxy":
+            self.set_status(
+                f"Tor proxy available on local port {port}; protected features verify it before use."
+            )
+        else:
+            self.set_status("Tor is off.")
 
     def _toolbar_tor_failed(self, message: str, generation: int) -> None:
         if generation != self.tor_probe_generation or self.tor_phase != "starting":
