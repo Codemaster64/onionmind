@@ -104,5 +104,5 @@ suites unless asked.
 - Writing a doc claim ("~19 tok/s", "works on X") without running it.
 - Importing Qt into `onionmind_desktop_core.py` and breaking its headless tests.
 - Assuming CI covers you — the `desktop-build` workflow runs the payload check
-  and a subset of the tests, but the coding-agent, privacy-contract, release-
-  version, and desktop UI suites only run when you run them.
+  and every test suite, but only on push or PR: run the checks for what you
+  touched yourself, before CI gets to tell you.
