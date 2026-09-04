@@ -22,6 +22,7 @@ try:
         QApplication,
         QDialogButtonBox,
         QPushButton,
+        QScrollArea,
         QToolButton,
         QWidget,
     )
@@ -454,6 +455,25 @@ class DesktopUiTests(unittest.TestCase):
             assert close_button is not None
             close_button.click()
             self.assertFalse(dialog.isVisible())
+            self._close(dialog)
+
+    def test_settings_dialog_fits_the_screen_and_scrolls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            storage = Path(temporary) / "onionmind-storage"
+            dialog = ui.SettingsDialog(storage, desktop_core.HARNESS_LIMITATION)
+            dialog.show()
+            self.app.processEvents()
+            # A laptop panel shorter than the stacked sections must still get
+            # the whole dialog on screen, with the overflow scrolling instead
+            # of pushing the Close row away.
+            screen = dialog.screen() or self.app.primaryScreen()
+            available = screen.availableGeometry()
+            self.assertLessEqual(dialog.width(), available.width())
+            self.assertLessEqual(dialog.height(), available.height())
+            scroll = dialog.findChild(QScrollArea)
+            self.assertIsNotNone(scroll)
+            assert scroll is not None
+            self.assertTrue(scroll.widgetResizable())
             self._close(dialog)
 
     def test_window_actions_modes_and_responsive_toggles(self) -> None:

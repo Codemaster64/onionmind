@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Onionmind</title>
 <style>
   :root { --purple: #7D4698; --dim: #9c7bb0; --bg: #0e0b12; --card: #17121d; --line: #2a2133; }
@@ -10,14 +10,15 @@
   body { background: var(--bg); color: #e8e2ee; font: 16px/1.5 system-ui, sans-serif;
          display: flex; flex-direction: column; height: 100dvh; }
   header { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
-           border-bottom: 1px solid var(--line); }
+           border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header svg { flex: none; }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
   #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
   #manage, #settings-btn { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
   .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
-  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+          width: 100%; max-width: 720px; margin-inline: auto; }
   .msg { max-width: 92%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap;
          word-break: break-word; }
   .you { align-self: flex-end; background: var(--purple); color: #fff; border-bottom-right-radius: 4px; }
@@ -25,7 +26,8 @@
          border-bottom-left-radius: 4px; }
   .bot small { display: block; color: var(--dim); font-size: 11px; margin-top: 6px; }
   #form { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-          border-top: 1px solid var(--line); flex-wrap: wrap; }
+          border-top: 1px solid var(--line); flex-wrap: wrap;
+          width: 100%; max-width: 720px; margin-inline: auto; }
   #search-permission { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
                        color: #cdbbd5; font-size: 12px; padding: 0 2px 2px; }
   #search-permission input { accent-color: var(--purple); width: 16px; height: 16px; }
@@ -53,6 +55,7 @@
   #settings { position: fixed; inset: 0; z-index: 3; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
   #manager h2, #settings h2 { font-size: 20px; margin-bottom: 4px; }
   #manager > p, #settings > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
+  #manager > *, #settings > * { max-width: 560px; margin-left: auto; margin-right: auto; }
   #manager input, #setup input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
   .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
   .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }

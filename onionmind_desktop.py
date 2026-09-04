@@ -2491,8 +2491,22 @@ class SettingsDialog(QDialog):
         self.update_staging: Optional[str] = None
         self._update_stop: Optional[threading.Event] = None
         self.setWindowTitle("Onionmind settings")
-        self.resize(560, 660)
-        outer = QVBoxLayout(self)
+        # The stacked sections must fit the screen the dialog appears on: a
+        # small laptop panel cannot show 660px of content, so the body scrolls
+        # and the size clamps to the available geometry instead of pushing the
+        # Close row out of reach.
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        self.resize(
+            min(560, available.width() - 40) if available else 560,
+            min(660, available.height() - 80) if available else 660,
+        )
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setAccessibleName("Onionmind settings sections")
+        content = QWidget()
+        outer = QVBoxLayout(content)
         heading = QLabel("Boundaries and storage")
         heading.setObjectName("brand")
         outer.addWidget(heading)
@@ -2667,6 +2681,10 @@ class SettingsDialog(QDialog):
         open_folder.clicked.connect(self._open_storage_folder)
         actions.rejected.connect(self.reject)
         outer.addWidget(actions)
+        scroll.setWidget(content)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(scroll)
 
         if update_bridge is None or not update_bridge.available:
             self.check_updates_button.setEnabled(False)
