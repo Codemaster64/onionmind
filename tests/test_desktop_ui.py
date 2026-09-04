@@ -73,8 +73,8 @@ class DesktopUiTests(unittest.TestCase):
         widget.deleteLater()
         self.app.processEvents()
 
-    def test_explicit_tor_button_starts_background_tor(self) -> None:
-        """Tor is a visible keyboard button, not a hidden click target."""
+    def test_tor_status_is_the_single_explicit_button_that_starts_tor(self) -> None:
+        """The status itself is a visible native button with its action in the label."""
         window = self._window()
         try:
             calls: list[bool] = []
@@ -93,18 +93,25 @@ class DesktopUiTests(unittest.TestCase):
             window.core._managed_tor_process = None
             window.core._port = None
             window._show_local_tor_state(None)    # demo state opens on "running"
-            self.assertTrue(window.tor_toggle.isVisible())
-            self.assertEqual(window.tor_toggle.text(), "Turn on")
-            self.assertEqual(window.tor_toggle.accessibleName(), "Turn on Tor proxy")
-            self.assertNotEqual(window.tor_toggle.focusPolicy(), Qt.FocusPolicy.NoFocus)
-            window.tor_toggle.click()
+            self.assertIsInstance(window.tor_status, QPushButton)
+            self.assertTrue(window.tor_status.isVisible())
+            self.assertEqual(window.tor_status.status_text(), "Off")
+            self.assertEqual(window.tor_status.action_text(), "Turn on")
+            self.assertIn("Off  —  Turn on", window.tor_status.text())
+            self.assertEqual(
+                window.tor_status.accessibleName(),
+                "Tor status: Off. Turn on Tor proxy",
+            )
+            self.assertNotEqual(window.tor_status.focusPolicy(), Qt.FocusPolicy.NoFocus)
+            self.assertFalse(hasattr(window, "tor_toggle"))
+            window.tor_status.click()
             self.assertTrue(
                 self._wait_until(
                     lambda: bool(calls) and window.tor_phase in ("running", "proxy")
                 )
             )
-            self.assertIn("9150", window.tor_status.label.text())
-            self.assertEqual(window.tor_toggle.text(), "Turn off")
+            self.assertIn("9150", window.tor_status.status_text())
+            self.assertEqual(window.tor_status.action_text(), "Turn off")
         finally:
             self._close(window)
 
@@ -116,10 +123,10 @@ class DesktopUiTests(unittest.TestCase):
             started: list[bool] = []
             window.core.start_tor_hidden = lambda *a, **k: (started.append(True), 9150)[1]
             window.tor_phase = "probing"
-            window.tor_toggle.click()
+            window.tor_status.click()
             self.app.processEvents()
             self.assertEqual(window.tor_phase, "starting")
-            self.assertEqual(window.tor_toggle.text(), "Cancel")
+            self.assertEqual(window.tor_status.action_text(), "Cancel")
             self.assertTrue(self._wait_until(lambda: bool(started)))
         finally:
             self._close(window)
@@ -135,12 +142,12 @@ class DesktopUiTests(unittest.TestCase):
             window.core.stop_managed_tor = lambda: stopped.append(True)
             window.core._managed_tor_process = object()   # ours, so ours to stop
             window.tor_phase = "running"
-            window.tor_toggle.click()
+            window.tor_status.click()
             self.app.processEvents()
             self.assertEqual(stopped, [True])
             self.assertFalse(enabled["value"])
             self.assertEqual(window.tor_phase, "off")
-            self.assertEqual(window.tor_toggle.text(), "Turn on")
+            self.assertEqual(window.tor_status.action_text(), "Turn on")
 
             # A listener Onionmind only found stays alive, but Onionmind's use
             # of it is switched off just as clearly.
@@ -149,11 +156,11 @@ class DesktopUiTests(unittest.TestCase):
             window.core._managed_tor_process = None
             window.core._port = None
             window._show_local_tor_state(9150)
-            self.assertEqual(window.tor_toggle.text(), "Turn off")
+            self.assertEqual(window.tor_status.action_text(), "Turn off")
             window.active_kind = "chat"
             window.tor_in_use = True
             window.stop_event = threading.Event()
-            window.tor_toggle.click()
+            window.tor_status.click()
             self.app.processEvents()
             self.assertEqual(stopped, [])
             self.assertFalse(enabled["value"])
@@ -594,7 +601,7 @@ class DesktopUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(window.repo_label.isHidden())
         self.assertFalse(window.tor_status.isHidden())
-        self.assertFalse(window.tor_toggle.isHidden())
+        self.assertIn("—", window.tor_status.text())
         self.assertTrue(window.left_rail.isHidden())
         self.assertTrue(window.inspector.isHidden())
         self.assertFalse(window.rail_toggle.isChecked())
@@ -738,21 +745,21 @@ class DesktopUiTests(unittest.TestCase):
         core._managed_tor_process = managed
         core.stop_managed_tor = lambda: stopped.append(True) or setattr(managed, "alive", False)
         window._show_local_tor_state(9150)
-        self.assertEqual(window.tor_status.label.text(), "Running · 9150")
+        self.assertEqual(window.tor_status.status_text(), "Running · 9150")
         self.assertEqual(window.tor_phase, "running")
-        self.assertEqual(window.tor_toggle.text(), "Turn off")
+        self.assertEqual(window.tor_status.action_text(), "Turn off")
 
         # A listener that answers but was never verified stays a warning, never "ready".
         core._managed_tor_process = None
         window._show_local_tor_state(9151)
-        self.assertEqual(window.tor_status.label.text(), "Proxy · 9151")
+        self.assertEqual(window.tor_status.status_text(), "Proxy · 9151")
         self.assertEqual(window.tor_phase, "proxy")
-        self.assertEqual(window.tor_toggle.text(), "Turn off")
+        self.assertEqual(window.tor_status.action_text(), "Turn off")
 
         window._show_local_tor_state(None)
-        self.assertEqual(window.tor_status.label.text(), "Off")
+        self.assertEqual(window.tor_status.status_text(), "Off")
         self.assertEqual(window.tor_phase, "off")
-        self.assertEqual(window.tor_toggle.text(), "Turn on")
+        self.assertEqual(window.tor_status.action_text(), "Turn on")
         self.assertFalse(stopped)
         self._close(window)
 

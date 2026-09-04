@@ -187,7 +187,7 @@ The canonical review viewport is 1440×900; the window opens at 1420×900 and re
 
 The transcript uses 48px inline margins, 20px above, and 24px below. Messages target the measured width of 74 platform-font characters and tool cards target 78; both shrink to the available pane, and message height grows from the wrapped plain text so no transcript content clips. Tool rows are indented 44px to align with message copy. The terminal drawer is 135–200px tall and the composer is 148–178px tall.
 
-Responsive behavior is progressive. Below 1280px the redundant model-status pill hides while the Tor status and its explicit on/off action remain visible. Below 1100px the branch hides and the model chooser becomes compact; below 1080px the inspector collapses; below 900px the brand block narrows and the redundant repository label hides; below 820px the rail collapses. Toolbar toggles keep both side panes reachable.
+Responsive behavior is progressive. Below 1280px the redundant model-status pill hides while the single Tor status/action button remains visible. Below 1100px the branch hides and the model chooser becomes compact; below 1080px the inspector collapses; below 900px the brand block narrows and the redundant repository label hides; below 820px the rail collapses. Toolbar toggles keep both side panes reachable.
 
 Use the small spacing scale inside controls and cards, with the 10–12px steps for pane padding and grouped content. Preserve the broad transcript breathing room; do not apply card padding to the whole work area.
 
@@ -237,7 +237,7 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 ### Status and Privacy
 
 - **Status containers:** compact 4px radius, 4px × 8px padding, a 6px state dot inside a 10px indicator, and a textual prefix plus value.
-- **Tor control:** keep status informational and pair it with a native button that names the available action: Turn on, Cancel, or Turn off. An external proxy remains controllable as an Onionmind connection without implying its process will be killed.
+- **Tor control:** use one clearly styled native button that names both status and available action: `Tor · Off — Turn on`, `Tor · Starting — Cancel`, or `Tor · Proxy/Running — Turn off`. An external proxy remains controllable as an Onionmind connection without implying its process will be killed.
 - **Privacy boundary:** present Onionmind inference, Tor-routed Chat search, and Agent networking as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
 
 **The Honest State Rule.** Onionmind model, Tor, Agent, permission, activity, and observed-change states are always named in text and never encoded by color alone.

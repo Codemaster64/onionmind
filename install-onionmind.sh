@@ -4857,8 +4857,17 @@ QPushButton#updateStatus { background: transparent; border: 1px solid transparen
 QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
 QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
 QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
-QPushButton#torAction { font-weight: 600; padding-left: 10px; padding-right: 10px; }
-QPushButton#torAction:disabled { font-weight: 400; }
+QPushButton#torStatusAction {
+    background: #211f1d;
+    border-color: #6b536f;
+    color: #f3edf4;
+    font-weight: 600;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+QPushButton#torStatusAction:hover { background: #2b262c; border-color: #a481b4; }
+QPushButton#torStatusAction:pressed { background: #171516; border-color: #b793c6; }
+QPushButton#torStatusAction:disabled { color: #817982; font-weight: 400; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
@@ -5440,6 +5449,70 @@ class StatusPill(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class StatusActionButton(QPushButton):
+    """One native button that shows both current status and the next action."""
+
+    COLORS = StatusPill.COLORS
+
+    def __init__(
+        self,
+        prefix: str,
+        text: str,
+        state: str,
+        action: str,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.prefix = prefix
+        self._status_text = text
+        self._action_text = action
+        self._action_accessible = action
+        self.setObjectName("torStatusAction")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.set_status(text, state)
+
+    def status_text(self) -> str:
+        return self._status_text
+
+    def action_text(self) -> str:
+        return self._action_text
+
+    def set_status(self, text: str, state: str = "idle") -> None:
+        self._status_text = text
+        pixmap = QPixmap(10, 10)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self.COLORS.get(state, self.COLORS["idle"])))
+        painter.drawEllipse(2, 2, 6, 6)
+        painter.end()
+        self.setIcon(QIcon(pixmap))
+        self.setIconSize(QSize(10, 10))
+        self._sync_copy()
+
+    def set_action(
+        self,
+        text: str,
+        *,
+        enabled: bool,
+        tooltip: str,
+        accessible: str,
+    ) -> None:
+        self._action_text = text
+        self._action_accessible = accessible
+        self.setEnabled(enabled)
+        self.setToolTip(tooltip)
+        self._sync_copy()
+
+    def _sync_copy(self) -> None:
+        self.setText(f"{self.prefix}  {self._status_text}  —  {self._action_text}")
+        self.setAccessibleName(
+            f"{self.prefix} status: {self._status_text}. {self._action_accessible}"
+        )
+
+
 def _tor_is_enabled(core: Any) -> bool:
     getter = getattr(core, "tor_enabled", None)
     if not callable(getter):
@@ -5465,12 +5538,7 @@ def _set_tor_action(
     enabled: bool = True,
     tooltip: str = "",
 ) -> None:
-    """Keep the Tor action explicit, keyboard-operable, and truthful."""
-    button = getattr(host, "tor_toggle", None)
-    if button is None:
-        return
-    button.setText(text)
-    button.setEnabled(enabled)
+    """Keep the Tor status/action control explicit, operable, and truthful."""
     accessible = {
         "Turn on": "Turn on Tor proxy",
         "Turn off": "Turn off Tor proxy for Onionmind",
@@ -5478,8 +5546,10 @@ def _set_tor_action(
         "External": "Tor proxy is managed outside Onionmind",
         "Unavailable": "Tor proxy control is unavailable",
     }.get(text, f"Tor proxy action: {text}")
-    button.setAccessibleName(accessible)
-    button.setToolTip(tooltip)
+    status_control = getattr(host, "tor_status", None)
+    set_action = getattr(status_control, "set_action", None)
+    if callable(set_action):
+        set_action(text, enabled=enabled, tooltip=tooltip, accessible=accessible)
 
 
 # The reduce-motion preference as a process-wide override. None means follow
@@ -8207,19 +8277,12 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self._build_context_slider())
         self.model_status = StatusPill("Model", "Checking", "busy")
         toolbar_layout.addWidget(self.model_status)
-        self.tor_status = StatusPill("Tor", "Off", "idle")
+        self.tor_status = StatusActionButton("Tor", "Off", "idle", "Turn on")
         self.tor_status.setToolTip(
-            "Local background Tor state. Use the adjacent button to turn Onionmind's Tor proxy on or off."
+            "Turn Onionmind's Tor proxy on or off. The same button always shows its current state."
         )
+        self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
-        self.tor_toggle = QPushButton("Turn on")
-        self.tor_toggle.setObjectName("torAction")
-        self.tor_toggle.setAccessibleName("Turn on Tor proxy")
-        self.tor_toggle.setToolTip(
-            "Start Onionmind's background Tor proxy without opening a browser window."
-        )
-        self.tor_toggle.clicked.connect(self._toggle_tor)
-        toolbar_layout.addWidget(self.tor_toggle)
 
         terminal_toggle = QToolButton()
         terminal_toggle.setObjectName("bareButton")
@@ -9256,7 +9319,6 @@ class OnionmindWindow(QMainWindow):
         self.toolbar_separator.setVisible(not compact_toolbar)
         self.model_status.setVisible(width >= 1280)
         self.tor_status.setVisible(True)
-        self.tor_toggle.setVisible(True)
         self.model_combo.setMinimumWidth(145 if compact_toolbar else 190)
         if width < 820:
             self.left_rail.hide()

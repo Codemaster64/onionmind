@@ -38,7 +38,7 @@ external request and starts no network service. Local chat, project context,
 session history, and model inference stay on your computer. Every external
 action is user-triggered: Tor search is enabled per turn, and on Windows
 Onionmind then starts only Tor's background process - no Tor Browser window, no
-console - and shows its state beside an explicit **Turn on / Turn off** control.
+console - and shows its state and **Turn on / Turn off** action in one button.
 A search sends its query to
 DuckDuckGo's onion service; model installation downloads weights; and agent
 traffic is routed through Tor or refused. The wrapper code is MIT-licensed;
@@ -82,10 +82,10 @@ model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
 in new terminals. SmartScreen may grumble at a self-contained script — that's
 what it does; *More info → Run anyway*.
 
-The toolbar keeps Tor's state and action separate: the indicator starts at
-**Off**, or **Proxy · port** when it detects an unverified pre-existing SOCKS
-listener, while the adjacent button says **Turn on**, **Cancel**, or **Turn
-off**. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
+The toolbar uses one obvious Tor button for both state and action. It reads, for
+example, **Tor · Off — Turn on**, or **Tor · Proxy · port — Turn off** when it
+detects a pre-existing SOCKS listener; during startup it offers **Cancel** in
+that same button. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
 cancels an active protected run, blocks new Onionmind Tor connections, and stops only the Tor
 process this Onionmind session owns. An already-running local proxy stays alive,
 but Onionmind disconnects from it until you explicitly turn Tor on again.

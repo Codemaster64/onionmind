@@ -298,8 +298,8 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 
 The Windows installer installs Tor Browser as the source of `tor.exe`, but does
 not launch `firefox.exe` or start a network service. The desktop toolbar keeps a
-textual Tor status beside a real button whose action is always explicit:
-**Turn on**, **Cancel**, or **Turn off**. Turn on launches only `tor.exe` hidden
+single native Tor button whose text includes both the current status and its
+explicit next action: **Turn on**, **Cancel**, or **Turn off**. Turn on launches only `tor.exe` hidden
 on port 9150; a standalone daemon on 9050 or an existing listener on 9150 is
 reused instead.
 
@@ -684,7 +684,7 @@ rate-limited — retry for a new circuit.
 
 ### `No Tor proxy on 9150/9050`
 
-In the desktop workbench, select **Turn on** beside the Tor status and retry.
+In the desktop workbench, select the Tor status button showing **Turn on** and retry.
 The workbench starts only the hidden Tor process, not a browser window. In the
 CLI, start a local Tor service or Tor Browser and retry. This message means the
 tool **refused to search** rather than leaking — working as intended.
