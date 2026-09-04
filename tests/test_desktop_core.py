@@ -891,6 +891,63 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(core.format_downloads(90), "90")
         self.assertEqual(core.parse_hf_catalog({"not": "a list"}), [])
 
+    def test_catalog_fetch_goes_through_tor_and_never_directly(self) -> None:
+        seen: dict[str, object] = {}
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json() -> list[dict]:
+                return [{"id": "user/model-gguf", "downloads": 3, "tags": ["gguf"]}]
+
+        class _Session:
+            def get(self, url: str, **kwargs: object) -> "_Response":
+                seen["url"] = url
+                seen["kwargs"] = kwargs
+                return _Response()
+
+        rows = core.fetch_hf_catalog(9150, session=_Session())
+        self.assertEqual([row.id for row in rows], ["user/model-gguf"])
+        self.assertEqual(seen["url"], core.HF_CATALOG_URL)
+        kwargs = seen["kwargs"]
+        self.assertEqual(kwargs["proxies"], {  # type: ignore[index]
+            "http": "socks5h://127.0.0.1:9150",
+            "https": "socks5h://127.0.0.1:9150",
+        })
+        # socks5h keeps hostname resolution inside Tor; a socks5:// URL would
+        # leak the DNS question to the local resolver.
+        self.assertIn("socks5h://", str(kwargs["proxies"]))  # type: ignore[index]
+
+    def test_parameter_counts_come_out_of_model_names(self) -> None:
+        self.assertEqual(core.parameter_billions("Qwen2.5-7B-Instruct-GGUF"), 7.0)
+        self.assertEqual(core.parameter_billions("Llama-3.2-1B"), 1.0)  # 3.2 is a version
+        self.assertEqual(core.parameter_billions("model-0.5B-q4"), 0.5)
+        self.assertIsNone(core.parameter_billions("user/tinystories-gguf/blob/main"))
+        self.assertIsNone(core.parameter_billions(""))
+
+    def test_catalog_fit_ranks_against_this_machine(self) -> None:
+        fits = core.catalog_fit("user/model-7B-gguf", 12_288, None)
+        self.assertEqual(fits[0], 0)  # ~4.2GB at Q4 fits 12GB VRAM
+        self.assertIn("fits this machine's VRAM", fits[1])
+        beyond = core.catalog_fit("user/model-70B-gguf", 12_288, None)
+        self.assertEqual(beyond[0], 2)
+        self.assertIn("beyond this machine's VRAM", beyond[1])
+        on_ram = core.catalog_fit("user/model-8B-gguf", None, 8_192)
+        self.assertEqual(on_ram[0], 0)  # ~4.8GB at Q4 against a ~6.8GB RAM budget
+        self.assertIn("fits this machine's RAM", on_ram[1])
+        too_big_for_ram = core.catalog_fit("user/model-27B-gguf", None, 8_192)
+        self.assertEqual(too_big_for_ram[0], 2)
+        unknown = core.catalog_fit("user/tinystories-gguf", 8_192, 32_768)
+        self.assertEqual(unknown[0], 1)
+        self.assertEqual(unknown[1], "size unknown")
+
+    def test_machine_specs_report_or_stay_silent(self) -> None:
+        ram = core.machine_memory_mb()
+        self.assertTrue(ram is None or ram > 0)
+        vram = core.gpu_vram_mb()
+        self.assertTrue(vram is None or vram > 0)
+
 
 if __name__ == "__main__":
     unittest.main()

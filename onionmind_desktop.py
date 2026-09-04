@@ -2435,7 +2435,8 @@ class ModelManagerDialog(QDialog):
         copy_label = QLabel(
             "Paste an Onionmind name (BLAZE), an Ollama name (llama3.2:3b), or a "
             "huggingface.co model link. Pulling asks the local model service to "
-            "download directly; that download is not Tor-routed."
+            "download directly; that download is not Tor-routed. The popular list "
+            "is fetched over Tor and ordered by what this machine can run."
         )
         copy_label.setObjectName("meta")
         copy_label.setWordWrap(True)
@@ -2451,10 +2452,11 @@ class ModelManagerDialog(QDialog):
 
         browse_row = QHBoxLayout()
         self.browse_button = QPushButton("Browse popular models")
-        self.browse_button.setAccessibleName("Fetch the popular model list from huggingface.co")
+        self.browse_button.setAccessibleName("Fetch the popular model list over Tor")
         self.browse_button.setToolTip(
-            "Fetches the most-downloaded GGUF models from huggingface.co over a "
-            "direct HTTPS connection - the same boundary as a model download."
+            "Fetches the most-downloaded GGUF models from huggingface.co through "
+            "the verified Tor circuit - huggingface.co sees a Tor exit, not this "
+            "machine. Needs Tor up; never falls back to a direct connection."
         )
         self.browse_button.clicked.connect(self._request_catalog)
         self.catalog_combo = QComboBox()
@@ -2528,21 +2530,12 @@ class ModelManagerDialog(QDialog):
         self.reference_hint.setText(" · ".join(parts))
 
     def _request_catalog(self) -> None:
-        answer = QMessageBox.warning(
-            self,
-            "Fetch the popular model list",
-            "Onionmind will ask huggingface.co directly for its most-downloaded "
-            "GGUF models. This fetch is not Tor-routed and exposes this machine's "
-            "network address to huggingface.co. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        # The click is the action: the list is fetched through the same
+        # verified Tor circuit as search and updates, never directly.
         self.browse_button.setEnabled(False)
         self.catalog_combo.setEnabled(False)
         self.catalog_combo.clear()
-        self.catalog_combo.addItem("Fetching the popular list…")
+        self.catalog_combo.addItem("Fetching the popular list over Tor…")
         self.catalogRequested.emit()
 
     def _catalog_picked(self, index: int) -> None:
@@ -3067,6 +3060,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event: Optional[threading.Event] = None
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
+        self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -5277,6 +5271,7 @@ class OnionmindWindow(QMainWindow):
 
     def _catalog_entry_label(self, entry: Any) -> str:
         formatter = _optional_callable(self.desktop_core, "format_downloads")
+        fit = _optional_callable(self.desktop_core, "catalog_fit")
         downloads = _field(entry, "downloads", 0) or 0
         likes = _field(entry, "likes", 0) or 0
         counts = (
@@ -5284,35 +5279,69 @@ class OnionmindWindow(QMainWindow):
         )
         marker = _field(entry, "uncensored")
         flag = f"refusal-removed: {marker}" if marker else "no refusal-removal flag"
-        return f"{_as_text(_field(entry, 'id'))} · {counts} · {likes} likes · {flag}"
+        parts = [f"{_as_text(_field(entry, 'id'))} · {counts} · {likes} likes · {flag}"]
+        if callable(fit):
+            vram, ram = self._catalog_specs
+            parts.append(fit(_as_text(_field(entry, "id")), vram, ram)[1])
+        return " · ".join(parts)
 
     def _fetch_model_catalog(self, dialog: ModelManagerDialog) -> None:
-        """Fetch the popular GGUF list from huggingface.co - direct HTTPS behind
-        the same consent as a model download, never Tor-implied."""
-        parser = getattr(self.desktop_core, "parse_hf_catalog", None)
-
-        def job(signals: WorkerSignals) -> Any:
-            del signals
-            if not callable(parser):
-                raise RuntimeError("Model discovery needs the Onionmind desktop core.")
-            import requests
-
-            response = requests.get(
-                "https://huggingface.co/api/models",
-                params={
-                    "filter": "gguf",
-                    "sort": "downloads",
-                    "direction": "-1",
-                    "limit": "30",
-                },
-                timeout=20,
-                proxies={"http": None, "https": None},
+        """Fetch the popular GGUF list over Tor - fail closed, ordered by what
+        this machine's RAM/VRAM can actually run."""
+        fetcher = getattr(self.desktop_core, "fetch_hf_catalog", None)
+        if not callable(fetcher):
+            dialog.set_catalog_error("Model discovery needs the Onionmind desktop core.")
+            return
+        probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            listening = probe() if callable(probe) else None
+        except Exception:
+            listening = None
+        port = self.update_bridge.tor_port()
+        if not listening and port is None:
+            dialog.set_catalog_error(
+                "Tor is not up. Allow Tor search on a chat turn to start it, then "
+                "try again - never over a direct connection."
             )
-            response.raise_for_status()
-            return parser(response.json())
+            return
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            if port is None:
+                # A listening SOCKS port is not proof of Tor; verify a circuit
+                # before trusting it, exactly like the update check.
+                verify = getattr(self.core, "tor_check", None)
+                if callable(verify):
+                    try:
+                        verify()
+                    except SystemExit as exc:
+                        raise RuntimeError(
+                            _as_text(exc) or "Tor could not be verified."
+                        ) from None
+            port_now = port or self.update_bridge.tor_port()
+            if port_now is None:
+                raise RuntimeError(
+                    "The local proxy did not verify as Tor; refusing a direct model-list fetch."
+                )
+            memory = getattr(self.desktop_core, "machine_memory_mb", None)
+            vram_probe = getattr(self.desktop_core, "gpu_vram_mb", None)
+            ram = int(memory()) if callable(memory) else None
+            vram = int(vram_probe()) if callable(vram_probe) else None
+            return {"entries": fetcher(port_now), "vram": vram, "ram": ram}
+
+        def done(payload: dict[str, Any]) -> None:
+            self._catalog_specs = (payload.get("vram"), payload.get("ram"))
+            fit = _optional_callable(self.desktop_core, "catalog_fit")
+            entries = list(payload.get("entries") or [])
+            if callable(fit):
+                vram, ram = self._catalog_specs
+                entries.sort(
+                    key=lambda entry: fit(_as_text(_field(entry, "id")), vram, ram)[0]
+                )
+            dialog.set_catalog(entries)
 
         worker = self._start_worker(job)
-        worker.signals.result.connect(dialog.set_catalog)
+        worker.signals.result.connect(done)
         worker.signals.error.connect(dialog.set_catalog_error)
 
     def pull_model(self, name: str, dialog: ModelManagerDialog) -> None:

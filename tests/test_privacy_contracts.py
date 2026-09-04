@@ -181,9 +181,10 @@ class DistributionPrivacyTests(unittest.TestCase):
         # The desktop self-updater is fed by a rolling GitHub release that only
         # the desktop-build workflow can republish, the usb kit runs the
         # Linux-side validation, and ollama-tor tests the standalone Tor-routing
-        # companion. Those three are the deliberate cloud footprint; nothing
-        # else may grow in .github/workflows.
-        allowed = {"desktop-build.yml", "usb-tests.yml", "ollama-tor.yml"}
+        # companion, and android-tests runs the Kotlin suites on the runner.
+        # Those four are the deliberate cloud footprint; nothing else may
+        # grow in .github/workflows.
+        allowed = {"desktop-build.yml", "usb-tests.yml", "ollama-tor.yml", "android-tests.yml"}
         present = {
             path.name
             for pattern in ("*.yml", "*.yaml")
@@ -403,7 +404,9 @@ class AndroidPrivacyTests(unittest.TestCase):
         self.assertNotIn("/api/tor", page)
 
         self.assertIn('formValue(body, "allowSearch")', server)
-        self.assertIn("Agent.turn(LLAMA, messages, allowSearch)", server)
+                # allowSearch stays a per-call argument; shouldStop is the
+        # cancellation poll from the stop work and touches no network rule.
+        self.assertIn("Agent.turn(LLAMA, messages, allowSearch, shouldStop", server)
         self.assertIn("ProcessManager.ensureTor(ctx)", server)
         self.assertNotIn('"/api/tor"', server)
 
@@ -446,7 +449,7 @@ class AndroidPrivacyTests(unittest.TestCase):
         chat = server[server.index("private fun chat(") :]
         ensure = chat.index("ProcessManager.ensureLlama(ctx)")
         await_ready = chat.index("ProcessManager.awaitLlamaReady()")
-        turn = chat.index("Agent.turn(LLAMA, messages, allowSearch)")
+        turn = chat.index("Agent.turn(LLAMA, messages, allowSearch, shouldStop")
         self.assertLess(ensure, await_ready)
         self.assertLess(await_ready, turn)
         self.assertIn("Response.Status.SERVICE_UNAVAILABLE", chat)

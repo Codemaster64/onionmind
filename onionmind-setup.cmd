@@ -2283,6 +2283,12 @@ __all__ = [
     "CatalogModel",
     "parse_hf_catalog",
     "format_downloads",
+    "HF_CATALOG_URL",
+    "fetch_hf_catalog",
+    "machine_memory_mb",
+    "gpu_vram_mb",
+    "parameter_billions",
+    "catalog_fit",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -2758,6 +2764,122 @@ def format_downloads(count: int) -> str:
             trimmed = value / divisor
             return f"{trimmed:.1f}".rstrip("0").rstrip(".") + suffix
     return str(value)
+
+
+HF_CATALOG_URL = "https://huggingface.co/api/models"
+
+
+def fetch_hf_catalog(port: int, limit: int = 30, session: Any = None) -> list[CatalogModel]:
+    """The popular GGUF list through the verified Tor proxy, or not at all.
+
+    socks5h resolves the hostname inside Tor, and there is no direct
+    fallback: an unreachable circuit is an honest failure, not a reason to
+    leak the machine's address to huggingface.co.
+    """
+    import requests  # deferred: the pure module stays importable without it
+
+    requester = session if session is not None else requests
+    proxies = {
+        "http": f"socks5h://127.0.0.1:{port}",
+        "https": f"socks5h://127.0.0.1:{port}",
+    }
+    response = requester.get(
+        HF_CATALOG_URL,
+        params={
+            "filter": "gguf",
+            "sort": "downloads",
+            "direction": "-1",
+            "limit": str(limit),
+        },
+        proxies=proxies,
+        timeout=60,
+    )
+    status = getattr(response, "status_code", 0)
+    if status != 200:
+        raise RuntimeError(f"huggingface.co returned HTTP {status} over Tor.")
+    return parse_hf_catalog(response.json())
+
+
+def machine_memory_mb() -> Optional[int]:
+    """Total system RAM in MB, or None when the platform won't say."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys // (1024 * 1024))
+            return None
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return int(round(int(line.split()[1]) / 1024))
+    except Exception:
+        return None
+    return None
+
+
+def gpu_vram_mb() -> Optional[int]:
+    """The first NVIDIA GPU's VRAM in MB, or None without one."""
+    try:
+        output = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            return int(output.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        return None
+    return None
+
+
+_PARAM_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z0-9])")
+
+
+def parameter_billions(text: str) -> Optional[float]:
+    """The parameter count in a model name: 7 from Qwen2.5-7B-Instruct-GGUF."""
+    match = _PARAM_PATTERN.search(text or "")
+    return float(match.group(1)) if match else None
+
+
+def catalog_fit(id_or_name: str, vram_mb: Optional[int], ram_mb: Optional[int]) -> tuple[int, str]:
+    """(rank, label) for a catalog row against this machine's memory.
+
+    rank 0 fits this machine, 1 is an unknown size, 2 is beyond it. A Q4 GGUF
+    runs roughly 0.6 GB per billion parameters; the estimate carries the usual
+    quantization slack (1.15x headroom) rather than pretending precision.
+    """
+    params = parameter_billions(id_or_name)
+    budget = vram_mb if vram_mb else int((ram_mb or 0) * 0.85)
+    if params is None or budget <= 0:
+        return 1, "size unknown"
+    estimated_gb = params * 0.6
+    kind = "VRAM" if vram_mb else "RAM"
+    shown = f"{estimated_gb:.1f}" if estimated_gb < 10 else f"{estimated_gb:.0f}"
+    fits = estimated_gb * 1.15 <= budget / 1024
+    if fits:
+        return 0, f"~{shown}GB at Q4, fits this machine's {kind}"
+    return 2, f"~{shown}GB at Q4, beyond this machine's {kind}"
 
 
 @dataclass
@@ -6691,7 +6813,8 @@ class ModelManagerDialog(QDialog):
         copy_label = QLabel(
             "Paste an Onionmind name (BLAZE), an Ollama name (llama3.2:3b), or a "
             "huggingface.co model link. Pulling asks the local model service to "
-            "download directly; that download is not Tor-routed."
+            "download directly; that download is not Tor-routed. The popular list "
+            "is fetched over Tor and ordered by what this machine can run."
         )
         copy_label.setObjectName("meta")
         copy_label.setWordWrap(True)
@@ -6707,10 +6830,11 @@ class ModelManagerDialog(QDialog):
 
         browse_row = QHBoxLayout()
         self.browse_button = QPushButton("Browse popular models")
-        self.browse_button.setAccessibleName("Fetch the popular model list from huggingface.co")
+        self.browse_button.setAccessibleName("Fetch the popular model list over Tor")
         self.browse_button.setToolTip(
-            "Fetches the most-downloaded GGUF models from huggingface.co over a "
-            "direct HTTPS connection - the same boundary as a model download."
+            "Fetches the most-downloaded GGUF models from huggingface.co through "
+            "the verified Tor circuit - huggingface.co sees a Tor exit, not this "
+            "machine. Needs Tor up; never falls back to a direct connection."
         )
         self.browse_button.clicked.connect(self._request_catalog)
         self.catalog_combo = QComboBox()
@@ -6784,21 +6908,12 @@ class ModelManagerDialog(QDialog):
         self.reference_hint.setText(" · ".join(parts))
 
     def _request_catalog(self) -> None:
-        answer = QMessageBox.warning(
-            self,
-            "Fetch the popular model list",
-            "Onionmind will ask huggingface.co directly for its most-downloaded "
-            "GGUF models. This fetch is not Tor-routed and exposes this machine's "
-            "network address to huggingface.co. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        # The click is the action: the list is fetched through the same
+        # verified Tor circuit as search and updates, never directly.
         self.browse_button.setEnabled(False)
         self.catalog_combo.setEnabled(False)
         self.catalog_combo.clear()
-        self.catalog_combo.addItem("Fetching the popular list…")
+        self.catalog_combo.addItem("Fetching the popular list over Tor…")
         self.catalogRequested.emit()
 
     def _catalog_picked(self, index: int) -> None:
@@ -7323,6 +7438,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event: Optional[threading.Event] = None
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
+        self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
         self._rail_requested = True
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
@@ -9533,6 +9649,7 @@ class OnionmindWindow(QMainWindow):
 
     def _catalog_entry_label(self, entry: Any) -> str:
         formatter = _optional_callable(self.desktop_core, "format_downloads")
+        fit = _optional_callable(self.desktop_core, "catalog_fit")
         downloads = _field(entry, "downloads", 0) or 0
         likes = _field(entry, "likes", 0) or 0
         counts = (
@@ -9540,35 +9657,69 @@ class OnionmindWindow(QMainWindow):
         )
         marker = _field(entry, "uncensored")
         flag = f"refusal-removed: {marker}" if marker else "no refusal-removal flag"
-        return f"{_as_text(_field(entry, 'id'))} · {counts} · {likes} likes · {flag}"
+        parts = [f"{_as_text(_field(entry, 'id'))} · {counts} · {likes} likes · {flag}"]
+        if callable(fit):
+            vram, ram = self._catalog_specs
+            parts.append(fit(_as_text(_field(entry, "id")), vram, ram)[1])
+        return " · ".join(parts)
 
     def _fetch_model_catalog(self, dialog: ModelManagerDialog) -> None:
-        """Fetch the popular GGUF list from huggingface.co - direct HTTPS behind
-        the same consent as a model download, never Tor-implied."""
-        parser = getattr(self.desktop_core, "parse_hf_catalog", None)
-
-        def job(signals: WorkerSignals) -> Any:
-            del signals
-            if not callable(parser):
-                raise RuntimeError("Model discovery needs the Onionmind desktop core.")
-            import requests
-
-            response = requests.get(
-                "https://huggingface.co/api/models",
-                params={
-                    "filter": "gguf",
-                    "sort": "downloads",
-                    "direction": "-1",
-                    "limit": "30",
-                },
-                timeout=20,
-                proxies={"http": None, "https": None},
+        """Fetch the popular GGUF list over Tor - fail closed, ordered by what
+        this machine's RAM/VRAM can actually run."""
+        fetcher = getattr(self.desktop_core, "fetch_hf_catalog", None)
+        if not callable(fetcher):
+            dialog.set_catalog_error("Model discovery needs the Onionmind desktop core.")
+            return
+        probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            listening = probe() if callable(probe) else None
+        except Exception:
+            listening = None
+        port = self.update_bridge.tor_port()
+        if not listening and port is None:
+            dialog.set_catalog_error(
+                "Tor is not up. Allow Tor search on a chat turn to start it, then "
+                "try again - never over a direct connection."
             )
-            response.raise_for_status()
-            return parser(response.json())
+            return
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            if port is None:
+                # A listening SOCKS port is not proof of Tor; verify a circuit
+                # before trusting it, exactly like the update check.
+                verify = getattr(self.core, "tor_check", None)
+                if callable(verify):
+                    try:
+                        verify()
+                    except SystemExit as exc:
+                        raise RuntimeError(
+                            _as_text(exc) or "Tor could not be verified."
+                        ) from None
+            port_now = port or self.update_bridge.tor_port()
+            if port_now is None:
+                raise RuntimeError(
+                    "The local proxy did not verify as Tor; refusing a direct model-list fetch."
+                )
+            memory = getattr(self.desktop_core, "machine_memory_mb", None)
+            vram_probe = getattr(self.desktop_core, "gpu_vram_mb", None)
+            ram = int(memory()) if callable(memory) else None
+            vram = int(vram_probe()) if callable(vram_probe) else None
+            return {"entries": fetcher(port_now), "vram": vram, "ram": ram}
+
+        def done(payload: dict[str, Any]) -> None:
+            self._catalog_specs = (payload.get("vram"), payload.get("ram"))
+            fit = _optional_callable(self.desktop_core, "catalog_fit")
+            entries = list(payload.get("entries") or [])
+            if callable(fit):
+                vram, ram = self._catalog_specs
+                entries.sort(
+                    key=lambda entry: fit(_as_text(_field(entry, "id")), vram, ram)[0]
+                )
+            dialog.set_catalog(entries)
 
         worker = self._start_worker(job)
-        worker.signals.result.connect(dialog.set_catalog)
+        worker.signals.result.connect(done)
         worker.signals.error.connect(dialog.set_catalog_error)
 
     def pull_model(self, name: str, dialog: ModelManagerDialog) -> None:

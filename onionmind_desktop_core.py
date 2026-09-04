@@ -43,6 +43,12 @@ __all__ = [
     "CatalogModel",
     "parse_hf_catalog",
     "format_downloads",
+    "HF_CATALOG_URL",
+    "fetch_hf_catalog",
+    "machine_memory_mb",
+    "gpu_vram_mb",
+    "parameter_billions",
+    "catalog_fit",
     "ChatSession",
     "SessionStore",
     "strip_thinking",
@@ -518,6 +524,122 @@ def format_downloads(count: int) -> str:
             trimmed = value / divisor
             return f"{trimmed:.1f}".rstrip("0").rstrip(".") + suffix
     return str(value)
+
+
+HF_CATALOG_URL = "https://huggingface.co/api/models"
+
+
+def fetch_hf_catalog(port: int, limit: int = 30, session: Any = None) -> list[CatalogModel]:
+    """The popular GGUF list through the verified Tor proxy, or not at all.
+
+    socks5h resolves the hostname inside Tor, and there is no direct
+    fallback: an unreachable circuit is an honest failure, not a reason to
+    leak the machine's address to huggingface.co.
+    """
+    import requests  # deferred: the pure module stays importable without it
+
+    requester = session if session is not None else requests
+    proxies = {
+        "http": f"socks5h://127.0.0.1:{port}",
+        "https": f"socks5h://127.0.0.1:{port}",
+    }
+    response = requester.get(
+        HF_CATALOG_URL,
+        params={
+            "filter": "gguf",
+            "sort": "downloads",
+            "direction": "-1",
+            "limit": str(limit),
+        },
+        proxies=proxies,
+        timeout=60,
+    )
+    status = getattr(response, "status_code", 0)
+    if status != 200:
+        raise RuntimeError(f"huggingface.co returned HTTP {status} over Tor.")
+    return parse_hf_catalog(response.json())
+
+
+def machine_memory_mb() -> Optional[int]:
+    """Total system RAM in MB, or None when the platform won't say."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys // (1024 * 1024))
+            return None
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return int(round(int(line.split()[1]) / 1024))
+    except Exception:
+        return None
+    return None
+
+
+def gpu_vram_mb() -> Optional[int]:
+    """The first NVIDIA GPU's VRAM in MB, or None without one."""
+    try:
+        output = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            return int(output.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        return None
+    return None
+
+
+_PARAM_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z0-9])")
+
+
+def parameter_billions(text: str) -> Optional[float]:
+    """The parameter count in a model name: 7 from Qwen2.5-7B-Instruct-GGUF."""
+    match = _PARAM_PATTERN.search(text or "")
+    return float(match.group(1)) if match else None
+
+
+def catalog_fit(id_or_name: str, vram_mb: Optional[int], ram_mb: Optional[int]) -> tuple[int, str]:
+    """(rank, label) for a catalog row against this machine's memory.
+
+    rank 0 fits this machine, 1 is an unknown size, 2 is beyond it. A Q4 GGUF
+    runs roughly 0.6 GB per billion parameters; the estimate carries the usual
+    quantization slack (1.15x headroom) rather than pretending precision.
+    """
+    params = parameter_billions(id_or_name)
+    budget = vram_mb if vram_mb else int((ram_mb or 0) * 0.85)
+    if params is None or budget <= 0:
+        return 1, "size unknown"
+    estimated_gb = params * 0.6
+    kind = "VRAM" if vram_mb else "RAM"
+    shown = f"{estimated_gb:.1f}" if estimated_gb < 10 else f"{estimated_gb:.0f}"
+    fits = estimated_gb * 1.15 <= budget / 1024
+    if fits:
+        return 0, f"~{shown}GB at Q4, fits this machine's {kind}"
+    return 2, f"~{shown}GB at Q4, beyond this machine's {kind}"
 
 
 @dataclass

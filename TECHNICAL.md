@@ -122,15 +122,23 @@ Adding an unknown model is one paste: the manager accepts an Onionmind tier, an
 Ollama name, a bare `user/repo`, or a huggingface.co link, and normalizes all of
 them to the pull reference the service understands (a linked `file.Q4_K_M.gguf`
 becomes `hf.co/user/repo:Q4_K_M`). **Browse popular models** asks huggingface.co's
-public models API for its most-downloaded GGUF list over direct HTTPS, behind the
-same explicit confirmation as a model download - it is never Tor-routed and never
-automatic. Both surfaces screen names for refusal-removal vocabulary
+public models API for its most-downloaded GGUF list **through the verified Tor
+circuit** — socks5h, so hostname resolution also happens inside Tor — and fails
+closed with an actionable message when Tor is not up; there is no direct
+fallback, and no consent modal because the fetch never touches the clearnet.
+The list is ordered by what this machine can run: total RAM
+(`GlobalMemoryStatusEx` / `/proc/meminfo`) and first-GPU VRAM (`nvidia-smi`)
+are read locally, each model's parameter count is taken from its name, and rows
+are ranked fits / size-unknown / beyond-this-machine with a ~0.6 GB-per-billion
+Q4 estimate. Both surfaces screen names for refusal-removal vocabulary
 (`abliterated`, `uncensored`, `unfiltered`, …) and show the matched marker;
 **that flag is a name screen, not a guarantee** - an absent marker says nothing,
-and the UI says so where it shows. Verified by
-`tests/test_desktop_core.py::ModelDiscoveryTests` and
-`android/core/src/test/.../ModelCatalogTest.kt`; the live catalog fetch itself is
-unverified against the real API from this machine.
+and the UI says so where it shows. The normalization, fit ranking, Tor fetch
+shape, and marker screen are verified by
+`tests/test_desktop_core.py::ModelDiscoveryTests`,
+`tests/test_desktop_ui.py::QualityOfLifeTests`, and
+`android/core/src.test/.../ModelCatalogTest.kt`; the live fetch itself has not
+been exercised against the real API from this machine.
 
 The raw Ollama model name is always passed to external tools. The UI labels a
 model with what it actually is plus its weight class (`Qwen3.8 27B · heavy -
@@ -358,6 +366,9 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   (`/api/preferences`, behind the same token) are presentation-only, persist
   in the app's private storage, and never cross the network. The Tor boundary
   and the per-turn search permission are deliberately not preferences.
+- **Stop is cancellation only:** `/api/stop` sets a per-request flag that
+  `Agent.turn` polls between rounds and before each tool call; it never opens
+  or closes a network path, and a flag from one answer can never stop another.
 - **Child ownership:** a listening port is not ownership evidence on Android.
   `OwnedLoopbackProcess` (core) treats `llama-server`'s port as ready only
   while the exact child this app launched is alive: an already-listening

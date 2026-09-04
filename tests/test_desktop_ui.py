@@ -1307,20 +1307,14 @@ class QualityOfLifeTests(unittest.TestCase):
         self.assertEqual(requested, ["hf.co/user/tiny-abliterated-gguf:Q4_K_M"])
         self._close(dialog)
 
-    def test_model_catalog_browse_requires_consent_and_fills_the_field(self) -> None:
+    def test_model_catalog_browse_fetches_over_tor_and_fits_the_machine(self) -> None:
         dialog = ui.ModelManagerDialog([], "")
         dialog.show()
         fetches: list[bool] = []
         dialog.catalogRequested.connect(lambda: fetches.append(True))
-        with mock.patch.object(
-            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.No
-        ):
-            dialog._request_catalog()
-        self.assertEqual(fetches, [])
-        with mock.patch.object(
-            ui.QMessageBox, "warning", return_value=ui.QMessageBox.StandardButton.Yes
-        ):
-            dialog._request_catalog()
+        # The click is the action now: no direct-network consent modal, because
+        # the fetch rides the verified Tor circuit or refuses to run.
+        dialog._request_catalog()
         self.assertEqual(fetches, [True])
         dialog.set_catalog(
             [
@@ -1334,6 +1328,17 @@ class QualityOfLifeTests(unittest.TestCase):
         dialog.catalog_combo.setCurrentIndex(1)
         self.assertEqual(dialog.model_name.text(), "hf.co/user/abliterated-x")
         self._close(dialog)
+
+    def test_model_catalog_refuses_to_fetch_without_tor(self) -> None:
+        window = self._window(ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json"))
+        dialog = ui.ModelManagerDialog([], "", parent=window)
+        dialog.show()
+        window._fetch_model_catalog(dialog)
+        self.assertIn("Tor is not up", dialog.reference_hint.text())
+        self.assertIn("never over a direct connection", dialog.reference_hint.text())
+        self.assertTrue(dialog.browse_button.isEnabled())
+        self._close(dialog)
+        self._close(window)
 
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
