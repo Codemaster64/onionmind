@@ -9,6 +9,7 @@ import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
+import org.onionmind.core.ConversationStore
 import org.onionmind.core.WorkbenchPreferences
 import java.net.URLDecoder
 import java.security.SecureRandom
@@ -56,6 +57,7 @@ object Server {
                             error(Response.Status.FORBIDDEN, "bad or missing token")
                         session.uri == "/api/status" -> status()
                         session.uri == "/api/preferences" -> preferences(session)
+                        session.uri == "/api/conversation" -> conversation(session)
                         session.uri == "/api/stop" -> stopChat()
                         session.uri == "/api/install" -> install(session)
                         session.uri == "/api/select" -> select(session)
@@ -170,6 +172,32 @@ object Server {
     private fun storedPreferences(store: SharedPreferences): WorkbenchPreferences =
         WorkbenchPreferences.fromJson(store.getString(UI_PREFS_JSON, null))
 
+    /**
+     * The single conversation, on private storage only: GET returns it,
+     * POST replaces it (the UI saves after every turn), DELETE clears it.
+     */
+    private fun conversation(session: IHTTPSession): Response {
+        if (session.method == NanoHTTPD.Method.DELETE) {
+            ConversationStore.save(ctx.filesDir, emptyList())
+            return json("{\"ok\":true}")
+        }
+        if (session.method == NanoHTTPD.Method.GET) {
+            return json(JsonArray(ConversationStore.load(ctx.filesDir)).toString())
+        }
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        val raw = session.parms["messages"]
+            ?: formValue(files["postData"] ?: files["content"], "messages")
+        val messages = try {
+            Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]")
+                .jsonArray.map { it.jsonObject }
+        } catch (_: Exception) {
+            return error(Response.Status.BAD_REQUEST, "invalid conversation")
+        }
+        ConversationStore.save(ctx.filesDir, messages)
+        return json(JsonArray(messages).toString())
+    }
+
     private fun select(session: IHTTPSession): Response {
         val files = HashMap<String, String>(); session.parseBody(files)
         val id = session.parms["id"] ?: formValue(files["postData"] ?: files["content"], "id")
@@ -254,7 +282,8 @@ object Server {
             ?: "unknown server error"
 
     private val API_PATHS = setOf(
-        "/api/status", "/api/preferences", "/api/stop", "/api/install", "/api/select", "/api/remove", "/api/chat"
+        "/api/status", "/api/preferences", "/api/conversation", "/api/stop",
+        "/api/install", "/api/select", "/api/remove", "/api/chat"
     )
 
     // Set by /api/stop from outside the chat lock; the running turn polls it

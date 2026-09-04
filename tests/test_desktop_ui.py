@@ -1153,6 +1153,140 @@ class WorkbenchPreferencesTests(unittest.TestCase):
 
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
+class QualityOfLifeTests(unittest.TestCase):
+    """Rename, filter, drafts, retry, and the unfocused-run nudge."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        QStandardPaths.setTestModeEnabled(True)
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyle("Fusion")
+        cls.app.setStyleSheet(ui.STYLE_SHEET)
+
+    def _close(self, widget: QWidget) -> None:
+        widget.close()
+        widget.deleteLater()
+        self.app.processEvents()
+
+    def _window(self, bridge: "ui.SettingsBridge") -> "ui.OnionmindWindow":
+        window = ui.OnionmindWindow(_CoreStub(), desktop_core, demo=True)
+        window.save_current_session = lambda: True
+        window.settings_bridge = bridge
+        window.settings_data = bridge.load()
+        window.preferences = window._load_preferences()
+        window.demo = False
+        window.show()
+        self.app.processEvents()
+        return window
+
+    def test_session_filter_hides_non_matching_rows(self) -> None:
+        rail = ui.LeftRail()
+        rail.set_sessions(
+            [
+                {"id": "a1", "title": "Parser work", "updated_at": "2026-09-01T10:00:00"},
+                {"id": "b2", "title": "Tor notes", "updated_at": "2026-09-02T10:00:00"},
+            ]
+        )
+        self.assertFalse(rail.sessions.item(1).isHidden())
+        rail.session_filter.setText("parser")
+        self.assertFalse(rail.sessions.item(0).isHidden())
+        self.assertTrue(rail.sessions.item(1).isHidden())
+        rail.session_filter.setText("")
+        self.assertFalse(rail.sessions.item(1).isHidden())
+        self._close(rail)
+
+    def test_rename_dialog_emits_the_selected_session_and_clean_title(self) -> None:
+        rail = ui.LeftRail()
+        rail.set_sessions(
+            [{"id": "b2", "title": "Tor notes", "updated_at": "2026-09-02T10:00:00"}]
+        )
+        rail.sessions.setCurrentRow(0)
+        emitted: list[tuple[str, str]] = []
+        rail.renameSessionRequested.connect(lambda i, t: emitted.append((i, t)))
+        with mock.patch.object(
+            ui.QInputDialog, "getText", return_value=("  Renamed session ", True)
+        ):
+            rail._rename_selected_session()
+        self.assertEqual(emitted, [("b2", "Renamed session")])
+        self._close(rail)
+
+    def test_window_renames_a_saved_session_in_the_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sessions_bridge = ui.SessionBridge(desktop_core, Path(temporary) / "sessions")
+            created = sessions_bridge.store.create(title="Old name", model="inferno")
+            window = self._window(ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json"))
+            window.session_bridge = sessions_bridge
+            window.session_objects = {created.id: created}
+            window.current_session = None
+            window.rename_session(created.id, "New name")
+            self.assertEqual(sessions_bridge.store.load(created.id).title, "New name")
+            titles = [
+                window.left_rail.sessions.item(row).text()
+                for row in range(window.left_rail.sessions.count())
+            ]
+            self.assertTrue(any("New name" in title for title in titles))
+            self._close(window)
+
+    def test_composer_draft_survives_a_restart_and_is_forgotten_when_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = ui.SettingsBridge(desktop_core, Path(temporary) / "settings.json")
+            first = self._window(bridge)
+            first.composer.setPlainText("half-finished thought")
+            self._close(first)
+            self.assertEqual(bridge.load()["composer_draft"], "half-finished thought")
+
+            second = self._window(bridge)
+            second._restore_window_layout()
+            self.assertEqual(second.composer.toPlainText(), "half-finished thought")
+            second.composer.setPlainText("sent instead")
+            second.settings_data["composer_draft"] = "sent instead"
+            second._forget_draft()
+            self.assertNotIn("composer_draft", bridge.load())
+            self._close(second)
+
+    def test_retry_replays_the_last_user_turn_after_a_failure(self) -> None:
+        window = self._window(ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json"))
+        window.chat_messages = [
+            {"role": "user", "content": "fix the parser"},
+            {"role": "assistant", "content": "Local inference failed: boom"},
+        ]
+        with mock.patch.object(window, "_start_chat") as start_chat:
+            window._retry_last_turn()
+            start_chat.assert_called_once_with()
+        self.assertEqual(
+            window.chat_messages, [{"role": "user", "content": "fix the parser"}]
+        )
+        self.assertEqual(window.active_kind, "chat")
+        self.assertTrue(window.retry_button.isHidden())
+
+        # A failed chat turn offers the retry control; nothing to retry keeps
+        # the user informed instead of silently doing nothing.
+        other = self._window(ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json"))
+        other.stream_block = None
+        other._chat_failed("boom")
+        self.assertTrue(other.retry_button.isVisible())
+        other.chat_messages = [{"role": "assistant", "content": "done"}]
+        other._retry_last_turn()
+        self.assertIn("no failed chat turn", other.status_label.text().lower())
+        self._close(other)
+        self._close(window)
+
+    def test_finishing_a_run_alerts_an_unfocused_window(self) -> None:
+        window = self._window(ui.SettingsBridge(desktop_core, Path(tempfile.mkdtemp()) / "s.json"))
+        window._set_active("chat")
+        with mock.patch.object(window, "isActiveWindow", return_value=False), \
+             mock.patch.object(ui.QApplication, "alert") as alert:
+            window._set_active(None)
+        alert.assert_called_once_with(window)
+        with mock.patch.object(window, "isActiveWindow", return_value=True), \
+             mock.patch.object(ui.QApplication, "alert") as alert:
+            window._set_active("chat")
+            window._set_active(None)
+        alert.assert_not_called()
+        self._close(window)
+
+
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class NativeTitleBarTests(unittest.TestCase):
     def test_windows_frame_is_pinned_dark_with_the_modern_attribute(self) -> None:
         window = mock.Mock()

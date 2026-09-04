@@ -137,6 +137,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         host = SimpleNamespace(
             active_kind=None,
             send_button=mock.Mock(),
+            retry_button=mock.Mock(),
             chat_button=mock.Mock(),
             agent_button=mock.Mock(),
             model_combo=mock.Mock(),

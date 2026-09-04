@@ -69,6 +69,9 @@
   textarea#q { resize: none; min-height: 44px; max-height: 132px; }
   html.reduced *, html.reduced *::before { transition: none !important; animation: none !important; }
   @media (prefers-reduced-motion: reduce) { *, *::before { transition: none !important; animation: none !important; } }
+  #to-bottom { position: fixed; right: 16px; bottom: calc(96px + env(safe-area-inset-bottom)); z-index: 1;
+               display: none; border-radius: 99px; padding: 9px 14px; font-size: 13px;
+               box-shadow: 0 2px 12px rgba(0, 0, 0, .55); }
 </style>
 </head>
 <body>
@@ -126,6 +129,14 @@
     </div>
     <p class="model-meta">Reduced keeps progress and pending states static. Follow system honours this phone's animation setting.</p>
   </div>
+  <div class="model-card">
+    <strong>Conversation</strong>
+    <p class="model-meta">The conversation stays on this phone and is restored when Onionmind reopens.</p>
+    <div class="model-actions">
+      <button onclick="shareConversation()">Share as text</button>
+      <button class="danger" onclick="clearConversation()">Clear</button>
+    </div>
+  </div>
 </section>
 
 <div id="setup" hidden>
@@ -151,6 +162,7 @@
 </div>
 
 <div id="chat"></div>
+<button id="to-bottom" onclick="scrollBottom()">Jump to latest</button>
 <div id="busy">thinking locallyâ€¦</div>
 <form id="form">
   <label id="search-permission">
@@ -177,6 +189,9 @@ const busyText = () => status.llama === false ? 'loading the model into memoryâ€
 let history = [], status = {model:'none', models:[]}, ready = false;
 let busy = false, pendingRedirect = null;
 const $ = id => document.getElementById(id);
+const chatEl = $('chat');
+const nearBottom = () => chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
+const scrollBottom = () => { chatEl.scrollTop = chatEl.scrollHeight; $('to-bottom').style.display = 'none'; };
 
 async function poll() {
   try { status = await (await api('/api/status')).json(); } catch {}
@@ -204,10 +219,13 @@ async function poll() {
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
     if ($('busy').style.display === 'block') $('busy').textContent = busyText();
-    if (!ready) { add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn"' + (status.tor ? ' Tor is up.' : '') + ' Ask anything.'); ready = true; }
+    if (!ready) { if (!history.length) add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn"' + (status.tor ? ' Tor is up.' : '') + ' Ask anything.'); ready = true; }
   }
 }
-setInterval(poll, 2000); poll(); loadPrefs();
+// Restore the saved conversation before the first poll so the greeting and
+// the restored turns appear in the right order.
+loadPrefs();
+loadConversation().finally(() => { setInterval(poll, 2000); poll(); });
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -350,14 +368,55 @@ function add(cls, text) {
     b.onclick = () => { navigator.clipboard.writeText(text); b.textContent = 'copied'; };
     d.appendChild(document.createElement('br')); d.appendChild(b);
   }
-  $('chat').appendChild(d);
-  $('chat').scrollTop = 1e9;
+  chatEl.appendChild(d);
+  // Follow the conversation only when the reader is already at the bottom;
+  // scrolled-up reading keeps its place and gets a jump-back button.
+  if (nearBottom()) chatEl.scrollTop = chatEl.scrollHeight;
+  else $('to-bottom').style.display = 'block';
   return d;
 }
 
-// While a reply is being computed the button is Stop. Pressing it with text
-// in the composer stops the current answer and sends that direction next;
-// pressed empty it just stops.
+// --- The conversation stays on the phone -----------------------------
+// Saved to private storage after every turn and restored on open, so closing
+// the app or losing the WebView's memory never loses the chat.
+async function saveConversation() {
+  try { await api('/api/conversation', form(new URLSearchParams({messages: JSON.stringify(history)}))); } catch {}
+}
+async function loadConversation() {
+  try {
+    const restored = await (await api('/api/conversation')).json();
+    if (Array.isArray(restored)) {
+      history = restored;
+      for (const m of restored) {
+        if (m.role === 'user') add('you', m.content || '');
+        else if (m.role === 'assistant') add('bot', m.content || '');
+      }
+      if (history.length) scrollBottom();
+    }
+  } catch {}
+}
+function transcriptText() {
+  return history.map(m => (m.role === 'user' ? 'You: ' : 'Onionmind: ') + (m.content || '')).join('\n\n');
+}
+async function shareConversation() {
+  const text = transcriptText();
+  if (!text) return;
+  if (navigator.share) {
+    try { await navigator.share({text}); return; } catch {}
+  }
+  try { await navigator.clipboard.writeText(text); alert('Conversation copied to the clipboard.'); }
+  catch { alert('Sharing is not available here; copy a message instead.'); }
+}
+async function clearConversation() {
+  if (!confirm('Clear this conversation from the phone? It cannot be recovered.')) return;
+  history = [];
+  try { await api('/api/conversation', {method: 'DELETE'}); } catch {}
+  $('chat').innerHTML = '';
+  add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn". Ask anything.');
+}
+
+// A send during a live run stops the answer; with text in the composer it
+// also sends that direction as the next message.
 async function stopRun() {
   const redirect = $('q').value.trim();
   try { await api('/api/stop', form('')); } catch {}
@@ -392,7 +451,8 @@ $('form').onsubmit = async e => {
     if (!response.ok || r.error) throw new Error(r.error || 'chat request failed');
     add('bot', r.answer || '(empty response)');
     history = r.messages || history;
-  } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); }
+    saveConversation();
+  } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); saveConversation(); }
   $('busy').style.display = 'none';
   $('allow-search').disabled = false;
   busy = false; $('send').textContent = 'Send';

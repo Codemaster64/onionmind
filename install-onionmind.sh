@@ -4226,6 +4226,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -4723,6 +4724,10 @@ def _icon(name: str, size: int = 18) -> QIcon:
         if name == "folder_plus":
             line(7, 10.8, 11, 10.8)
             line(9, 8.8, 9, 12.8)
+    elif name == "pencil":
+        line(5, 13, 12.8, 5.2)
+        line(11.4, 3.8, 14.2, 6.6)
+        line(3.6, 14.4, 5, 13)
     elif name == "archive":
         box(3, 5.5, 12, 9)
         box(2.5, 3, 13, 3, 0.8)
@@ -5854,6 +5859,7 @@ class LeftRail(QWidget):
     exportRequested = Signal()
     archiveRequested = Signal(str)
     deleteSessionRequested = Signal(str)
+    renameSessionRequested = Signal(str, str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -5997,6 +6003,15 @@ class LeftRail(QWidget):
         session_header.addWidget(archive)
         session_header.addWidget(delete_session)
         layout.addLayout(session_header)
+        self.session_filter = QLineEdit()
+        self.session_filter.setPlaceholderText("Filter sessions")
+        self.session_filter.setAccessibleName("Filter sessions by name")
+        self.session_filter.setClearButtonEnabled(True)
+        clear_filter = self.session_filter.findChild(QToolButton)
+        if clear_filter is not None:
+            clear_filter.setAccessibleName("Clear the session filter")
+        self.session_filter.textChanged.connect(self._apply_session_filter)
+        layout.addWidget(self.session_filter)
         self.sessions = QListWidget()
         self.sessions.setAccessibleName("Saved sessions")
         self.sessions.itemClicked.connect(
@@ -6014,6 +6029,11 @@ class LeftRail(QWidget):
         )
         self.session_add_action.triggered.connect(self.addSessionRequested)
         self.session_menu.addSeparator()
+        self.session_rename_action = self.session_menu.addAction(
+            _icon("pencil"), "Rename…"
+        )
+        self.session_rename_action.triggered.connect(self._rename_selected_session)
+        self.session_rename_action.setEnabled(False)
         self.session_remove_action = self.session_menu.addAction(
             _icon("archive"), "Remove from Sessions (keep archived copy)"
         )
@@ -6057,6 +6077,24 @@ class LeftRail(QWidget):
         if item is not None:
             self.archiveRequested.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
 
+    def _rename_selected_session(self) -> None:
+        item = self.sessions.currentItem()
+        if item is None:
+            return
+        session_id = _as_text(item.data(Qt.ItemDataRole.UserRole))
+        current_title = item.text().split("\n", 1)[0]
+        name, accepted = QInputDialog.getText(
+            self, "Rename session", "Session name", text=current_title
+        )
+        if accepted and name.strip():
+            self.renameSessionRequested.emit(session_id, name.strip())
+
+    def _apply_session_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        for row in range(self.sessions.count()):
+            item = self.sessions.item(row)
+            item.setHidden(bool(needle) and needle not in item.text().casefold())
+
     def _delete_selected_session(self) -> None:
         item = self.sessions.currentItem()
         if item is not None:
@@ -6095,6 +6133,7 @@ class LeftRail(QWidget):
         available = current is not None
         self.archive_button.setEnabled(available)
         self.delete_session_button.setEnabled(available)
+        self.session_rename_action.setEnabled(available)
         self.session_remove_action.setEnabled(available)
         self.session_delete_action.setEnabled(available)
 
@@ -6164,6 +6203,7 @@ class LeftRail(QWidget):
             self.sessions.addItem(item)
             if session_id == current_id:
                 self.sessions.setCurrentItem(item)
+        self._apply_session_filter(self.session_filter.text())
 
 
 class TerminalPane(QFrame):
@@ -7242,6 +7282,7 @@ class OnionmindWindow(QMainWindow):
         self.left_rail.exportRequested.connect(self.export_conversation)
         self.left_rail.archiveRequested.connect(self.archive_session)
         self.left_rail.deleteSessionRequested.connect(self.delete_session_from_machine)
+        self.left_rail.renameSessionRequested.connect(self.rename_session)
         self.main_splitter.addWidget(self.left_rail)
 
         center = QWidget()
@@ -7258,6 +7299,12 @@ class OnionmindWindow(QMainWindow):
         center_layout.addWidget(self.terminal)
         self.composer_frame = self._build_composer()
         center_layout.addWidget(self.composer_frame)
+        self.retry_button = QPushButton("Retry last turn")
+        self.retry_button.setToolTip("Ask the local model again with the same conversation")
+        self.retry_button.setAccessibleName("Retry the failed chat turn")
+        self.retry_button.clicked.connect(self._retry_last_turn)
+        self.retry_button.hide()
+        center_layout.addWidget(self.retry_button)
         self.main_splitter.addWidget(center)
 
         self.inspector = InspectorPane()
@@ -7959,6 +8006,9 @@ class OnionmindWindow(QMainWindow):
         self._inspector_requested = bool(self.settings_data.get("inspector_visible", True))
         self.toggle_rail(self._rail_requested)
         self.toggle_inspector(self._inspector_requested)
+        draft = _as_text(self.settings_data.get("composer_draft"))
+        if draft:
+            self.composer.setPlainText(draft)
 
     def reset_window_layout(self) -> None:
         """Put the workbench back to the shipped layout and forget the rest."""
@@ -8034,6 +8084,75 @@ class OnionmindWindow(QMainWindow):
         self.set_mode(mode)
         if bool(preferences.get("show_terminal_on_launch", False)):
             self.toggle_terminal(True)
+
+    # --- Session care: rename, retry, drafts, attention -----------------
+
+    def rename_session(self, session_id: str, title: str) -> None:
+        session = self.session_objects.get(session_id)
+        store = getattr(self.session_bridge, "store", None)
+        if session is None or store is None:
+            self.set_status("That session could not be renamed.")
+            return
+        session.title = title
+        try:
+            store.save(session)
+        except (TypeError, ValueError) as exc:
+            self.set_status(f"Could not rename the session: {exc}")
+            return
+        self._refresh_session_rows()
+        self.set_status(f"Session renamed to {title}.")
+
+    def _refresh_session_rows(self) -> None:
+        sessions = self.session_bridge.list()
+        self.session_objects = {
+            _as_text(_field(session, "id")): session for session in sessions
+        }
+        current_id = (
+            _as_text(_field(self.current_session, "id"))
+            if self.current_session is not None
+            else None
+        )
+        self.left_rail.set_sessions(sessions, current_id)
+
+    def _retry_last_turn(self) -> None:
+        """Ask again after a failed chat turn: the error bubble comes off the
+        history and the same conversation is re-sent locally."""
+        self.retry_button.hide()
+        if self.active_kind:
+            return
+        while (
+            self.chat_messages
+            and self.chat_messages[-1].get("role") == "assistant"
+            and _as_text(self.chat_messages[-1].get("content")).startswith(
+                ("Local inference failed", "Local inference could not continue")
+            )
+        ):
+            self.chat_messages.pop()
+        if not self.chat_messages or self.chat_messages[-1].get("role") != "user":
+            self.set_status("There is no failed chat turn to retry.")
+            return
+        self._set_active("chat")
+        self._start_chat()
+
+    def _alert_if_unfocused(self) -> None:
+        """The native attention nudge for a run that ended while another
+        window was in front."""
+        app = QApplication.instance()
+        if app is not None and not self.isActiveWindow():
+            QApplication.alert(self)
+
+    def _remember_draft(self) -> None:
+        draft = self.composer.toPlainText()
+        if draft.strip():
+            self.settings_data["composer_draft"] = draft
+        else:
+            self.settings_data.pop("composer_draft", None)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def _forget_draft(self) -> None:
+        if self.settings_data.pop("composer_draft", None) is not None and not self.demo:
+            self.settings_bridge.save(self.settings_data)
 
     def _sync_action_states(self) -> None:
         has_draft = bool(self.composer.toPlainText().strip() or self.attachments)
@@ -8648,6 +8767,7 @@ class OnionmindWindow(QMainWindow):
         self.chat_messages.append(message)
         self.transcript.add_message("user", visible_task)
         self.composer.clear()
+        self._forget_draft()
         self.clear_attachments()
         self._set_active(self.mode)
         if not self.save_current_session():
@@ -8786,8 +8906,10 @@ class OnionmindWindow(QMainWindow):
         return message, agent_task
 
     def _set_active(self, kind: Optional[str]) -> None:
+        was_running = bool(self.active_kind)
         self.active_kind = kind
         running = bool(kind)
+        self.retry_button.hide()
         self.send_button.setText("Stop" if running else "Send")
         self.send_button.setAccessibleName("Stop active run" if running else "Send task")
         if kind == "agent":
@@ -8818,6 +8940,8 @@ class OnionmindWindow(QMainWindow):
                 # Deferred through the event loop: the finishing run's own
                 # handlers are still unwinding on this stack.
                 QTimer.singleShot(0, self.submit)
+        if kind is None and was_running:
+            self._alert_if_unfocused()
         self._sync_action_states()
 
     def _start_chat(self, allow_search: bool = False) -> None:
@@ -9018,6 +9142,7 @@ class OnionmindWindow(QMainWindow):
         self.set_status(f"Local inference failed: {message}")
         self.inspector.append_activity(f"Chat turn failed: {message}")
         self._set_active(None)
+        self.retry_button.show()
         self.save_current_session()
 
     def _start_harness(self, task: str) -> None:
@@ -9468,6 +9593,7 @@ class OnionmindWindow(QMainWindow):
 
     def closeEvent(self, event: Any) -> None:
         self._save_window_layout()
+        self._remember_draft()
         self.save_current_session()
         timer = getattr(self, "tor_liveness_timer", None)
         if timer is not None:
