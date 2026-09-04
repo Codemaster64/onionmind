@@ -33,12 +33,15 @@ release downloads need no sign-in.
 
 [all downloads](https://github.com/Codemaster64/onionmind/releases) · desktop and Termux installs include the `onionmind` command
 
-**No Onionmind account · no Onionmind telemetry.** Opening Onionmind makes no
-external request and starts no network service. Local chat, project context,
-session history, and model inference stay on your computer. Every external
-action is user-triggered: Tor search is enabled per turn, and on Windows
-Onionmind then starts only Tor's background process - no Tor Browser window, no
-console - and shows its state and **Turn on / Turn off** action in one button.
+**No Onionmind account · no Onionmind telemetry.** Opening Onionmind starts no
+network service. If an enabled loopback Tor proxy is already running, Onionmind
+checks it through that proxy against the Tor Project so the green **Ready** state
+is truthful; without a listener, or after **Off**, launch makes no external
+request. Local chat, project context, session history, and model inference stay
+on your computer. Beyond that Tor-only verification, every external action is
+user-triggered: Tor search is enabled per turn, and on Windows Onionmind then
+starts only Tor's background process - no Tor Browser window or console - and
+keeps its state and action in one power button.
 A search sends its query to
 DuckDuckGo's onion service; model installation downloads weights; and agent
 traffic is routed through Tor or refused. The wrapper code is MIT-licensed;
@@ -82,10 +85,12 @@ model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
 in new terminals. SmartScreen may grumble at a self-contained script — that's
 what it does; *More info → Run anyway*.
 
-The toolbar uses one obvious Tor button for both state and action. It reads, for
-example, **Tor · Off — Turn on**, or **Tor · Proxy · port — Turn off** when it
-detects a pre-existing SOCKS listener; during startup it offers **Cancel** in
-that same button. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
+The toolbar uses one compact power button for both Tor state and action. Its
+visible label is **Tor · Off**, **Tor · Checking…**, **Tor · Ready**, or
+**Tor · Unavailable**; the border, power icon, pointer, hover and focus treatment
+make it visibly interactive, while its tooltip and accessible name state the
+next action. Ready is green only after Onionmind verifies a real Tor circuit;
+amber is reserved for the brief check. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
 cancels an active protected run, blocks new Onionmind Tor connections, and stops only the Tor
 process this Onionmind session owns. An already-running local proxy stays alive,
 but Onionmind disconnects from it until you explicitly turn Tor on again.

@@ -59,49 +59,53 @@ class TorIndicatorStateTests(unittest.TestCase):
     def test_late_startup_probe_cannot_overwrite_starting(self) -> None:
         host = self.state_host()
         host.tor_phase = "starting"
-        host.tor_status.set_status("Starting", "busy")
+        host.tor_status.set_status("Checking…", "warn")
         desktop.OnionmindWindow._tor_probe_complete(host, None, generation=1)
-        self.assertEqual(host.tor_status.status_text(), "Starting")
+        self.assertEqual(host.tor_status.status_text(), "Checking…")
         self.assertEqual(host.tor_phase, "starting")
 
     def test_unverified_listener_is_not_claimed_as_tor(self) -> None:
         host = self.state_host(port=9150)
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
-        self.assertEqual(host.tor_status.status_text(), "Proxy · 9150")
-        self.assertEqual(host.tor_phase, "proxy")
-        self.assertEqual(host.tor_status.action_text(), "Turn off")
+        self.assertEqual(host.tor_status.status_text(), "Unavailable")
+        self.assertEqual(host.tor_status.property("torState"), "error")
+        self.assertEqual(host.tor_phase, "error")
+        self.assertEqual(host.tor_status.action_text(), "Retry")
+        self.assertIn("Click to try verification again", host.tor_status.toolTip())
 
-    def test_managed_hidden_process_transitions_starting_to_running(self) -> None:
+    def test_verified_managed_process_transitions_checking_to_ready(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
-        host = self.state_host(port=9150, managed=process)
+        host = self.state_host(port=9150, managed=process, verified=9150)
         host.tor_phase = "starting"
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
-        self.assertEqual(host.tor_status.status_text(), "Running · 9150")
+        self.assertEqual(host.tor_status.status_text(), "Ready")
+        self.assertEqual(host.tor_status.text(), "Tor · Ready")
+        self.assertEqual(host.tor_status.property("torState"), "ready")
         self.assertEqual(host.tor_phase, "running")
         self.assertEqual(host.tor_status.action_text(), "Turn off")
         # A verified circuit is the updater's only window, so the Running
         # transition is exactly where the permissioned autocheck piggybacks.
         self.assertEqual(self.autochecks, ["autocheck"])
 
-    def test_unverified_proxy_transition_does_not_autocheck_updates(self) -> None:
-        host = self.state_host(port=9150)
+    def test_unverified_managed_process_is_not_ready_or_green(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        host = self.state_host(port=9150, managed=process)
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
-        self.assertEqual(host.tor_status.status_text(), "Proxy · 9150")
+        self.assertEqual(host.tor_status.status_text(), "Unavailable")
+        self.assertEqual(host.tor_status.property("torState"), "error")
         self.assertEqual(self.autochecks, [])
 
-    def test_toolbar_start_replaces_starting_message_after_proxy_is_ready(self) -> None:
-        host = self.state_host(port=9150)
+    def test_toolbar_start_replaces_checking_with_verified_ready(self) -> None:
+        host = self.state_host(port=9150, verified=9150)
         host.tor_phase = "starting"
         host.tor_stop_event = object()
         host._show_local_tor_state = lambda port: desktop.OnionmindWindow._show_local_tor_state(host, port)
         desktop.OnionmindWindow._toolbar_tor_started(host, 9150, generation=2)
-        self.assertEqual(host.tor_status.status_text(), "Proxy · 9150")
+        self.assertEqual(host.tor_status.status_text(), "Ready")
         self.assertEqual(host.tor_status.action_text(), "Turn off")
-        self.assertEqual(
-            self.status_messages,
-            ["Tor proxy available on local port 9150; protected features verify it before use."],
-        )
+        self.assertEqual(self.status_messages, ["Tor ready on local port 9150."])
 
     def test_exited_managed_process_transitions_running_to_off(self) -> None:
         process = mock.Mock()
@@ -120,7 +124,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         self.assertEqual(host.tor_phase, "off")
         self.assertEqual(host.tor_status.action_text(), "Turn on")
 
-    def test_replacement_listener_downgrades_running_to_unverified_proxy(self) -> None:
+    def test_replacement_listener_downgrades_ready_to_unavailable(self) -> None:
         process = mock.Mock()
         process.poll.return_value = 1
         host = self.state_host(port=9150, managed=process, verified=9150)
@@ -133,8 +137,8 @@ class TorIndicatorStateTests(unittest.TestCase):
         host.core.stop_managed_tor = stop
         host._show_local_tor_state = lambda port: desktop.OnionmindWindow._show_local_tor_state(host, port)
         desktop.OnionmindWindow._poll_tor_liveness(host)
-        self.assertEqual(host.tor_status.status_text(), "Proxy · 9150")
-        self.assertEqual(host.tor_phase, "proxy")
+        self.assertEqual(host.tor_status.status_text(), "Unavailable")
+        self.assertEqual(host.tor_phase, "error")
 
     def test_live_owned_process_without_listener_is_stopped_before_off(self) -> None:
         process = mock.Mock()

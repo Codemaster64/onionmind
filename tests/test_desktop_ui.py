@@ -74,7 +74,7 @@ class DesktopUiTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_tor_status_is_the_single_explicit_button_that_starts_tor(self) -> None:
-        """The status itself is a visible native button with its action in the label."""
+        """The compact status itself is a native power button with clear semantics."""
         window = self._window()
         try:
             calls: list[bool] = []
@@ -90,6 +90,7 @@ class DesktopUiTests(unittest.TestCase):
                 return 9150
 
             window.core.start_tor_hidden = fake_start
+            window.core.tor_check = lambda: setattr(window.core, "_port", 9150)
             window.core._managed_tor_process = None
             window.core._port = None
             window._show_local_tor_state(None)    # demo state opens on "running"
@@ -97,7 +98,9 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(window.tor_status.isVisible())
             self.assertEqual(window.tor_status.status_text(), "Off")
             self.assertEqual(window.tor_status.action_text(), "Turn on")
-            self.assertIn("Off  —  Turn on", window.tor_status.text())
+            self.assertEqual(window.tor_status.text(), "Tor · Off")
+            self.assertEqual(window.tor_status.property("torState"), "off")
+            self.assertFalse(window.tor_status.icon().isNull())
             self.assertEqual(
                 window.tor_status.accessibleName(),
                 "Tor status: Off. Turn on Tor proxy",
@@ -107,27 +110,30 @@ class DesktopUiTests(unittest.TestCase):
             window.tor_status.click()
             self.assertTrue(
                 self._wait_until(
-                    lambda: bool(calls) and window.tor_phase in ("running", "proxy")
+                    lambda: bool(calls) and window.tor_phase == "running"
                 )
             )
-            self.assertIn("9150", window.tor_status.status_text())
+            self.assertEqual(window.tor_status.status_text(), "Ready")
+            self.assertEqual(window.tor_status.text(), "Tor · Ready")
+            self.assertEqual(window.tor_status.property("torState"), "ready")
             self.assertEqual(window.tor_status.action_text(), "Turn off")
         finally:
             self._close(window)
 
-    def test_tor_button_click_during_startup_probe_starts_rather_than_cancels(self) -> None:
-        """A real window opens in the "probing" phase, not "off". Treating that
-        as a start-in-progress made the first click after launch stop Tor."""
+    def test_tor_button_click_during_startup_check_turns_tor_off(self) -> None:
+        """Checking is an on state, so the same power button turns it off."""
         window = self._window()
         try:
             started: list[bool] = []
             window.core.start_tor_hidden = lambda *a, **k: (started.append(True), 9150)[1]
             window.tor_phase = "probing"
+            window.tor_status.set_status("Checking…", "warn")
             window.tor_status.click()
             self.app.processEvents()
-            self.assertEqual(window.tor_phase, "starting")
-            self.assertEqual(window.tor_status.action_text(), "Cancel")
-            self.assertTrue(self._wait_until(lambda: bool(started)))
+            self.assertEqual(window.tor_phase, "off")
+            self.assertEqual(window.tor_status.status_text(), "Off")
+            self.assertEqual(window.tor_status.action_text(), "Turn on")
+            self.assertEqual(started, [])
         finally:
             self._close(window)
 
@@ -154,7 +160,7 @@ class DesktopUiTests(unittest.TestCase):
             stopped.clear()
             enabled["value"] = True
             window.core._managed_tor_process = None
-            window.core._port = None
+            window.core._port = 9150
             window._show_local_tor_state(9150)
             self.assertEqual(window.tor_status.action_text(), "Turn off")
             window.active_kind = "chat"
@@ -601,7 +607,7 @@ class DesktopUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(window.repo_label.isHidden())
         self.assertFalse(window.tor_status.isHidden())
-        self.assertIn("—", window.tor_status.text())
+        self.assertEqual(window.tor_status.text(), "Tor · Ready")
         self.assertTrue(window.left_rail.isHidden())
         self.assertTrue(window.inspector.isHidden())
         self.assertFalse(window.rail_toggle.isChecked())
@@ -727,7 +733,7 @@ class DesktopUiTests(unittest.TestCase):
         window = self._window()
         window.demo = False
         core = window.core
-        core._port = None
+        core._port = 9150
         enabled = {"value": True}
         core.tor_enabled = lambda: enabled["value"]
         core.set_tor_enabled = lambda value: enabled.update(value=bool(value))
@@ -745,16 +751,16 @@ class DesktopUiTests(unittest.TestCase):
         core._managed_tor_process = managed
         core.stop_managed_tor = lambda: stopped.append(True) or setattr(managed, "alive", False)
         window._show_local_tor_state(9150)
-        self.assertEqual(window.tor_status.status_text(), "Running · 9150")
+        self.assertEqual(window.tor_status.status_text(), "Ready")
         self.assertEqual(window.tor_phase, "running")
         self.assertEqual(window.tor_status.action_text(), "Turn off")
 
-        # A listener that answers but was never verified stays a warning, never "ready".
+        # A listener that answers but was never verified is an error, never "ready".
         core._managed_tor_process = None
         window._show_local_tor_state(9151)
-        self.assertEqual(window.tor_status.status_text(), "Proxy · 9151")
-        self.assertEqual(window.tor_phase, "proxy")
-        self.assertEqual(window.tor_status.action_text(), "Turn off")
+        self.assertEqual(window.tor_status.status_text(), "Unavailable")
+        self.assertEqual(window.tor_phase, "error")
+        self.assertEqual(window.tor_status.action_text(), "Retry")
 
         window._show_local_tor_state(None)
         self.assertEqual(window.tor_status.status_text(), "Off")

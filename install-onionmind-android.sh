@@ -345,7 +345,16 @@ def tor_check():
         except Exception:
             continue
         if r.get("IsTor"):
+            # The desktop may turn Tor off while this request is in flight.
+            # Check on both sides of the pin; set_tor_enabled(False) also clears
+            # it, so every possible ordering ends fail-closed.
+            if not _tor_enabled:
+                _port = None
+                sys.exit("Tor proxy was turned off before verification completed.")
             _port = port
+            if not _tor_enabled:
+                _port = None
+                sys.exit("Tor proxy was turned off before verification completed.")
             print(f"[tor] active, exit {r.get('IP')} (port {port})", file=sys.stderr)
             return
         print(f"[tor] port {port} responded but is NOT Tor - refusing", file=sys.stderr)

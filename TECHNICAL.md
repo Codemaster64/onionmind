@@ -298,10 +298,18 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 
 The Windows installer installs Tor Browser as the source of `tor.exe`, but does
 not launch `firefox.exe` or start a network service. The desktop toolbar keeps a
-single native Tor button whose text includes both the current status and its
-explicit next action: **Turn on**, **Cancel**, or **Turn off**. Turn on launches only `tor.exe` hidden
+single compact native power button for both state and action. Its visible states
+are **Off**, **Checking…**, **Ready**, and **Unavailable**; action wording lives
+in the tooltip and accessible name. Ready is green only after `tor_check()` has
+verified and pinned a Tor circuit. Merely finding a SOCKS listener never produces
+the green state. Turn on launches only `tor.exe` hidden
 on port 9150; a standalone daemon on 9050 or an existing listener on 9150 is
 reused instead.
+
+At desktop startup, Onionmind first checks for a loopback SOCKS listener. If one
+exists and Tor is enabled, the app verifies it via `check.torproject.org` through
+that listener before showing Ready; there is no direct-network fallback. With no
+listener, or after the user turns Tor off, startup makes no verification request.
 
 Turn off clears Onionmind's pinned Tor circuit immediately. If this Onionmind
 session started the hidden daemon it stops that process too. If another program
@@ -309,7 +317,8 @@ owns the listener, that process stays alive, but Onionmind's Tor paths remain
 disabled and fail closed until the toolbar explicitly turns them on again. This
 desktop also requests cancellation of an active protected run; a blocking OS
 read may take its normal timeout to unwind, but no new Tor check can pass the
-gate. This session-local gate is not a saved preference. The control transitions and
+gate, and a check already in flight cannot re-pin its port after the gate closes.
+This session-local gate is not a saved preference. The control transitions and
 external-listener behavior are exercised by `tests/test_desktop_ui.py` and
 `tests/test_desktop_tor_ui.py`; `tests/test_privacy_contracts.py` verifies that
 the off gate refuses before either a socket probe or an external request.
@@ -684,7 +693,7 @@ rate-limited — retry for a new circuit.
 
 ### `No Tor proxy on 9150/9050`
 
-In the desktop workbench, select the Tor status button showing **Turn on** and retry.
+In the desktop workbench, select the **Tor · Off** power button and retry.
 The workbench starts only the hidden Tor process, not a browser window. In the
 CLI, start a local Tor service or Tor Browser and retry. This message means the
 tool **refused to search** rather than leaking — working as intended.

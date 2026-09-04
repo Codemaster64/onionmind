@@ -189,6 +189,20 @@ class BackgroundTorTests(unittest.TestCase):
             onionmind.tor_check()
         self.assertIsNone(onionmind._port)
 
+    def test_turning_tor_off_during_verification_cannot_repin_the_port(self) -> None:
+        response = mock.Mock()
+
+        def finish_after_off():
+            onionmind.set_tor_enabled(False)
+            return {"IsTor": True, "IP": "127.0.0.2"}
+
+        response.json.side_effect = finish_after_off
+        with mock.patch.object(onionmind.requests, "get", return_value=response), \
+             self.assertRaisesRegex(SystemExit, "turned off"):
+            onionmind.tor_check()
+        self.assertFalse(onionmind.tor_enabled())
+        self.assertIsNone(onionmind._port)
+
 
 class DistributionPrivacyTests(unittest.TestCase):
     def text(self, name: str) -> str:
@@ -283,13 +297,18 @@ class DistributionPrivacyTests(unittest.TestCase):
         self.assertIn("$lnk.TargetPath = $powerShellPath", updater)
         self.assertNotIn("$lnk.TargetPath = 'powershell.exe'", updater)
 
-    def test_desktop_startup_uses_only_the_local_tor_probe(self) -> None:
+    def test_desktop_startup_verifies_a_detected_listener_through_core(self) -> None:
         desktop = self.text("onionmind_desktop.py")
         start = desktop.index("    def _probe_services(self) -> None:")
         end = desktop.index("    def _start_worker", start)
         probe = desktop[start:end]
         self.assertIn('getattr(self.core, "tor_proxy_port", None)', probe)
-        self.assertNotIn("tor_check", probe)
+        self.assertIn("self._verify_tor()", probe)
+        verify_start = desktop.index("    def _verify_tor(self, stop_event=None)")
+        verify_end = desktop.index("    def announce_tor_starting", verify_start)
+        verify = desktop[verify_start:verify_end]
+        self.assertIn('getattr(self.core, "tor_check", None)', verify)
+        self.assertNotIn("requests.", probe + verify)
         self.assertIn('QCheckBox("Allow Tor search this turn")', desktop)
         self.assertIn("starter(stop_event=stop_event)", desktop)
         self.assertNotIn("turn_stream(history, on_text, stop_event)", desktop)
