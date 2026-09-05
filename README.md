@@ -85,12 +85,14 @@ model download (10–16 GB, resumable), get the desktop icon *and* `onionmind`
 in new terminals. SmartScreen may grumble at a self-contained script — that's
 what it does; *More info → Run anyway*.
 
-The toolbar uses one compact power button for both Tor state and action. Its
-visible label is **Tor · Off**, **Tor · Checking…**, **Tor · Ready**, or
-**Tor · Unavailable**; the border, power icon, pointer, hover and focus treatment
-make it visibly interactive, while its tooltip and accessible name state the
-next action. Ready is green only after Onionmind verifies a real Tor circuit;
-amber is reserved for the brief check. **Turn on** starts `tor.exe` hidden, never `firefox.exe`. **Turn off**
+The toolbar uses one prominent circular power target for both Tor state and
+action, with the status label inside the same click area. It says only **Tor is
+off** or **Tor is on**. The disc turns into an amber progress ring while Onionmind
+verifies the connection; its tooltip and accessible name state the next action.
+**Tor is on** appears green only after Onionmind verifies a real Tor circuit.
+While starting or unavailable, the label conservatively remains **Tor is off**
+and the supporting status message explains what is happening. **Turn on** starts
+`tor.exe` hidden, never `firefox.exe`. **Turn off**
 cancels an active protected run, blocks new Onionmind Tor connections, and stops only the Tor
 process this Onionmind session owns. An already-running local proxy stays alive,
 but Onionmind disconnects from it until you explicitly turn Tor on again.

@@ -237,7 +237,7 @@ Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, r
 ### Status and Privacy
 
 - **Status containers:** compact 4px radius, 4px × 8px padding, a 6px state dot inside a 10px indicator, and a textual prefix plus value.
-- **Tor control:** use one compact native power button for both status and action. Visible copy stays scannable (`Tor · Off`, `Tor · Checking…`, `Tor · Ready`, `Tor · Unavailable`); tooltip and accessibility copy name the next action. Gray means off, amber is only the transient check, green requires a verified Tor circuit, and red means retry is needed. An external proxy remains controllable as an Onionmind connection without implying its process will be killed.
+- **Tor control:** translate the selected circular power-target direction into the compact toolbar: a prominent 32px state disc and binary label share one native button and click target. The disc carries an authored power glyph at rest and becomes an amber progress ring during verification. Visible copy remains `Tor is off` or `Tor is on`; tooltip, accessibility copy, and the status bar carry transitional detail and name the next action. Green `Tor is on` requires a verified Tor circuit. Startup and error states conservatively retain `Tor is off`. An external proxy remains controllable as an Onionmind connection without implying its process will be killed.
 - **Privacy boundary:** present Onionmind inference, Tor-routed Chat search, and Agent networking as separate sentences and states. Success green may support “Local inference,” but wording carries the meaning.
 
 **The Honest State Rule.** Onionmind model, Tor, Agent, permission, activity, and observed-change states are always named in text and never encoded by color alone.

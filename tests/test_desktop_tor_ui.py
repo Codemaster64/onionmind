@@ -62,13 +62,53 @@ class TorIndicatorStateTests(unittest.TestCase):
         host.tor_status.set_status("Checking…", "warn")
         desktop.OnionmindWindow._tor_probe_complete(host, None, generation=1)
         self.assertEqual(host.tor_status.status_text(), "Checking…")
+        self.assertEqual(host.tor_status.text(), "Tor is off")
         self.assertEqual(host.tor_phase, "starting")
+
+    def test_visible_copy_is_only_on_or_off(self) -> None:
+        control = desktop.StatusActionButton("Tor", "Off", "idle", "Turn on")
+        for status, state, expected in (
+            ("Off", "idle", "Tor is off"),
+            ("Checking…", "warn", "Tor is off"),
+            ("Unavailable", "bad", "Tor is off"),
+            ("Ready", "good", "Tor is on"),
+        ):
+            with self.subTest(status=status):
+                control.set_status(status, state)
+                self.assertEqual(control.text(), expected)
+                self.assertTrue(control.accessibleName().startswith(expected + "."))
+                self.assertEqual(control.iconSize().width(), 32)
+                self.assertEqual(control.iconSize().height(), 32)
+
+    def test_connecting_state_animates_the_circular_target_then_stops(self) -> None:
+        with mock.patch.object(desktop, "_ui_animations_enabled", return_value=True):
+            control = desktop.StatusActionButton("Tor", "Off", "idle", "Turn on")
+            control.show()
+            self.app.processEvents()
+            control.set_status("Checking…", "warn")
+            self.assertTrue(control._spinner_timer.isActive())
+            first_frame = control.icon().cacheKey()
+            control._advance_spinner()
+            self.assertNotEqual(control.icon().cacheKey(), first_frame)
+            control.set_status("Ready", "good")
+            self.assertFalse(control._spinner_timer.isActive())
+            control.close()
+
+        with mock.patch.object(desktop, "_ui_animations_enabled", return_value=False):
+            control = desktop.StatusActionButton("Tor", "Off", "idle", "Turn on")
+            control.show()
+            self.app.processEvents()
+            control.set_status("Checking…", "warn")
+            self.assertFalse(control._spinner_timer.isActive())
+            self.assertFalse(control.icon().isNull())
+            control.close()
 
     def test_unverified_listener_is_not_claimed_as_tor(self) -> None:
         host = self.state_host(port=9150)
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.status_text(), "Unavailable")
         self.assertEqual(host.tor_status.property("torState"), "error")
+        self.assertEqual(host.tor_status.text(), "Tor is off")
         self.assertEqual(host.tor_phase, "error")
         self.assertEqual(host.tor_status.action_text(), "Retry")
         self.assertIn("Click to try verification again", host.tor_status.toolTip())
@@ -81,7 +121,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         host.tor_phase = "starting"
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.status_text(), "Ready")
-        self.assertEqual(host.tor_status.text(), "Tor · Ready")
+        self.assertEqual(host.tor_status.text(), "Tor is on")
         self.assertEqual(host.tor_status.property("torState"), "ready")
         self.assertEqual(host.tor_phase, "running")
         self.assertEqual(host.tor_status.action_text(), "Turn off")
@@ -96,6 +136,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._show_local_tor_state(host, 9150)
         self.assertEqual(host.tor_status.status_text(), "Unavailable")
         self.assertEqual(host.tor_status.property("torState"), "error")
+        self.assertEqual(host.tor_status.text(), "Tor is off")
         self.assertEqual(self.autochecks, [])
 
     def test_toolbar_start_replaces_checking_with_verified_ready(self) -> None:

@@ -298,13 +298,15 @@ is 6× faster than the 27B at Q4_K_M for exactly that reason.
 
 The Windows installer installs Tor Browser as the source of `tor.exe`, but does
 not launch `firefox.exe` or start a network service. The desktop toolbar keeps a
-single compact native power button for both state and action. Its visible states
-are **Off**, **Checking…**, **Ready**, and **Unavailable**; action wording lives
-in the tooltip and accessible name. Ready is green only after `tor_check()` has
-verified and pinned a Tor circuit. Merely finding a SOCKS listener never produces
-the green state. Turn on launches only `tor.exe` hidden
-on port 9150; a standalone daemon on 9050 or an existing listener on 9150 is
-reused instead.
+single circular power target and its status label inside one native button. Its
+visible label says only **Tor is off** or **Tor is on**; during verification the
+disc becomes an amber progress ring, while action wording and transitional detail
+live in the tooltip, accessible description, and status bar. **Tor is on** is
+green only after `tor_check()` has verified and pinned a Tor circuit. During
+startup or an error the conservative visible state remains **Tor is off**. Merely
+finding a SOCKS listener never produces the green state. Turn on launches only
+`tor.exe` hidden on port 9150; a standalone daemon on 9050 or an existing
+listener on 9150 is reused instead.
 
 At desktop startup, Onionmind first checks for a loopback SOCKS listener. If one
 exists and Tor is enabled, the app verifies it via `check.torproject.org` through
@@ -693,7 +695,7 @@ rate-limited — retry for a new circuit.
 
 ### `No working Tor connection found`
 
-In the desktop workbench, select the **Tor · Off** power button and retry.
+In the desktop workbench, select the **Tor is off** power button and retry.
 The workbench starts only the hidden Tor process, not a browser window. In the
 CLI, start a local Tor service or Tor Browser and retry. This message means the
 tool **refused to search** rather than leaking — working as intended.

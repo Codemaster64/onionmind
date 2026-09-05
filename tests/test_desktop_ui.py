@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QEvent, QProcess, QStandardPaths, Qt, QTimer
+    from PySide6.QtCore import QEvent, QProcess, QSize, QStandardPaths, Qt, QTimer
     from PySide6.QtGui import QFontDatabase, QKeyEvent
     from PySide6.QtWidgets import (
         QApplication,
@@ -98,12 +98,14 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(window.tor_status.isVisible())
             self.assertEqual(window.tor_status.status_text(), "Off")
             self.assertEqual(window.tor_status.action_text(), "Turn on")
-            self.assertEqual(window.tor_status.text(), "Tor · Off")
+            self.assertEqual(window.tor_status.text(), "Tor is off")
             self.assertEqual(window.tor_status.property("torState"), "off")
             self.assertFalse(window.tor_status.icon().isNull())
+            self.assertEqual(window.tor_status.iconSize(), QSize(32, 32))
+            self.assertGreaterEqual(window.tor_status.height(), 40)
             self.assertEqual(
                 window.tor_status.accessibleName(),
-                "Tor status: Off. Turn on Tor proxy",
+                "Tor is off. Turn on Tor proxy",
             )
             self.assertNotEqual(window.tor_status.focusPolicy(), Qt.FocusPolicy.NoFocus)
             self.assertFalse(hasattr(window, "tor_toggle"))
@@ -114,20 +116,21 @@ class DesktopUiTests(unittest.TestCase):
                 )
             )
             self.assertEqual(window.tor_status.status_text(), "Ready")
-            self.assertEqual(window.tor_status.text(), "Tor · Ready")
+            self.assertEqual(window.tor_status.text(), "Tor is on")
             self.assertEqual(window.tor_status.property("torState"), "ready")
             self.assertEqual(window.tor_status.action_text(), "Turn off")
         finally:
             self._close(window)
 
     def test_tor_button_click_during_startup_check_turns_tor_off(self) -> None:
-        """Checking is an on state, so the same power button turns it off."""
+        """The label stays off while checking, and the same button cancels it."""
         window = self._window()
         try:
             started: list[bool] = []
             window.core.start_tor_hidden = lambda *a, **k: (started.append(True), 9150)[1]
             window.tor_phase = "probing"
             window.tor_status.set_status("Checking…", "warn")
+            self.assertEqual(window.tor_status.text(), "Tor is off")
             window.tor_status.click()
             self.app.processEvents()
             self.assertEqual(window.tor_phase, "off")
@@ -607,7 +610,7 @@ class DesktopUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(window.repo_label.isHidden())
         self.assertFalse(window.tor_status.isHidden())
-        self.assertEqual(window.tor_status.text(), "Tor · Ready")
+        self.assertEqual(window.tor_status.text(), "Tor is on")
         self.assertTrue(window.left_rail.isHidden())
         self.assertTrue(window.inspector.isHidden())
         self.assertFalse(window.rail_toggle.isChecked())

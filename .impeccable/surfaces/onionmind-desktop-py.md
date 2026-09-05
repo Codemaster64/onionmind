@@ -25,7 +25,7 @@ The balanced workbench keeps the transcript primary, with projects and sessions 
 
 | Visible ingredient | Commitment | Implementation medium |
 | --- | --- | --- |
-| Native top toolbar | Repository, branch, model service, model tier, and one native Tor button showing both state and action stay visible | Qt Widgets layouts and controls |
+| Native top toolbar | Repository, branch, model service, model tier, and one native Tor button showing the verified binary state and providing its action stay visible | Qt Widgets layouts and controls |
 | Project/session rail | 224px default; New task, Open folder, recent sessions, Models and Settings | Qt Widgets list views and buttons |
 | Agent transcript | Largest region; literal, selectable user/assistant turns plus grouped tool and status rows | Accessible Qt plain-text labels and authored activity rows |
 | Inspector | 292px default with Context, Changes, Activity; changes show real git data | Qt tab widget, lists, and monospace diff viewer |
@@ -37,7 +37,7 @@ The balanced workbench keeps the transcript primary, with projects and sessions 
 ## Interaction and responsive behavior
 
 - Keyboard first: Ctrl+N new task, Ctrl+O open folder, Ctrl+L focus composer, Ctrl+, settings, Ctrl+` toggle terminal, Ctrl+Shift+I toggle inspector, Escape stops an active run.
-- Tor uses one visually explicit native button whose label includes both state and action: Turn on, Cancel, or Turn off. Disconnecting from an external proxy never claims to terminate that outside process.
+- Tor uses one visually explicit native button, translating the selected circular power-target reference into a 32px state disc plus label inside the same toolbar click area. The disc becomes an amber progress ring while verifying; the label says only `Tor is on` or `Tor is off`, and its tooltip and accessible name carry Turn on, Cancel, Retry, or Turn off. Disconnecting from an external proxy never claims to terminate that outside process.
 - The workbench remembers window size, splitter widths, and requested pane visibility between launches; Settings offers Reset window layout, and the responsive width rules still override a remembered layout at narrow sizes.
 - Workbench preferences — text size (System default / Compact / Comfortable, scaled from the captured platform font), Enter-to-send (Ctrl+Enter sends when off), the mode to start in, the terminal drawer on launch, and animation (system / reduced / full) — live in Settings, apply immediately, and persist in settings.json. The Tor boundary and the updater permission are deliberately not preferences.
 - At narrow widths the inspector collapses first, then the left rail; both remain reachable from toolbar actions.
