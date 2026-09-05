@@ -101,7 +101,7 @@ class DesktopUiTests(unittest.TestCase):
             self.assertEqual(window.tor_status.text(), "Tor is off")
             self.assertEqual(window.tor_status.property("torState"), "off")
             self.assertFalse(window.tor_status.icon().isNull())
-            self.assertEqual(window.tor_status.iconSize(), QSize(32, 32))
+            self.assertEqual(window.tor_status.iconSize(), QSize(36, 36))
             self.assertGreaterEqual(window.tor_status.height(), 40)
             self.assertEqual(
                 window.tor_status.accessibleName(),

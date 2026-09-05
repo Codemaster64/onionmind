@@ -4875,23 +4875,23 @@ QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; col
 QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
 QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
 QPushButton#torStatusAction {
-    background: transparent;
-    border-color: transparent;
-    border-radius: 6px;
+    background: #211f1c;
+    border: 1px solid #514b44;
+    border-radius: 7px;
     color: #c8c0b7;
     font-weight: 600;
-    min-width: 112px;
-    min-height: 32px;
-    padding: 3px 9px 3px 4px;
+    min-width: 116px;
+    min-height: 36px;
+    padding: 2px 10px 2px 3px;
     text-align: left;
 }
-QPushButton#torStatusAction[torState="ready"] { color: #a9d4b2; }
-QPushButton#torStatusAction[torState="checking"] { color: #dfbf7d; }
-QPushButton#torStatusAction[torState="error"] { color: #e49a89; }
-QPushButton#torStatusAction:hover { background: #292724; border-color: #5a554d; }
+QPushButton#torStatusAction[torState="ready"] { background: #1d2720; border-color: #527c5c; color: #a9d4b2; }
+QPushButton#torStatusAction[torState="checking"] { background: #292318; border-color: #806a40; color: #dfbf7d; }
+QPushButton#torStatusAction[torState="error"] { background: #2b1f1c; border-color: #8d574d; color: #e49a89; }
+QPushButton#torStatusAction:hover { background: #2e2b27; border-color: #81786e; }
 QPushButton#torStatusAction:focus { background: #24221f; border-color: #a481b4; }
 QPushButton#torStatusAction:pressed { background: #191816; border-color: #b793c6; }
-QPushButton#torStatusAction:disabled { background: transparent; border-color: transparent; color: #817982; }
+QPushButton#torStatusAction:disabled { background: #1c1a18; border-color: #3d3934; color: #817982; }
 QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #5b554e; }
@@ -5316,44 +5316,45 @@ def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
     return QIcon(canvas)
 
 
-def _tor_control_icon(state: str, angle: int = 0, size: int = 32) -> QIcon:
-    """Render the 1B-style circular power target and verification spinner."""
+def _tor_control_icon(state: str, angle: int = 0, size: int = 36) -> QIcon:
+    """Render one clean 1B-style power target or one verification spinner."""
     colors = {
-        "off": ("#34312e", "#5a554d", "#d2cac1", "#00000000"),
-        "ready": ("#4f7c5a", "#78b889", "#fbfff9", "#00000000"),
-        "checking": ("#51452f", "#8d7445", "#f0c97e", "#4b402d"),
-        "error": ("#58332d", "#985e52", "#f1aa9b", "#00000000"),
+        "off": ("#3a3733", "#ddd5cc"),
+        "ready": ("#4f7c5a", "#ffffff"),
+        "checking": ("#453b2b", "#f0c97e"),
+        "error": ("#633a33", "#ffd2c8"),
     }
-    fill, border, ink, halo = colors.get(state, colors["off"])
+    fill, ink = colors.get(state, colors["off"])
     canvas = QPixmap(size, size)
     canvas.fill(Qt.GlobalColor.transparent)
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.scale(size / 36.0, size / 36.0)
     painter.setPen(Qt.PenStyle.NoPen)
-    if state == "checking":
-        painter.setBrush(QColor(halo))
-        painter.drawEllipse(QRectF(0.75, 0.75, size - 1.5, size - 1.5))
-
-    disc = QRectF(3.5, 3.5, size - 7.0, size - 7.0)
-    painter.setBrush(QColor(0, 0, 0, 70))
-    painter.drawEllipse(disc.translated(0.0, 1.5))
-    disc_pen = QPen(QColor(border))
-    disc_pen.setWidthF(1.1)
-    painter.setPen(disc_pen)
     painter.setBrush(QColor(fill))
-    painter.drawEllipse(disc)
-
-    glyph_pen = QPen(QColor(ink))
-    glyph_pen.setWidthF(2.15)
-    glyph_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    glyph_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(glyph_pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
     if state == "checking":
-        painter.drawArc(QRectF(9.5, 9.5, 13.0, 13.0), (90 - angle) * 16, 270 * 16)
+        # The connecting state is deliberately a single spinner on a quiet
+        # halo: no power glyph, inset disc border, or second ring competes with it.
+        painter.drawEllipse(QRectF(2.0, 2.0, 32.0, 32.0))
+        spinner_pen = QPen(QColor(ink))
+        spinner_pen.setWidthF(2.6)
+        spinner_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(spinner_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(QRectF(7.0, 7.0, 22.0, 22.0), (90 - angle) * 16, 270 * 16)
     else:
-        painter.drawLine(QPointF(16.0, 8.5), QPointF(16.0, 15.7))
-        painter.drawArc(QRectF(9.5, 11.0, 13.0, 13.0), 45 * 16, 270 * 16)
+        # At rest the filled target and the correctly oriented power symbol are
+        # the only two layers. The arc leaves its gap at twelve o'clock, clear of
+        # the stem, instead of reading as a clipped C-shaped ring.
+        painter.drawEllipse(QRectF(2.0, 2.0, 32.0, 32.0))
+        glyph_pen = QPen(QColor(ink))
+        glyph_pen.setWidthF(2.6)
+        glyph_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        glyph_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(glyph_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(QPointF(18.0, 7.0), QPointF(18.0, 17.0))
+        painter.drawArc(QRectF(9.0, 9.0, 18.0, 18.0), 135 * 16, 270 * 16)
     painter.end()
     return QIcon(canvas)
 
@@ -5599,7 +5600,7 @@ class StatusActionButton(QPushButton):
 
     def _update_state_icon(self) -> None:
         self.setIcon(_tor_control_icon(self._visual_state, self._spinner_angle))
-        self.setIconSize(QSize(32, 32))
+        self.setIconSize(QSize(36, 36))
 
     def _advance_spinner(self) -> None:
         self._spinner_angle = (self._spinner_angle + 30) % 360

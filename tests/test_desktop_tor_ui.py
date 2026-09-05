@@ -77,8 +77,32 @@ class TorIndicatorStateTests(unittest.TestCase):
                 control.set_status(status, state)
                 self.assertEqual(control.text(), expected)
                 self.assertTrue(control.accessibleName().startswith(expected + "."))
-                self.assertEqual(control.iconSize().width(), 32)
-                self.assertEqual(control.iconSize().height(), 32)
+                self.assertEqual(control.iconSize().width(), 36)
+                self.assertEqual(control.iconSize().height(), 36)
+
+    def test_control_keeps_a_visible_button_surface_and_border_at_rest(self) -> None:
+        rule = desktop._STYLE_TEMPLATE.split("QPushButton#torStatusAction {", 1)[1].split("}", 1)[0]
+        self.assertIn("background: #211f1c", rule)
+        self.assertIn("border: 1px solid #514b44", rule)
+        self.assertNotIn("transparent", rule)
+
+    def test_connecting_icon_is_spinner_only_and_power_icon_stays_inside_target(self) -> None:
+        ready = desktop._tor_control_icon("ready").pixmap(36, 36).toImage()
+        checking = desktop._tor_control_icon("checking").pixmap(36, 36).toImage()
+
+        # The ready icon's stem is present in the center; connecting leaves the
+        # center as the flat halo color instead of stacking a power glyph there.
+        stem = ready.pixelColor(18, 13)
+        self.assertGreaterEqual(min(stem.red(), stem.green(), stem.blue()), 245)
+        gap = ready.pixelColor(14, 10)
+        self.assertGreater(gap.green(), gap.red())
+        self.assertEqual(checking.pixelColor(18, 18), checking.pixelColor(18, 17))
+
+        # Neither authored shape reaches the canvas edge, which catches clipped
+        # circles when the compact toolbar target is resized again.
+        for image in (ready, checking):
+            for point in ((0, 18), (35, 18), (18, 0), (18, 35)):
+                self.assertEqual(image.pixelColor(*point).alpha(), 0)
 
     def test_connecting_state_animates_the_circular_target_then_stops(self) -> None:
         with mock.patch.object(desktop, "_ui_animations_enabled", return_value=True):
