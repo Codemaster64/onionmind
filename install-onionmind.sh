@@ -72,6 +72,15 @@ if [ "$DISTRO" = mac ]; then
       python3 -m pip install --user --quiet --break-system-packages requests PySocks ||
       warn "python deps failed - run 'python3 -m pip install --user requests PySocks' and rerun"
   fi
+  # tkinter is only the classic-UI fallback here - the workbench runs PySide6
+  # out of its own venv - so this warns instead of installing. Xcode CLT's
+  # python3 already ships tkinter; brew's does not, and brew has no plain
+  # `python-tk`, only versioned formulae, so name the one matching the python3
+  # actually on PATH rather than guess a version that may not exist.
+  if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
+    PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3.13)
+    warn "tkinter missing from this python3 - the classic UI fallback will not start. Install it with: brew install python-tk@${PYVER}"
+  fi
 elif [ "$DISTRO" = arch ]; then
   case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
   # tkinter on Arch comes from `tk`, which `python` lists as an optional

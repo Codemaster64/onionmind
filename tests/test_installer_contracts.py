@@ -33,6 +33,14 @@ class InstallerContractTests(unittest.TestCase):
         debian = sh[sh.index("apt-get install -y tor"):]
         self.assertIn("python3-tk", debian[: debian.index("\n")])
 
+        # Homebrew has the same trap as Arch: there is no plain python-tk
+        # formula, only versioned ones, so a bare name would fail the same way.
+        mac = sh[sh.index('"$DISTRO" = mac'):]
+        mac = mac[: mac.index('elif [ "$DISTRO" = arch')]
+        self.assertIn("python-tk@", mac)
+        for bare in ('python-tk ', 'python-tk"', 'python-tk\n'):
+            self.assertNotIn(bare, mac)
+
     def test_download_links_point_at_release_assets_not_raw_files(self) -> None:
         """A raw github link renders the script; a release asset downloads it.
 
