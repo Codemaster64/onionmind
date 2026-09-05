@@ -4125,16 +4125,16 @@ class OnionmindWindow(QMainWindow):
             self._maybe_autocheck_updates()
             if managed_running:
                 self.tor_status.setToolTip(
-                    f"Tor is verified and ready on local port {port}. Onionmind's background "
+                    "Tor is verified and ready. Onionmind's background "
                     "process is running without a browser or console window. Click to turn it off."
                 )
-                self.inspector.append_activity(f"Onionmind-owned background Tor running on local port {port}")
+                self.inspector.append_activity("Onionmind-owned background Tor is ready")
             else:
                 self.tor_status.setToolTip(
-                    f"Tor is verified and ready on local port {port}. The proxy was already "
+                    "Tor is verified and ready. The proxy was already "
                     "running, so turning Onionmind off will leave that external process alone."
                 )
-                self.inspector.append_activity(f"Pre-existing local Tor proxy verified on port {port}")
+                self.inspector.append_activity("Pre-existing local Tor proxy verified")
         elif port:
             self.tor_phase = "error"
             self.tor_status.set_status("Unavailable", "bad")
@@ -4152,10 +4152,10 @@ class OnionmindWindow(QMainWindow):
                     tooltip="This proxy is managed outside Onionmind and cannot be stopped here.",
                 )
             self.tor_status.setToolTip(
-                f"A local SOCKS listener exists on port {port}, but Onionmind has not verified "
-                "it as Tor. Protected features remain offline. Click to try verification again."
+                "A local proxy connection exists, but Onionmind has not verified it as Tor. "
+                "Protected features remain offline. Click to try verification again."
             )
-            self.inspector.append_activity(f"Unverified local SOCKS listener detected on port {port}")
+            self.inspector.append_activity("Unverified local proxy connection detected")
         else:
             self.tor_phase = "off"
             self.tor_status.set_status("Off", "idle")
@@ -4329,7 +4329,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event = None
         self._show_local_tor_state(port)
         if self.tor_phase == "running":
-            self.set_status(f"Tor ready on local port {port}.")
+            self.set_status("Tor is ready.")
         else:
             self.set_status("Tor is unavailable.")
 
@@ -5817,7 +5817,7 @@ class OnionmindWindow(QMainWindow):
                 tooltip="Cancel this Tor verification and Chat turn.",
             )
             self.tor_status.setToolTip(
-                f"A local SOCKS listener is available on port {port}; Onionmind is verifying it as Tor. "
+                "A local proxy connection is available; Onionmind is verifying it as Tor. "
                 "Click to cancel."
             )
             self.set_status("Verifying the Tor circuit before protected work begins…")
@@ -5836,7 +5836,7 @@ class OnionmindWindow(QMainWindow):
                 ),
             )
             self.tor_status.setToolTip(
-                f"Tor is verified and ready on local port {port}. Click to turn it off."
+                "Tor is verified and ready. Click to turn it off."
             )
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Thinking")

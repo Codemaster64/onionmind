@@ -691,7 +691,7 @@ DuckDuckGo blocks Tor exit nodes on its clearnet endpoint. The script prefers th
 service specifically to avoid this, and retries on a fresh circuit. If both fail, the exit is
 rate-limited — retry for a new circuit.
 
-### `No Tor proxy on 9150/9050`
+### `No working Tor connection found`
 
 In the desktop workbench, select the **Tor · Off** power button and retry.
 The workbench starts only the hidden Tor process, not a browser window. In the

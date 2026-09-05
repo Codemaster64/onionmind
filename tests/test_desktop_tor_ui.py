@@ -72,6 +72,7 @@ class TorIndicatorStateTests(unittest.TestCase):
         self.assertEqual(host.tor_phase, "error")
         self.assertEqual(host.tor_status.action_text(), "Retry")
         self.assertIn("Click to try verification again", host.tor_status.toolTip())
+        self.assertNotIn("9150", host.tor_status.toolTip())
 
     def test_verified_managed_process_transitions_checking_to_ready(self) -> None:
         process = mock.Mock()
@@ -105,7 +106,8 @@ class TorIndicatorStateTests(unittest.TestCase):
         desktop.OnionmindWindow._toolbar_tor_started(host, 9150, generation=2)
         self.assertEqual(host.tor_status.status_text(), "Ready")
         self.assertEqual(host.tor_status.action_text(), "Turn off")
-        self.assertEqual(self.status_messages, ["Tor ready on local port 9150."])
+        self.assertEqual(self.status_messages, ["Tor is ready."])
+        self.assertNotIn("9150", host.tor_status.toolTip())
 
     def test_exited_managed_process_transitions_running_to_off(self) -> None:
         process = mock.Mock()

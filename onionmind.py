@@ -309,13 +309,12 @@ def tor_check():
     # A stale-but-set port must not survive a failed reverification: callers
     # would keep "verifying" against a proxy that just answered "not Tor".
     _port = None
-    # Telling a Windows user to run systemctl is telling them nothing. Tor
-    # Browser is how Tor gets onto a Windows box and its bundled tor binds 9150
-    # by itself, so name the thing that actually works on the platform underfoot.
+    # Telling a Windows user to run systemctl is telling them nothing. Name the
+    # thing that works on the platform without exposing implementation ports.
     if os.name == "nt":
-        sys.exit("No Tor proxy on 9050/9150. Start Tor Browser and click "
-                 "Connect - its bundled Tor binds 9150 - then try again.")
-    sys.exit("No Tor proxy on 9050/9150. Try: sudo systemctl start tor")
+        sys.exit("No working Tor connection found. Start Tor Browser, click "
+                 "Connect, then try again.")
+    sys.exit("No working Tor connection found. Start the Tor service, then try again.")
 
 
 def strip_tag(name):
@@ -1850,8 +1849,8 @@ def run_legacy_ui():
             nonlocal busy
             try:
                 if search_allowed:
-                    port = start_tor_hidden(stop_event=stop_event)
-                    root.after(0, lambda: set_status(f"Tor running · {port}", "#9ef0b0"))
+                    start_tor_hidden(stop_event=stop_event)
+                    root.after(0, lambda: set_status("Checking Tor…", "#d6b879"))
                 answer = turn_stream(
                     history,
                     lambda chunk: root.after(0, lambda chunk=chunk: stream_update(chunk)),
@@ -1861,8 +1860,8 @@ def run_legacy_ui():
                 answer = "Error: " + user_error(exc)
             root.after(0, lambda: stream_finish(answer))
             busy = False
-            tor_port = tor_proxy_port()
-            ready_text = (f"ready · {MODEL} · Tor running · {tor_port}" if tor_port
+            tor_available = tor_proxy_port() is not None
+            ready_text = (f"ready · {MODEL} · Tor connected" if tor_available
                           else f"ready · {MODEL} · Tor off")
             root.after(0, lambda: send.configure(state="normal"))
             root.after(0, lambda: stop.configure(state="disabled"))
