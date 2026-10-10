@@ -6901,6 +6901,31 @@ def set_motion_override(reduce_motion: str) -> None:
         _MOTION_OVERRIDE = None
 
 
+# v2 keyboard: also follow the reduced-motion setting of GNOME and macOS,
+# which the original only read on Windows. None = not probed yet.
+_SYSTEM_MOTION_PROBE = False
+_SYSTEM_REDUCES_MOTION: Optional[bool] = None
+
+
+def set_system_motion_probe(on: bool) -> None:
+    global _SYSTEM_MOTION_PROBE
+    _SYSTEM_MOTION_PROBE = bool(on)
+
+
+def _system_reduces_motion() -> bool:
+    """GNOME's enable-animations / macOS reduceMotion, read once."""
+    global _SYSTEM_REDUCES_MOTION
+    if _SYSTEM_REDUCES_MOTION is None:
+        command = (["defaults", "read", "com.apple.universalaccess", "reduceMotion"] if sys.platform == "darwin"
+                   else ["gsettings", "get", "org.gnome.desktop.interface", "enable-animations"])
+        try:
+            output = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout.strip().lower()
+        except (OSError, subprocess.SubprocessError):
+            output = ""
+        _SYSTEM_REDUCES_MOTION = output == "1" if sys.platform == "darwin" else output == "false"
+    return _SYSTEM_REDUCES_MOTION
+
+
 def _ui_animations_enabled() -> bool:
     if _MOTION_OVERRIDE is not None:
         return _MOTION_OVERRIDE
@@ -6908,7 +6933,7 @@ def _ui_animations_enabled() -> bool:
     if override in {"1", "true", "yes", "on"}:
         return False
     if os.name != "nt":
-        return True
+        return not (_SYSTEM_MOTION_PROBE and _system_reduces_motion())
     try:
         import ctypes
 
@@ -7681,6 +7706,426 @@ class RunPanel(QWidget):
             if widget is not None:
                 widget.hide()
                 widget.deleteLater()
+
+
+class _PaletteSearch(QLineEdit):
+    """The palette's field keeps arrows, Enter and Esc for itself, ahead of
+    the window's application shortcuts (Esc there means 'stop the run')."""
+
+    moved = Signal(int)
+    chosen = Signal()
+    dismissed = Signal()
+
+    def event(self, event: Any) -> bool:
+        if event.type() == event.Type.ShortcutOverride and event.key() in (
+            Qt.Key.Key_Escape, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter
+        ):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key = event.key()
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            self.moved.emit(1 if key == Qt.Key.Key_Down else -1)
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.chosen.emit()
+        elif key == Qt.Key.Key_Escape:
+            self.dismissed.emit()
+        else:
+            super().keyPressEvent(event)
+
+
+class CommandPalette(QDialog):
+    """Ctrl+K: jump to a project, session, model or command.
+
+    Every row is something real - a remembered project, a saved session, an
+    installed model, an action the window can take now. Focus goes back to
+    where it was when the palette closes.
+    """
+
+    GROUPS = ("Projects", "Sessions", "Model power", "Commands")
+
+    def __init__(self, parent: QWidget, rows: list[tuple[str, str, str, Callable[[], None]]]) -> None:
+        super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setObjectName("popover")
+        self.setModal(True)
+        self.setAccessibleName("Command palette")
+        self.rows = rows
+        self._return_focus = QApplication.focusWidget()
+        frame = QFrame(self)
+        frame.setObjectName("popover")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 10, 8)
+        layout.setSpacing(6)
+        self.search = _PaletteSearch()
+        self.search.setPlaceholderText("Jump to a project, session, model or command")
+        self.search.setAccessibleName("Search projects, sessions, models and commands")
+        self.search.textChanged.connect(self._filter)
+        self.search.moved.connect(self._move)
+        self.search.chosen.connect(self._choose)
+        self.search.dismissed.connect(self.reject)
+        layout.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setAccessibleName("Matches")
+        self.list.itemActivated.connect(lambda item: self._choose())
+        self.list.itemClicked.connect(lambda item: self._choose())
+        layout.addWidget(self.list, 1)
+        self.empty = QLabel("Nothing matches that.")
+        self.empty.setObjectName("meta")
+        self.empty.hide()
+        layout.addWidget(self.empty)
+        footer = QHBoxLayout()
+        hint = QLabel("↑↓ to move · Enter to open")
+        hint.setObjectName("meta")
+        esc = QLabel("esc")
+        esc.setObjectName("kbd")
+        footer.addWidget(hint)
+        footer.addStretch(1)
+        footer.addWidget(esc)
+        layout.addLayout(footer)
+        self.resize(600, 420)
+        self._filter("")
+
+    def place(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        top_left = parent.mapToGlobal(parent.rect().topLeft())
+        width = min(600, max(360, parent.width() - 40))
+        self.resize(width, min(440, max(260, parent.height() - 120)))
+        self.move(top_left.x() + (parent.width() - width) // 2, top_left.y() + 72)
+
+    def _filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        self.list.clear()
+        shown = 0
+        for group in self.GROUPS:
+            matches = [row for row in self.rows if row[0] == group and (
+                not needle or needle in row[1].casefold() or needle in row[2].casefold())]
+            if not matches:
+                continue
+            header = QListWidgetItem(group.upper())
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.list.addItem(header)
+            for row in matches:
+                item = QListWidgetItem(f"{row[1]}    {row[2]}".rstrip())
+                item.setData(Qt.ItemDataRole.UserRole, self.rows.index(row))
+                item.setToolTip(row[2])
+                self.list.addItem(item)
+                shown += 1
+        self.empty.setVisible(shown == 0)
+        self._move(0)
+
+    def _selectable(self) -> list[int]:
+        return [i for i in range(self.list.count()) if self.list.item(i).flags() & Qt.ItemFlag.ItemIsEnabled]
+
+    def _move(self, step: int) -> None:
+        rows = self._selectable()
+        if not rows:
+            return
+        current = self.list.currentRow()
+        if current not in rows or step == 0:
+            target = rows[0]
+        else:
+            position = rows.index(current) + step
+            target = rows[max(0, min(len(rows) - 1, position))]
+        self.list.setCurrentRow(target)
+
+    def _choose(self) -> None:
+        item = self.list.currentItem()
+        if item is None or not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return
+        action = self.rows[int(item.data(Qt.ItemDataRole.UserRole))][3]
+        self.accept()
+        QTimer.singleShot(0, action)
+
+    def done(self, result: int) -> None:
+        super().done(result)
+        target = self._return_focus
+        if target is not None:
+            try:
+                target.setFocus(Qt.FocusReason.PopupFocusReason)
+            except RuntimeError:
+                pass
+
+
+class BoundaryButton(QPushButton):
+    """cpu - line - shield - line - globe, then 'N searches today'.
+
+    The lines take the accent while a Tor path is open; a dot travels along
+    them while a search is actually running (still when motion is reduced).
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("boundaryButton")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCheckable(True)
+        self._open = False
+        self._searching = False
+        self._phase = 0.0
+        self._label = "Nothing left today"
+        self._show_label = True
+        self.timer = QTimer(self)
+        self.timer.setInterval(40)
+        self.timer.timeout.connect(self._advance)
+        self.setMinimumHeight(34)
+        self._sync()
+
+    def set_state(self, open_path: bool, searching: bool, label: str) -> None:
+        self._open, self._searching, self._label = open_path, searching, label
+        if searching and _ui_animations_enabled():
+            self.timer.start()
+        else:
+            self.timer.stop()
+        self._sync()
+
+    def set_label_visible(self, visible: bool) -> None:
+        self._show_label = visible
+        self._sync()
+
+    def _sync(self) -> None:
+        text = self._label if self._show_label else ""
+        self.setFixedWidth(118 + (self.fontMetrics().horizontalAdvance(text) + 12 if text else 0))
+        path = "open over Tor" if self._open else "closed: nothing can leave over Tor"
+        self.setAccessibleName(f"Boundary map. The path out is {path}. {self._label}")
+        self.setToolTip("Boundary map (Ctrl+B): what stays on this machine and what leaves")
+        self.update()
+
+    def _advance(self) -> None:
+        self._phase = (self._phase + 0.04) % 1.0
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        tokens = theme_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = self.height() / 2
+        icons = ((10, "cpu"), (52, "shield"), (94, "globe"))
+        for x, name in icons:
+            painter.drawPixmap(int(x), int(y - 8), _icon(name, 16).pixmap(16, 16))
+        colour = QColor(tokens["accent"] if self._open else tokens["line_strong"])
+        painter.setPen(QPen(colour, 1.4))
+        for start in (30, 72):
+            painter.drawLine(QPointF(start, y), QPointF(start + 18, y))
+        if self._searching:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(tokens["accent"]))
+            for start in (30, 72):
+                painter.drawEllipse(QPointF(start + 18 * self._phase, y), 2.5, 2.5)
+        if self._show_label:
+            painter.setPen(QColor(tokens["muted"]))
+            painter.drawText(QRectF(118, 0, self.width() - 122, self.height()),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._label)
+        painter.end()
+
+
+class BoundaryPanel(QFrame):
+    """Ctrl+B: what stays on this machine, the Tor node, and what leaves it."""
+
+    FOOTNOTE = (
+        "Commands that ignore proxy settings, such as ping or nslookup, can still reach the network "
+        "directly. For a fully closed machine, use Matchstick, a container or an OS egress rule."
+    )
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("boundaryPanel")
+        self.setAccessibleName("Boundary map")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 12, 22, 12)
+        outer.setSpacing(10)
+        head = QHBoxLayout()
+        title = QLabel("Boundary map")
+        title.setObjectName("title")
+        self.receipt = QLabel("")
+        self.receipt.setObjectName("meta")
+        self.close_button = QToolButton()
+        self.close_button.setObjectName("bareButton")
+        self.close_button.setIcon(_icon("close"))
+        self.close_button.setAccessibleName("Close the boundary map")
+        head.addWidget(title)
+        head.addWidget(self.receipt, 1)
+        head.addWidget(self.close_button)
+        outer.addLayout(head)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.machine = QFrame()
+        self.machine.setObjectName("zoneMachine")
+        self.machine_rows = self._column(self.machine, "STAYS ON THIS MACHINE",
+                                         ("Model", "Project", "Disk", "Sessions"))
+        self.outside = QFrame()
+        self.outside.setObjectName("zoneOutside")
+        self.outside_rows = self._column(self.outside, "LEAVES THIS MACHINE",
+                                         ("Chat search", "Agent network", "Downloads", "Updates"))
+        node = QVBoxLayout()
+        node.setSpacing(4)
+        logo = QLabel()
+        icon_path = MODULE_DIR / "onionmind.ico"
+        if icon_path.exists():
+            logo.setPixmap(QPixmap(str(icon_path)).scaled(44, 44, Qt.AspectRatioMode.KeepAspectRatio,
+                                                          Qt.TransformationMode.SmoothTransformation))
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_title = QLabel("Tor")
+        self.node_title.setObjectName("title")
+        self.node_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_state = QLabel("")
+        self.node_state.setObjectName("meta")
+        self.node_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_state.setWordWrap(True)
+        node.addStretch(1)
+        node.addWidget(logo)
+        node.addWidget(self.node_title)
+        node.addWidget(self.node_state)
+        node.addStretch(1)
+        node_holder = QWidget()
+        node_holder.setLayout(node)
+        node_holder.setFixedWidth(170)
+        row.addWidget(self.machine, 1)
+        row.addWidget(node_holder)
+        row.addWidget(self.outside, 1)
+        outer.addLayout(row)
+        foot = QLabel(self.FOOTNOTE)
+        foot.setObjectName("meta")
+        foot.setWordWrap(True)
+        outer.addWidget(foot)
+        self.hide()
+
+    @staticmethod
+    def _column(frame: QFrame, title: str, names: Iterable[str]) -> dict[str, QLabel]:
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(6)
+        heading = QLabel(title)
+        heading.setObjectName("sectionTitle")
+        layout.addWidget(heading)
+        values: dict[str, QLabel] = {}
+        for name in names:
+            line = QHBoxLayout()
+            label = QLabel(name)
+            label.setObjectName("meta")
+            label.setFixedWidth(100)
+            value = QLabel("")
+            value.setWordWrap(True)
+            line.addWidget(label, 0, Qt.AlignmentFlag.AlignTop)
+            line.addWidget(value, 1)
+            layout.addLayout(line)
+            values[name] = value
+        return values
+
+
+class NetworkLogDialog(QDialog):
+    """Every connection Onionmind made from this machine today, with exports.
+
+    Rows are times, routes and destinations only - the log never held a
+    prompt or a query, so an export cannot leak one.
+    """
+
+    INTRO = (
+        "Every connection Onionmind made from this machine today. Inference is not listed because "
+        "it never leaves the computer. The exported file contains times and destinations only, "
+        "not your prompts."
+    )
+
+    def __init__(self, rows: list[dict[str, str]], desktop_core: Any, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+
+        self.rows = rows
+        self.desktop_core = desktop_core
+        self.saved_path: Optional[str] = None
+        self.setWindowTitle("Network log")
+        self.resize(640, 460)
+        layout = QVBoxLayout(self)
+        heading = QLabel("Network log")
+        heading.setObjectName("brand")
+        intro = QLabel(self.INTRO)
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(intro)
+        self.table = QTableWidget(len(rows), 3)
+        self.table.setHorizontalHeaderLabels(["Time", "Route", "What"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setAccessibleName("Connections that left this machine today")
+        for index, row in enumerate(rows):
+            stamp = _as_text(row.get("time"))
+            shown = stamp[11:19] if len(stamp) >= 19 else stamp
+            for column, value in enumerate((shown, row.get("route", ""), row.get("what", ""))):
+                self.table.setItem(index, column, QTableWidgetItem(_as_text(value)))
+        layout.addWidget(self.table, 1)
+        self.empty = QLabel("No connections left this machine today.")
+        self.empty.setObjectName("meta")
+        self.empty.setVisible(not rows)
+        layout.addWidget(self.empty)
+        self.feedback = QLabel("")
+        self.feedback.setObjectName("meta")
+        layout.addWidget(self.feedback)
+        buttons = QHBoxLayout()
+        self.json_button = QPushButton("Save as JSON")
+        self.csv_button = QPushButton("Save as CSV")
+        close = QPushButton("Close")
+        self.json_button.clicked.connect(lambda: self.save("json"))
+        self.csv_button.clicked.connect(lambda: self.save("csv"))
+        close.clicked.connect(self.accept)
+        buttons.addWidget(self.json_button)
+        buttons.addWidget(self.csv_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def default_path(self, kind: str) -> str:
+        documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        folder = Path(documents or Path.home()) / "Onionmind"
+        return str(folder / f"network-log-{datetime.now().strftime('%Y-%m-%d')}.{kind}")
+
+    def save(self, kind: str, path: Optional[str] = None) -> Optional[str]:
+        if path is None:
+            default = self.default_path(kind)
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save network log", default,
+                "JSON (*.json)" if kind == "json" else "CSV (*.csv)")
+            if not path:
+                return None
+        writer = getattr(self.desktop_core, "network_log_json" if kind == "json" else "network_log_csv", None)
+        if not callable(writer):
+            self.feedback.setText("This build cannot export the network log.")
+            return None
+        target = Path(path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(writer(self.rows), encoding="utf-8")
+        except OSError as exc:
+            self.feedback.setText(f"Could not save the network log: {exc}")
+            return None
+        self.saved_path = str(target)
+        self.feedback.setText(f"Saved {target} · {len(self.rows)} entries")
+        return self.saved_path
+
+
+class ProvenanceChips(QWidget):
+    """Where a reply came from: always this machine, plus any Tor search."""
+
+    def __init__(self, chips: list[tuple[str, str]], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        for text, tooltip in chips:
+            chip = QLabel(text)
+            chip.setObjectName("kbd")
+            chip.setToolTip(tooltip)
+            chip.setAccessibleName(text)
+            layout.addWidget(chip)
+        layout.addStretch(1)
 
 
 class SessionBridge:
@@ -8848,6 +9293,30 @@ class InspectorPane(QWidget):
         self.activity = QListWidget()
         self.activity.setAccessibleName("Activity history")
         activity_layout.addWidget(self.activity, 1)
+        # v2 zones: the same events in Machine / Tor / Outside lanes.
+        self._activity_entries: list[tuple[str, str, str]] = []
+        self.lanes = QWidget()
+        lanes_layout = QVBoxLayout(self.lanes)
+        lanes_layout.setContentsMargins(0, 0, 0, 0)
+        lanes_layout.setSpacing(4)
+        self.lane_lists: dict[str, QListWidget] = {}
+        self.lane_titles: dict[str, QLabel] = {}
+        for zone, title in (("machine", "MACHINE"), ("tor", "TOR"), ("outside", "OUTSIDE")):
+            heading = QLabel(title)
+            heading.setObjectName("sectionTitle")
+            lane = QListWidget()
+            lane.setAccessibleName(f"{title.title()} activity")
+            lanes_layout.addWidget(heading)
+            lanes_layout.addWidget(lane, 2 if zone == "machine" else 1)
+            self.lane_lists[zone] = lane
+            self.lane_titles[zone] = heading
+        self.lanes.hide()
+        activity_layout.addWidget(self.lanes, 1)
+        # v2 netlog: export what left this machine.
+        self.netlog_button = QPushButton("Export network log")
+        self.netlog_button.setAccessibleName("Export the network log as JSON or CSV")
+        self.netlog_button.hide()
+        activity_layout.addWidget(self.netlog_button)
 
         self.tabs.addTab(self.context_tab, "Context")
         self.tabs.addTab(self.changes_tab, "Changes")
@@ -8867,11 +9336,41 @@ class InspectorPane(QWidget):
         if self.tabs.indexOf(self.run_panel) >= 0:
             self.tabs.setCurrentWidget(self.run_panel)
 
-    def append_activity(self, text: str) -> None:
+    _OUTSIDE = re.compile(r"Tor search|search over Tor|over Tor|DuckDuckGo|direct(ly)? download|"
+                          r"model download|downloaded|update check|model list|query|search allowed", re.IGNORECASE)
+    _TOR = re.compile(r"\bTor\b|circuit|SOCKS|proxy", re.IGNORECASE)
+
+    @classmethod
+    def zone_of(cls, text: str) -> str:
+        """Machine / Tor / Outside for an event that did not name its zone."""
+        if cls._OUTSIDE.search(text):
+            return "outside"
+        if cls._TOR.search(text):
+            return "tor"
+        return "machine"
+
+    def append_activity(self, text: str, zone: Optional[str] = None) -> None:
         stamp = datetime.now().strftime("%H:%M")
-        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {_brand_runtime_text(text)}"))
+        clean = _brand_runtime_text(text)
+        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {clean}"))
         while self.activity.count() > 150:
             self.activity.takeItem(self.activity.count() - 1)
+        lane = zone if zone in ("machine", "tor", "outside") else self.zone_of(clean)
+        self._activity_entries.insert(0, (stamp, clean, lane))
+        del self._activity_entries[150:]
+        target = self.lane_lists[lane]
+        target.insertItem(0, QListWidgetItem(f"{stamp}  {clean}"))
+        while target.count() > 150:
+            target.takeItem(target.count() - 1)
+        self._sync_lane_titles()
+
+    def _sync_lane_titles(self) -> None:
+        for zone, title in (("machine", "MACHINE"), ("tor", "TOR"), ("outside", "OUTSIDE")):
+            self.lane_titles[zone].setText(f"{title} · {self.lane_lists[zone].count()}")
+
+    def set_zones(self, on: bool) -> None:
+        self.activity.setVisible(not on)
+        self.lanes.setVisible(on)
 
     def update_snapshot(self, snapshot: dict[str, Any]) -> None:
         self.refresh_button.setEnabled(bool(snapshot.get("root")))
@@ -9383,6 +9882,52 @@ class SettingsDialog(QDialog):
         ("rules", "Agent rules", "_rules_page"),
         ("presets", "Presets", "_presets_page"),
     )
+
+    def _keyboard_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Keyboard")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        window = self._window()
+        features = getattr(window, "features", {}) if window is not None else {}
+        enter_sends = bool(getattr(window, "preferences", {}).get("enter_sends", True)) if window else True
+        native = lambda seq: QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+        rows = [
+            ("Command palette", native("Ctrl+K"), features.get("palette")),
+            ("New task", native("Ctrl+N"), True),
+            ("Open a project folder", native("Ctrl+O"), True),
+            ("Focus the composer", native("Ctrl+L"), True),
+            ("Settings", native("Ctrl+,"), True),
+            ("Terminal", native("Ctrl+`"), True),
+            ("Inspector", native("Ctrl+Shift+I"), True),
+            ("Boundary map", native("Ctrl+B"), features.get("boundary")),
+            ("Export conversation", native("Ctrl+Shift+S"), True),
+            ("Stop a run or close a panel", "Esc", True),
+            ("Send", "Enter" if enter_sends else native("Ctrl+Return"), True),
+            ("New line", "Shift+Enter" if enter_sends else "Enter", True),
+            ("Keyboard shortcuts", "?", True),
+        ]
+        form = QFormLayout()
+        form.setHorizontalSpacing(24)
+        self.keyboard_rows: dict[str, str] = {}
+        for label, keys, shown in rows:
+            if not shown:
+                continue
+            chip = QLabel(keys)
+            chip.setObjectName("kbd")
+            chip.setAccessibleName(f"{label}: {keys}")
+            form.addRow(label, chip)
+            self.keyboard_rows[label] = keys
+        outer.addLayout(form)
+        motion = QLabel(
+            "Animations stop when the system asks for reduced motion (Windows, GNOME or macOS), "
+            "or when Animation is set to Reduced in General.")
+        motion.setObjectName("meta")
+        motion.setWordWrap(True)
+        outer.addWidget(motion)
+        outer.addStretch(1)
+        return page
 
     @staticmethod
     def _padded(content: QWidget) -> QWidget:
@@ -9929,6 +10474,7 @@ class SettingsDialog(QDialog):
             return
         self.check_updates_button.setEnabled(False)
         self.update_feedback.setText("Checking for updates through Tor…")
+        window._egress("Tor", "Update check · github.com")
 
         def check_job(signals: WorkerSignals) -> Any:
             del signals
@@ -10138,6 +10684,11 @@ class OnionmindWindow(QMainWindow):
         self._turn_reasoning = 0.0
         self._last_stats: dict[str, Any] = {}
         self._context_used_real: Optional[int] = None
+        self.egress_path = self.data_root / "network-log.jsonl"
+        self._egress_counts: Optional[dict[str, int]] = None
+        self._turn_searches: list[dict[str, Any]] = []
+        self._searching = False
+        self._pulling: Optional[str] = None
         self._build_window()
         self.preferences = self._load_preferences()
         self._apply_preferences()
@@ -10230,6 +10781,10 @@ class OnionmindWindow(QMainWindow):
         self.branch_label.setAccessibleName("Current Git branch")
         toolbar_layout.addWidget(self.branch_label)
         toolbar_layout.addStretch(1)
+        self.boundary_button = BoundaryButton()
+        self.boundary_button.clicked.connect(lambda: self.toggle_boundary())
+        self.boundary_button.hide()
+        toolbar_layout.addWidget(self.boundary_button)
 
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(190)
@@ -10248,6 +10803,14 @@ class OnionmindWindow(QMainWindow):
         )
         self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
+
+        self.palette_button = QPushButton("⌘K" if sys.platform == "darwin" else "Ctrl K")
+        self.palette_button.setObjectName("chipButton")
+        self.palette_button.setToolTip("Command palette (Ctrl+K)")
+        self.palette_button.setAccessibleName("Open the command palette")
+        self.palette_button.clicked.connect(self.open_palette)
+        self.palette_button.hide()
+        toolbar_layout.addWidget(self.palette_button)
 
         self.features_button = QToolButton()
         self.features_button.setObjectName("bareButton")
@@ -10279,6 +10842,9 @@ class OnionmindWindow(QMainWindow):
         self.inspector_toggle = inspector_toggle
         toolbar_layout.addWidget(inspector_toggle)
         root_layout.addWidget(toolbar)
+        self.boundary_panel = BoundaryPanel()
+        self.boundary_panel.close_button.clicked.connect(lambda: self.toggle_boundary(False))
+        root_layout.addWidget(self.boundary_panel)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -10324,6 +10890,7 @@ class OnionmindWindow(QMainWindow):
         self.inspector = InspectorPane()
         self.inspector.refreshRequested.connect(self.refresh_workspace)
         self.inspector.run_panel.stopRequested.connect(self.stop_active)
+        self.inspector.netlog_button.clicked.connect(self.open_network_log)
         self.main_splitter.addWidget(self.inspector)
         self.main_splitter.setSizes([224, 860, 292])
         self.main_splitter.setStretchFactor(0, 0)
@@ -10590,6 +11157,10 @@ class OnionmindWindow(QMainWindow):
             ("Ctrl+`", lambda: self.toggle_terminal(not self.terminal.isVisible())),
             ("Ctrl+Shift+I", lambda: self.toggle_inspector(not self.inspector.isVisible())),
             ("Escape", self.stop_active),
+            # v2: each acts only while its feature is on.
+            ("Ctrl+K", lambda: self.open_palette() if self.feature("palette") else None),
+            ("Ctrl+B", lambda: self.toggle_boundary() if self.feature("boundary") else None),
+            ("?", self._question_shortcut),
         ]
         self.shortcuts: list[QShortcut] = []
         for sequence, callback in shortcuts:
@@ -10988,6 +11559,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event = None
         self._show_local_tor_state(port)
         if self.tor_phase == "running":
+            self._egress("Tor", "Tor circuit check · check.torproject.org")
             self.set_status("Tor is ready.")
         else:
             self.set_status("Tor is unavailable.")
@@ -11176,6 +11748,8 @@ class OnionmindWindow(QMainWindow):
         text = _brand_runtime_text(text)
         self.status_label.setText(text)
         self.status_label.setAccessibleName(f"Application status: {text}")
+        if getattr(self, "features", None) and self.feature("boundary") and hasattr(self, "boundary_panel"):
+            self._refresh_boundary()
 
     def toggle_rail(self, visible: Optional[bool] = None) -> None:
         target = (not self.left_rail.isVisible()) if visible is None else bool(visible)
@@ -11400,8 +11974,10 @@ class OnionmindWindow(QMainWindow):
         self.repo_label.setVisible(width >= 900)
         self.branch_label.setVisible(not compact_toolbar)
         self.toolbar_separator.setVisible(not compact_toolbar)
-        self.model_status.setVisible(width >= 1280)
+        self.model_status.setVisible(width >= 1280 or bool(getattr(self, "_model_loading", None)))
         self.tor_status.setVisible(True)
+        if hasattr(self, "palette_button"):
+            self._sync_toolbar_features()
         self.model_combo.setMinimumWidth(145 if compact_toolbar else 190)
         if width < 820:
             self.left_rail.hide()
@@ -11903,6 +12479,9 @@ class OnionmindWindow(QMainWindow):
         net_log = _as_text(getattr(self.core, "NET_LOG", ""))
         if net_log and callable(shred_file) and Path(net_log).is_file():
             shred_file(net_log)
+        if callable(shred_file) and Path(self.egress_path).is_file():
+            shred_file(self.egress_path)
+            self._egress_counts = None
         tor = self.wipe_tor_state()
 
         self.left_rail.clear_projects()
@@ -12400,6 +12979,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_in_use = allow_search
         self._turn_reasoning = 0.0
         self._live_tps = None
+        self._turn_searches = []
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
@@ -12548,6 +13128,7 @@ class OnionmindWindow(QMainWindow):
                 self.stream_block.set_pending_label("Thinking")
             self.set_status(f"Tor ready · thinking with {self._describe_model(self.current_model_id())}…")
             self.inspector.append_activity("Background Tor path verified")
+            self._egress("Tor", "Tor circuit check · check.torproject.org")
         elif kind == "tool_started":
             arguments = event.get("arguments") or {}
             detail = _as_text(arguments.get("query")) if isinstance(arguments, dict) else ""
@@ -12556,7 +13137,10 @@ class OnionmindWindow(QMainWindow):
                 self.stream_block.set_pending_label("Searching via Tor" if name == "web_search" else "Using local tool")
             self._tool_started(display_name, detail or "Tool request", state)
             activity = "Tor search started" if name == "web_search" else f"Local tool started: {display_name}"
-            self.inspector.append_activity(activity)
+            self.inspector.append_activity(activity, "tor" if name == "web_search" else "machine")
+            if name == "web_search":
+                self._searching = True
+                self._refresh_boundary()
         elif kind == "tool_finished":
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Thinking")
@@ -12565,7 +13149,13 @@ class OnionmindWindow(QMainWindow):
                 state = f"{event.get('results')} results over Tor"
             self._tool_finished(display_name, "Tool result", state)
             activity = "Tor search finished" if name == "web_search" else f"Local tool finished: {display_name}"
-            self.inspector.append_activity(activity)
+            self.inspector.append_activity(activity, "outside" if name == "web_search" else "machine")
+            if name == "web_search":
+                self._searching = False
+                self._turn_searches.append({"results": event.get("results"),
+                                            "domains": list(event.get("domains") or [])})
+                self._egress("Tor", "Chat search · DuckDuckGo onion service")
+                self._refresh_boundary()
         elif kind == "tool_refused":
             self.transcript.add_tool_card(display_name, [("Not run", "No one-turn search permission")])
             self.inspector.append_activity("Tor search request refused; no network request was made")
@@ -12936,6 +13526,8 @@ class OnionmindWindow(QMainWindow):
             vram = int(vram_probe()) if callable(vram_probe) else None
             return {"entries": fetcher(port_now), "vram": vram, "ram": ram}
 
+        self._egress("Tor", "Model list · huggingface.co")
+
         def done(payload: dict[str, Any]) -> None:
             self._catalog_specs = (payload.get("vram"), payload.get("ram"))
             fit = _optional_callable(self.desktop_core, "catalog_fit")
@@ -12957,6 +13549,10 @@ class OnionmindWindow(QMainWindow):
             dialog.set_error("This Onionmind installation cannot add models yet")
             return
         stop_event = threading.Event()
+        registry = "huggingface.co" if name.lower().startswith(("hf.co/", "huggingface.co/")) else "registry.ollama.ai"
+        self._egress("Direct", f"Model download · {registry}")
+        self._pulling = name
+        self._refresh_boundary()
 
         def pull_job(signals: WorkerSignals) -> bool:
             def progress(fraction: float, status: str) -> None:
@@ -12968,6 +13564,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.progress.connect(dialog.set_progress)
         worker.signals.error.connect(dialog.set_error)
         worker.signals.result.connect(lambda ok: self._model_pull_complete(name, dialog, ok))
+        worker.signals.finished.connect(self._pull_finished)
 
     def _model_pull_complete(self, name: str, dialog: ModelManagerDialog, ok: bool) -> None:
         if not ok:
@@ -13050,6 +13647,7 @@ class OnionmindWindow(QMainWindow):
             except ValueError:
                 pass  # an unreadable timestamp means "check again", not "never check"
         bridge = self.update_bridge
+        self._egress("Tor", "Update check · github.com")
 
         def autocheck_job(signals: WorkerSignals) -> Any:
             del signals
@@ -13636,6 +14234,16 @@ class OnionmindWindow(QMainWindow):
 
     def _after_reply(self, stopped: bool) -> None:
         """What v2 adds under a finished Chat reply."""
+        if self.feature("provenance") and self.stream_block is not None and not stopped:
+            chips = [(f"Answered on this machine · {self._tier_name(self.current_model_id())}",
+                      "Inference ran on this computer; the reply never left it.")]
+            if self._turn_searches:
+                results = sum(int(item.get("results") or 0) for item in self._turn_searches)
+                domains = sorted({d for item in self._turn_searches for d in item.get("domains", [])})
+                count = len(self._turn_searches)
+                chips.append((f"{count} Tor search{'es' if count != 1 else ''} · {results} result{'s' if results != 1 else ''}",
+                              "Results from: " + (", ".join(domains) if domains else "no sites")))
+            self.transcript.add_widget(ProvenanceChips(chips))
         if self.feature("thinking") and self._turn_reasoning > 0 and self.stream_block is not None:
             self.transcript.add_widget(ThoughtLine(self._turn_reasoning))
         self._live_tps = self._live_tps if not stopped else None
@@ -13742,6 +14350,209 @@ class OnionmindWindow(QMainWindow):
     def _apply_feature_contextMeter(self, on: bool) -> None:
         del on
         self._update_context_meter()
+
+    # --- v2: egress log, boundary map, palette, keyboard, zones, netlog ----
+
+    def _egress(self, route: str, what: str) -> None:
+        """Record one connection that left this machine - times and
+        destinations only - while the netlog or boundary feature is on."""
+        if not (self.feature("netlog") or self.feature("boundary")):
+            return
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        if log_type is None:
+            return
+        log_type(self.egress_path).append(route, what)
+        counts = self._today_counts()
+        counts["tor" if route == "Tor" else "direct"] = counts.get("tor" if route == "Tor" else "direct", 0) + 1
+        if what.startswith("Chat search"):
+            counts["search"] = counts.get("search", 0) + 1
+        self._refresh_boundary()
+
+    def _today_counts(self) -> dict[str, int]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._egress_counts is None or getattr(self, "_egress_counts_day", "") != today:
+            log_type = getattr(self.desktop_core, "EgressLog", None)
+            self._egress_counts = log_type(self.egress_path).counts(today) if log_type else {}
+            self._egress_counts_day = today
+        return self._egress_counts
+
+    def toggle_boundary(self, visible: Optional[bool] = None) -> None:
+        if not self.feature("boundary"):
+            return
+        target = self.boundary_panel.isHidden() if visible is None else bool(visible)
+        self.boundary_panel.setVisible(target)
+        self.boundary_button.setChecked(target)
+        self._refresh_boundary()
+
+    def _refresh_boundary(self) -> None:
+        if not hasattr(self, "boundary_panel") or not self.feature("boundary"):
+            return
+        counts = self._today_counts()
+        searches, direct = counts.get("search", 0), counts.get("direct", 0)
+        open_path = self.tor_phase == "running" and _tor_is_enabled(self.core)
+        label = f"{searches} search{'es' if searches != 1 else ''} today" if searches else "Nothing left today"
+        self.boundary_button.set_state(open_path, self._searching, label)
+        if self.boundary_panel.isHidden():
+            return
+        panel = self.boundary_panel
+        panel.receipt.setText(
+            f"Today: {searches} search quer{'y' if searches == 1 else 'ies'} left over Tor · "
+            f"{direct} direct download{'s' if direct != 1 else ''} · no telemetry")
+        model = self.current_model_id()
+        if self._model_loading:
+            model_text = f"Loading {self._tier_name(self._model_loading)}…"
+        else:
+            model_text = f"{self._tier_name(model)} · {self._describe_model(model)} · ready"
+        rows = panel.machine_rows
+        rows["Model"].setText(model_text)
+        rows["Project"].setText(f"{Path(self.workspace).name} · {self.branch_label.text()}" if self.workspace
+                                else "No project open")
+        changes = len((self.current_snapshot or {}).get("changes") or [])
+        rows["Disk"].setText(f"{changes} observed change{'s' if changes != 1 else ''}")
+        rows["Sessions"].setText("Saved on this machine" if getattr(self, "preferences", {}).get("save_history", True)
+                                 else "Not saved")
+        panel.node_state.setText({
+            "running": "Circuit verified", "starting": "Checking the circuit…", "probing": "Checking the circuit…",
+        }.get(self.tor_phase, "Nothing can leave over Tor"))
+        out = panel.outside_rows
+        if not open_path and self.tor_phase not in ("starting", "probing"):
+            out["Chat search"].setText("Blocked · Tor is off")
+        elif self.search_consent.isChecked() or (self.active_kind == "chat" and self.tor_in_use):
+            out["Chat search"].setText("Allowed this turn")
+        else:
+            out["Chat search"].setText("Not allowed this turn")
+        rules = self._project_rules() if self.feature("rules") else None
+        out["Agent network"].setText("Closed by this project’s rules" if rules and rules.get("noNetwork")
+                                     else "Tor-only bridge · fails closed")
+        out["Downloads"].setText(f"Downloading {self._pulling} directly…" if self._pulling
+                                 else "Direct, only after you confirm")
+        out["Updates"].setText("Over Tor, checked automatically while Tor is up" if self.update_permission_enabled()
+                               else "Over Tor, only when you check")
+
+    def _pull_finished(self) -> None:
+        self._pulling = None
+        self._refresh_boundary()
+
+    def _sync_toolbar_features(self) -> None:
+        width = self.width()
+        self.palette_button.setVisible(self.feature("palette") and width >= 1000)
+        self.boundary_button.setVisible(self.feature("boundary") and width >= 860)
+        self.boundary_button.set_label_visible(width >= 1200)
+        lock = getattr(self, "lock_button", None)
+        if lock is not None:
+            lock.setVisible(self.feature("lock") and width >= 1000)
+
+    def _palette_rows(self) -> list[tuple[str, str, str, Callable[[], None]]]:
+        rows: list[tuple[str, str, str, Callable[[], None]]] = []
+        for index in range(self.left_rail.projects.count()):
+            item = self.left_rail.projects.item(index)
+            path = _as_text(item.data(Qt.ItemDataRole.UserRole))
+            hint = "current" if _path_key(path) == _path_key(self.workspace) else path
+            rows.append(("Projects", Path(path).name or path, hint, lambda p=path: self.select_workspace(p)))
+        for index in range(self.left_rail.sessions.count()):
+            item = self.left_rail.sessions.item(index)
+            title, _, when = item.text().partition("\n")
+            session_id = _as_text(item.data(Qt.ItemDataRole.UserRole))
+            rows.append(("Sessions", title, when, lambda sid=session_id: self.load_session(sid)))
+        for model in self.installed_model_ids:
+            hint = "in use" if model == self.current_model_id() else ""
+
+            def pick(m: str = model) -> None:
+                index = self.model_combo.findData(m)
+                if index >= 0:
+                    self.model_combo.setCurrentIndex(index)
+                    self._model_picked()
+
+            rows.append(("Model power", f"{self._tier_name(model)} · {self._describe_model(model)}", hint, pick))
+        native = lambda seq: QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+        commands: list[tuple[str, str, Callable[[], None], bool]] = [
+            ("New task", native("Ctrl+N"), lambda: self.new_task(), True),
+            ("Toggle terminal", native("Ctrl+`"), lambda: self.toggle_terminal(), True),
+            ("Review changes", "", lambda: (self.toggle_inspector(True), self.inspector.tabs.setCurrentWidget(self.inspector.changes_tab)), True),
+            ("Show the Run tab", "", lambda: (self.toggle_inspector(True), self.inspector.show_run_tab()), self.feature("runPanel")),
+            ("Turn Tor off" if self.tor_phase == "running" else "Turn Tor on", "", self._toggle_tor, True),
+            ("Models", "", self.open_model_manager, True),
+            ("Settings", native("Ctrl+,"), self.open_settings, True),
+            ("New features", "", self.open_features_popover, True),
+            ("Export conversation", native("Ctrl+Shift+S"), self.export_conversation, True),
+            ("Boundary map", native("Ctrl+B"), lambda: self.toggle_boundary(), self.feature("boundary")),
+            ("Keyboard shortcuts", "?", lambda: self.open_settings_tab("Keyboard"), self.feature("keyboard")),
+            ("Run setup again", "", self.open_setup, self.feature("setup")),
+            ("Lock Onionmind", "", lambda: getattr(self, "lock_now", lambda: None)(), self.feature("lock")),
+            ("Export network log", "", self.open_network_log, self.feature("netlog")),
+            ("Agent rules for this project", "", lambda: self.open_settings_tab("Agent rules"), self.feature("rules")),
+        ]
+        if self.feature("presets"):
+            for preset in getattr(self.desktop_core, "load_presets", lambda _s: [])(self.settings_data):
+                commands.append((f"Preset: {preset['name']}", "",
+                                 lambda pid=preset["id"]: getattr(self, "set_preset", lambda _p: None)(pid), True))
+        if self.feature("appearance"):
+            commands.append(("Switch to light theme" if current_theme() == "dark" else "Switch to dark theme", "",
+                             lambda: getattr(self, "toggle_theme", lambda: None)(), True))
+        rows.extend(("Commands", label, hint, action) for label, hint, action, shown in commands if shown)
+        return rows
+
+    def open_palette(self) -> None:
+        if not self.feature("palette"):
+            return
+        palette = CommandPalette(self, self._palette_rows())
+        self._palette = palette
+        palette.place()
+        palette.open()
+        palette.search.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def open_settings_tab(self, label: str) -> None:
+        dialog = SettingsDialog(self.data_root, self.harness_bridge.limitation, self.update_bridge, self)
+        dialog.show_tab(label)
+        dialog.exec()
+
+    def _question_shortcut(self) -> None:
+        if not self.feature("keyboard"):
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)) and not getattr(focus, "isReadOnly", lambda: False)():
+            return                               # typing a question mark, not asking for help
+        self.open_settings_tab("Keyboard")
+
+    def network_log_rows(self) -> list[dict[str, str]]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        rows: list[dict[str, str]] = []
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        if log_type is not None:
+            rows.extend(log_type(self.egress_path).entries(today))
+        agent_rows = getattr(self.desktop_core, "agent_net_entries", None)
+        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
+        if callable(agent_rows) and net_log:
+            rows.extend(agent_rows(net_log, today))
+        return sorted(rows, key=lambda row: row.get("time", ""))
+
+    def open_network_log(self) -> None:
+        if not self.feature("netlog"):
+            return
+        dialog = NetworkLogDialog(self.network_log_rows(), self.desktop_core, self)
+        self._netlog_dialog = dialog
+        dialog.exec()
+        if dialog.saved_path:
+            self.set_status(f"Saved {dialog.saved_path} · {len(dialog.rows)} entries")
+
+    def _apply_feature_palette(self, on: bool) -> None:
+        del on
+        self._sync_toolbar_features()
+
+    def _apply_feature_boundary(self, on: bool) -> None:
+        if not on:
+            self.boundary_panel.hide()
+        self._sync_toolbar_features()
+        self._refresh_boundary()
+
+    def _apply_feature_zones(self, on: bool) -> None:
+        self.inspector.set_zones(on)
+
+    def _apply_feature_netlog(self, on: bool) -> None:
+        self.inspector.netlog_button.setVisible(on)
+
+    def _apply_feature_keyboard(self, on: bool) -> None:
+        set_system_motion_probe(on)
 
     def _apply_feature_runPanel(self, on: bool) -> None:
         self.inspector.set_run_tab(on)
