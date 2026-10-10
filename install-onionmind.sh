@@ -1779,7 +1779,7 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable=None):
+def agent_argv(model=None, task=None, executable=None, stream=False):
     """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
     This used to be `ollama launch dsh -- --profile headless <task>`. The
@@ -1797,6 +1797,12 @@ def agent_argv(model=None, task=None, executable=None):
     argv = list(executable) if executable else qwen_launcher()
     if model:
         argv += ["--model", model]
+    if stream:
+        # The desktop's structured mode: qwen reads the task and the person's
+        # approvals as JSON lines on stdin and reports every step as JSON on
+        # stdout, so a protected action can wait for an answer instead of
+        # stopping. Same process, same environment, same funnel.
+        return argv + ["--input-format", "stream-json", "--output-format", "stream-json"]
     if task:                                     # no task = interactive session
         argv += ["-p", task]
     return argv
@@ -1831,12 +1837,16 @@ def agent_env(env=None):
     return _contain_env(env)
 
 
-def run_agent(task=None, model=None, yolo=False, workdir=None):
+def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
+              extra_deny=(), no_network=False):
     """Run the coding agent over Tor and return its exit code.
 
     qwen_setup() writes the settings the agent reads (deny list, approval mode,
     proxy) and agent_env() re-verifies Tor and applies the containment, so both
     halves of the boundary are composed before the process starts.
+
+    stream=True is the desktop's structured mode (see agent_argv): the task
+    and approvals arrive on stdin, so the task argument is not used.
     """
     import subprocess
 
@@ -1847,7 +1857,8 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     if model:
         MODEL = model
     workdir = os.path.abspath(workdir or os.getcwd())
-    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo)  # SystemExit if no Tor
+    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo, extra_deny=extra_deny,
+                                          no_network=no_network)  # SystemExit if no Tor
     print("[onionmind] agent web: Tor only. Its search goes over Tor, everything it")
     print("[onionmind]      runs inherits the proxy, and its python and node may only")
     print("[onionmind]      open loopback sockets. Refuses to start when Tor is down.")
@@ -1858,13 +1869,16 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     else:
         print("[onionmind] approvals: on. Protected actions wait to be approved, and")
         print("[onionmind]      stop safely where there is nobody to ask.")
+    if no_network:
+        print("[onionmind] no network: this project's rules close the Tor bridge too.")
     print(f"[onionmind]      Everything it sends out is logged to {NET_LOG}")
     print(CONTAINMENT_CEILING)
     print()
     # Piped stdout is block-buffered, so without this the desktop's process
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
-    return subprocess.call(agent_argv(model, task), env=env, cwd=workdir)
+    return subprocess.call(agent_argv(model, None if stream else task, stream=stream),
+                           env=env, cwd=workdir)
 
 
 def spawn_code(workdir, model=None):
@@ -1898,12 +1912,24 @@ def qwen_launcher():
             if qwen.lower().endswith((".cmd", ".bat")) else [qwen])
 
 
-def qwen_setup(workdir, ctx=None, yolo=False):
+# A project's Agent rules may only ADD denials, and only of reading or editing
+# paths - nothing that arrives this way can widen what the agent may do.
+_EXTRA_DENY = re.compile(r"^(read_file|edit)\([^()\s][^()]*\)$")
+# Where a no-network project points every proxy variable: a loopback port
+# nothing listens on, so a connection attempt is refused instead of leaving.
+CLOSED_PROXY = "http://127.0.0.1:9"
+
+
+def qwen_setup(workdir, ctx=None, yolo=False, extra_deny=(), no_network=False):
     """Write Qwen Code's settings and build its environment.
 
     The one place the agent's boundary is composed, shared by the terminal
     session (run_code) and Agent mode (run_agent), so a change to the deny list
     or the proxy cannot reach one and miss the other.
+
+    extra_deny and no_network come from a project's Agent rules and only ever
+    narrow the boundary: more denied paths, or no way out at all - the Tor
+    bridge closed and Onionmind's own search tools denied.
     """
     ctx = ctx or code_ctx()
     detect_backend()
@@ -1935,7 +1961,10 @@ def qwen_setup(workdir, ctx=None, yolo=False):
         # commands cannot be pointed at a proxy at all. Both are hard denials -
         # the tool call is refused, not queued for approval.
         "permissions": {"deny": ["web_search", "web_fetch"] +
-                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS]},
+                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS] +
+                        [rule for rule in extra_deny if _EXTRA_DENY.match(str(rule))] +
+                        (["mcp__onionmind__web_search", "mcp__onionmind__web_fetch"]
+                         if no_network else [])},
         # YOLO stops qwen asking before it edits a file or runs a command. It
         # does NOT reach the deny list above: those stay hard denials whichever
         # mode is set (checked against qwen-code - a denied tool is still
@@ -1966,6 +1995,11 @@ def qwen_setup(workdir, ctx=None, yolo=False):
     conf = _read_settings(user)
     conf.setdefault("mcpServers", {}).update(mcp)   # keep the user's own servers
     _write_settings(user, conf)
+
+    if no_network:
+        proxy = CLOSED_PROXY
+        settings["proxy"] = proxy
+        env.update(_proxy_env(proxy))
 
     path = _settings_path(workdir)
     merged = _read_settings(path)                # keep whatever the project already set
@@ -2398,7 +2432,13 @@ if __name__ == "__main__":
         run_code(os.path.abspath(rest[0] if rest else os.getcwd()), yolo=yolo)
         raise SystemExit
     if "--agent" in sys.argv:
-        args = [a for a in sys.argv[1:] if a not in ("--agent", "--yolo")]
+        flags = ("--agent", "--yolo", "--stream-json", "--no-network")
+        args = [a for a in sys.argv[1:] if a not in flags]
+        deny = []
+        while "--deny" in args[:-1]:             # --deny RULE, repeatable
+            i = args.index("--deny")
+            deny.append(args.pop(i + 1))
+            args.pop(i)
         model = None
         workdir = None
         if len(args) >= 2 and args[0] == "--model":
@@ -2407,7 +2447,10 @@ if __name__ == "__main__":
             workdir, args = args[1], args[2:]
         try:
             raise SystemExit(run_agent(" ".join(args).strip() or None, model,
-                                       yolo=yolo, workdir=workdir))
+                                       yolo=yolo, workdir=workdir,
+                                       stream="--stream-json" in sys.argv,
+                                       extra_deny=deny,
+                                       no_network="--no-network" in sys.argv))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:
