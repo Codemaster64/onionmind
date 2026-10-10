@@ -2786,11 +2786,13 @@ def estimate_tokens(*parts: Any) -> int:
 
 
 def format_tokens(count: Optional[int]) -> str:
+    """'3.1k', '32k': k is 1024 tokens, the unit context windows are sized in
+    (and the one the workbench's own context slider already shows)."""
     if count is None:
         return "?"
     if count < 1000:
         return str(int(count))
-    value = count / 1000
+    value = count / 1024
     return f"{value:.1f}k" if value < 10 else f"{value:.0f}k"
 
 

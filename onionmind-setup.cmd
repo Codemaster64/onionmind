@@ -803,8 +803,10 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
 
     The finished message carries Ollama's own counters in "_stats" (prompt and
     generated tokens, generation time, measured reasoning time); on_progress,
-    when given, gets (chunks, seconds) about twice a second while text arrives.
-    Ollama streams one token per chunk, so that is a live tok/s reading."""
+    when given, gets (chunks, seconds, reasoning) about twice a second while
+    text arrives. Ollama streams one token per chunk, so that is a live tok/s
+    reading; reasoning says whether the model is inside its private reasoning
+    right now (thinking chunks, or an open inline <think> block)."""
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
@@ -823,6 +825,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
     message = {"role": "assistant", "content": ""}
     started = time.monotonic()
     timeline, think_span, chunks, reported = [], [None, None], 0, started
+    inline_depth = 0
     try:
         for raw in r.iter_lines(decode_unicode=True):
             if stop_event is not None and stop_event.is_set():
@@ -837,8 +840,15 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
             chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
+                before = len(message["content"])
                 message["content"] += content
                 timeline.append((len(message["content"]), now))
+                # Count only tags that END in this chunk; the 12-character
+                # overlap catches a tag split across two chunks exactly once.
+                window_start = max(0, before - 12)
+                for tag in _THINK_TAG.finditer(message["content"], window_start):
+                    if tag.end() > before:
+                        inline_depth = max(0, inline_depth + (-1 if tag.group(1) else 1))
                 on_text(content)
             thinking = chunk.get("thinking") or ""
             if thinking:
@@ -849,7 +859,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
                 chunks += 1
                 if on_progress is not None and now - reported >= 0.5:
                     reported = now
-                    on_progress(chunks, now - started)
+                    on_progress(chunks, now - started, bool(thinking) or inline_depth > 0)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
@@ -1187,8 +1197,9 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
         return turn(messages, stop_event, allow_search=allow_search)
     progress = None
     if on_event:
-        def progress(chunks, seconds):
-            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds})
+        def progress(chunks, seconds, reasoning=False):
+            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds,
+                      "reasoning": bool(reasoning)})
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
@@ -5245,11 +5256,13 @@ def estimate_tokens(*parts: Any) -> int:
 
 
 def format_tokens(count: Optional[int]) -> str:
+    """'3.1k', '32k': k is 1024 tokens, the unit context windows are sized in
+    (and the one the workbench's own context slider already shows)."""
     if count is None:
         return "?"
     if count < 1000:
         return str(int(count))
-    value = count / 1000
+    value = count / 1024
     return f"{value:.1f}k" if value < 10 else f"{value:.0f}k"
 
 
@@ -7488,6 +7501,33 @@ class NoticeCard(QFrame):
                 widget.setEnabled(False)
         self.spinner_label.setText(text)
         self.spinner_label.show()
+
+
+class ThoughtLine(QWidget):
+    """'Thought for Ns' under a reply; it expands to say why that is all you see."""
+
+    EXPLAIN = (
+        "The model’s reasoning stays private. Onionmind removes it before the reply is shown, "
+        "so only how long it took is kept."
+    )
+
+    def __init__(self, seconds: float, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        whole = max(1, round(seconds))
+        self.toggle = QPushButton(f"Thought for {whole}s")
+        self.toggle.setObjectName("chipButton")
+        self.toggle.setCheckable(True)
+        self.toggle.setAccessibleName(f"Thought for {whole} seconds. Show what this means")
+        self.detail = QLabel(self.EXPLAIN)
+        self.detail.setObjectName("meta")
+        self.detail.setWordWrap(True)
+        self.detail.hide()
+        self.toggle.toggled.connect(self.detail.setVisible)
+        layout.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.detail)
 
 
 class RunPanel(QWidget):
@@ -10091,6 +10131,13 @@ class OnionmindWindow(QMainWindow):
         self._agent_outcome: Optional[str] = None
         self._run_allow_all = False
         self._open_steps: dict[str, Any] = {}
+        # v2 model power and live numbers - only ever filled from real probes.
+        self._model_power: dict[str, Any] = {}
+        self._model_loading: Optional[str] = None
+        self._live_tps: Optional[float] = None
+        self._turn_reasoning = 0.0
+        self._last_stats: dict[str, Any] = {}
+        self._context_used_real: Optional[int] = None
         self._build_window()
         self.preferences = self._load_preferences()
         self._apply_preferences()
@@ -10190,6 +10237,7 @@ class OnionmindWindow(QMainWindow):
         self.model_combo.setAccessibleName("Onionmind model")
         self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
+        self.model_combo.activated.connect(lambda _index: self._model_picked())
         toolbar_layout.addWidget(self.model_combo)
         toolbar_layout.addWidget(self._build_context_slider())
         self.model_status = StatusPill("Model", "Checking", "busy")
@@ -10294,6 +10342,16 @@ class OnionmindWindow(QMainWindow):
         self.update_status.setFlat(True)
         self.update_status.clicked.connect(self.open_settings)
         self._set_update_notice(None)
+        # v2 modelPlus: live speed, graphics memory and context, hidden until on.
+        self.speed_status = QLabel("Idle")
+        self.vram_status = QLabel("")
+        self.ctx_status = QLabel("")
+        for label, name in ((self.speed_status, "Generation speed"), (self.vram_status, "Graphics memory"),
+                            (self.ctx_status, "Context in use")):
+            label.setObjectName("meta")
+            label.setAccessibleName(name)
+            label.hide()
+            self.statusBar().addPermanentWidget(label)
         self.statusBar().addPermanentWidget(self.update_status)
         self.scope_status = QLabel("No project selected")
         self.scope_status.setObjectName("meta")
@@ -10409,8 +10467,25 @@ class OnionmindWindow(QMainWindow):
         self.attachment_row.hide()
         outer.addWidget(self.attachment_row)
 
+        # v2 contextMeter warning row: hidden until the session nears its limit.
+        self.context_warning = QWidget()
+        warning_layout = QHBoxLayout(self.context_warning)
+        warning_layout.setContentsMargins(0, 0, 0, 0)
+        self.context_warning_label = QLabel()
+        self.context_warning_label.setObjectName("warning")
+        self.context_warning_label.setWordWrap(True)
+        context_new_task = QPushButton("New task")
+        context_new_task.setAccessibleName("Start a new task with an empty context")
+        context_new_task.clicked.connect(lambda: self.new_task())
+        warning_layout.addWidget(self.context_warning_label, 1)
+        warning_layout.addWidget(context_new_task)
+        self.context_warning.hide()
+        outer.addWidget(self.context_warning)
+        self.composer_outer = outer
+
         controls = QHBoxLayout()
         controls.setSpacing(7)
+        self.composer_controls = controls
         attach = QToolButton()
         attach.setIcon(_icon("attach"))
         attach.setToolTip("Attach files or images")
@@ -10471,6 +10546,30 @@ class OnionmindWindow(QMainWindow):
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
         controls.addWidget(self.disclosure, 1)
+        # v2 ladder: the model is loading; v2 contextMeter: the 44x4 bar.
+        self.model_loading = QProgressBar()
+        self.model_loading.setObjectName("meter")
+        self.model_loading.setRange(0, 0)
+        self.model_loading.setFixedWidth(56)
+        self.model_loading.setAccessibleName("Model loading")
+        self.model_loading.hide()
+        controls.addWidget(self.model_loading)
+        self.context_box = QWidget()
+        context_layout = QHBoxLayout(self.context_box)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(6)
+        self.context_meter = QProgressBar()
+        self.context_meter.setObjectName("meter")
+        self.context_meter.setFixedSize(44, 4)
+        self.context_meter.setTextVisible(False)
+        self.context_meter.setRange(0, 1000)
+        self.context_meter.setAccessibleName("Context window in use")
+        self.context_meter_label = QLabel("")
+        self.context_meter_label.setObjectName("meta")
+        context_layout.addWidget(self.context_meter, 0, Qt.AlignmentFlag.AlignVCenter)
+        context_layout.addWidget(self.context_meter_label)
+        self.context_box.hide()
+        controls.addWidget(self.context_box)
         self.send_button = QPushButton("Send")
         self.send_button.setObjectName("primaryButton")
         self.send_button.setAccessibleName("Send task")
@@ -10981,14 +11080,23 @@ class OnionmindWindow(QMainWindow):
         self.installed_model_ids = values
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        for header in self._model_menu_headers():
+            self.model_combo.addItem(header)
+            item = self.model_combo.model().item(self.model_combo.count() - 1)
+            if item is not None:
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
         counts: dict[str, int] = {}
         for model in values:
             base = self._describe_model(model)
             counts[base] = counts.get(base, 0) + 1
             label = base if counts[base] == 1 else f"{base} {counts[base]}"
-            self.model_combo.addItem(label, model)
+            side = self._model_side_label(model)
+            self.model_combo.addItem(f"{label}  ·  {side}" if side else label, model)
         index = self.model_combo.findData(current)
-        self.model_combo.setCurrentIndex(max(0, index))
+        if index < 0:
+            index = next((i for i in range(self.model_combo.count())
+                          if self.model_combo.itemData(i) is not None), 0)
+        self.model_combo.setCurrentIndex(index)
         self.model_combo.blockSignals(False)
 
     def current_model_id(self) -> str:
@@ -11002,9 +11110,15 @@ class OnionmindWindow(QMainWindow):
         except Exception:
             pass
         self.settings_data["model"] = model
+        if self.feature("modelPlus"):
+            per_mode = dict(self.settings_data.get("model_by_mode") or {})
+            per_mode[getattr(self, "mode", "agent")] = model
+            self.settings_data["model_by_mode"] = per_mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
         self.set_status(f"Model set to {self._describe_model(model)}")
+        self._refresh_model_headers()
+        self._update_context_meter()
 
     def _approval_text(self, yolo: bool) -> str:
         if yolo:
@@ -11045,6 +11159,15 @@ class OnionmindWindow(QMainWindow):
         self.settings_data["mode"] = mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
+        if getattr(self, "features", None) and self.feature("modelPlus"):
+            wanted = _as_text((self.settings_data.get("model_by_mode") or {}).get(mode))
+            if wanted and wanted in self.installed_model_ids and wanted != self.current_model_id():
+                self.model_combo.setCurrentIndex(self.model_combo.findData(wanted))
+                self._switch_loaded_model(wanted)
+                label = "Chat" if mode == "chat" else "Agent"
+                self.set_status(f"{label} uses {self._describe_model(wanted)}")
+        if hasattr(self, "context_box"):
+            self._update_context_meter()
 
     def focus_composer(self) -> None:
         self.composer.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -11263,8 +11386,11 @@ class OnionmindWindow(QMainWindow):
 
     def _sync_action_states(self) -> None:
         has_draft = bool(self.composer.toPlainText().strip() or self.attachments)
-        self.send_button.setEnabled(bool(self.active_kind) or has_draft)
+        loading = bool(getattr(self, "_model_loading", None))
+        self.send_button.setEnabled(bool(self.active_kind) or (has_draft and not loading))
         self.left_rail.set_conversation_available(bool(self.chat_messages))
+        if hasattr(self, "context_box"):
+            self._update_context_meter()
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
@@ -12058,6 +12184,9 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Describe a task or attach a local file first.")
             self.focus_composer()
             return
+        if self._model_loading:
+            self.set_status(f"{self._describe_model(self._model_loading)} is still loading. Sending waits until it is ready.")
+            return
         if not task:
             task = "Review the attached local files."
         search_allowed = self.mode == "chat" and self.search_consent.isChecked()
@@ -12264,9 +12393,13 @@ class OnionmindWindow(QMainWindow):
         if kind is None and was_running:
             self._alert_if_unfocused()
         self._sync_action_states()
+        if hasattr(self, "speed_status"):
+            self._update_live_status()           # "Idle" again once nothing runs
 
     def _start_chat(self, allow_search: bool = False) -> None:
         self.tor_in_use = allow_search
+        self._turn_reasoning = 0.0
+        self._live_tps = None
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
@@ -12375,6 +12508,9 @@ class OnionmindWindow(QMainWindow):
 
     def _chat_event(self, event: dict[str, Any]) -> None:
         kind = _as_text(event.get("kind"))
+        if kind in ("generating", "stats"):
+            self._generation_event(kind, event)
+            return
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
@@ -12445,6 +12581,7 @@ class OnionmindWindow(QMainWindow):
             answer = "The local model returned no answer."
         if self.stream_block is not None:
             self.stream_block.set_text(answer)
+        self._after_reply(stopped)
         raw_history = payload.get("history") or [
             *self.chat_messages,
             {"role": "assistant", "content": answer},
@@ -13307,6 +13444,304 @@ class OnionmindWindow(QMainWindow):
             self.stream_block.append_text("\n" + note)
         if status == "Done":
             self._notify("Agent run finished", f"{self._session_title()} · {Path(self.workspace or '').name}")
+
+    # --- v2: model power (ladder), model per mode and live stats ----------
+
+    def _model_menu_headers(self) -> list[str]:
+        headers: list[str] = []
+        if self.feature("ladder"):
+            power = self._model_power
+            name, total = power.get("gpu_name"), power.get("vram_total")
+            if total:
+                machine = f"This machine: {total / 1024:.0f} GB GPU" + (f" ({name})" if name else "")
+            elif power.get("ram"):
+                machine = f"This machine: no GPU reported · {power['ram'] / 1024:.0f} GB RAM"
+            else:
+                machine = "This machine: checking memory…" if not power else "This machine: memory unknown"
+            headers.append(f"{machine}. Switching unloads the current tier first.")
+        if self.feature("modelPlus"):
+            per_mode = self.settings_data.get("model_by_mode") or {}
+            chat = per_mode.get("chat") or self.current_model_id()
+            agent = per_mode.get("agent") or self.current_model_id()
+            headers.append(f"Chat uses {self._tier_name(chat)} · Agent uses {self._tier_name(agent)}"
+                           " · picking a tier sets it for the current mode")
+        return headers
+
+    def _refresh_model_headers(self) -> None:
+        """Rewrite the menu's header rows in place (a rebuild would re-enter
+        the combo's own change signal)."""
+        headers = iter(self._model_menu_headers())
+        for index in range(self.model_combo.count()):
+            if self.model_combo.itemData(index) is None:
+                text = next(headers, None)
+                if text is not None:
+                    self.model_combo.setItemText(index, text)
+
+    def _tier_name(self, model: str) -> str:
+        helper = getattr(self.desktop_core, "describe_model", None)
+        if callable(helper):
+            try:
+                tier = _as_text(_field(helper(model), "tier", ""))
+                if tier:
+                    return tier
+            except Exception:
+                pass
+        return model
+
+    def _model_side_label(self, model: str) -> str:
+        if not self.feature("ladder") or not self._model_power:
+            return ""
+        power = self._model_power
+        loaded = power.get("loaded") or []
+        if any(_as_text(item.get("name")).split(":")[0] == model.split(":")[0] or item.get("name") == model
+               for item in loaded):
+            return "In use"
+        sizes = power.get("sizes") or {}
+        size = sizes.get(model) or sizes.get(f"{model}:latest")
+        fit = getattr(self.desktop_core, "model_fit", None)
+        return fit(size, power.get("vram_total"), power.get("ram")) if callable(fit) else ""
+
+    def _probe_model_power(self) -> None:
+        """Real numbers for the ladder and the status bar, read off the UI thread."""
+        core, desktop_core = self.core, self.desktop_core
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            details = getattr(core, "installed_model_details", None)
+            loaded = getattr(core, "loaded_models", None)
+            memory = getattr(desktop_core, "gpu_memory_mb", None)
+            name = getattr(desktop_core, "gpu_name", None)
+            ram = getattr(desktop_core, "machine_memory_mb", None)
+            used, total = memory() if callable(memory) else (None, None)
+            return {
+                "sizes": {item["name"]: item.get("size") for item in (details() if callable(details) else [])},
+                "loaded": list(loaded()) if callable(loaded) else [],
+                "vram_used": used, "vram_total": total,
+                "gpu_name": name() if callable(name) and total else None,
+                "ram": ram() if callable(ram) else None,
+            }
+
+        def done(power: dict[str, Any]) -> None:
+            self._model_power = power
+            if self.feature("ladder") or self.feature("modelPlus"):
+                self.set_model_options(self.installed_model_ids, self.current_model_id())
+            self._update_live_status()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+
+    def _model_picked(self) -> None:
+        """A person chose a tier in the menu: with ladder on, make it the one in memory."""
+        self._switch_loaded_model(self.current_model_id())
+
+    def _switch_loaded_model(self, model: str) -> None:
+        if not self.feature("ladder") or self.active_kind or not model:
+            return
+        load = getattr(self.core, "load_model", None)
+        unload = getattr(self.core, "unload_model", None)
+        loaded_now = getattr(self.core, "loaded_models", None)
+        if not callable(load) or getattr(self.core, "BACKEND", "ollama") not in ("ollama", None):
+            return
+        previous = [item.get("name") for item in (self._model_power.get("loaded") or [])
+                    if item.get("name") and item.get("name") != model]
+        self._model_loading = model
+        label = self._describe_model(model)
+        old = ", ".join(self._tier_name(name) for name in previous)
+        self.set_status(f"Unloading {old} and loading {self._tier_name(model)} into memory…" if old
+                        else f"Loading {self._tier_name(model)} into memory…")
+        self.model_status.set_status(f"Loading {self._tier_name(model)}…", "busy")
+        self.model_status.setVisible(True)
+        self.model_loading.show()
+        self.disclosure.setText(f"Loading {self._tier_name(model)}… sending waits until it is ready")
+        self.model_combo.setEnabled(False)
+        self._sync_action_states()
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            current = list(loaded_now()) if callable(loaded_now) else []
+            for item in current:
+                name = item.get("name")
+                if name and name != model and callable(unload):
+                    unload(name)
+            load(model)
+            return {"loaded": list(loaded_now()) if callable(loaded_now) else []}
+
+        def done(payload: dict[str, Any]) -> None:
+            self._model_loading = None
+            self._model_power["loaded"] = payload.get("loaded") or []
+            self._model_load_finished(True, f"{self._tier_name(model)} · {label} is loaded and ready")
+            self.inspector.append_activity(f"{self._tier_name(model)} loaded into memory")
+
+        def failed(message: str) -> None:
+            self._model_loading = None
+            self._model_load_finished(False, f"Could not load {self._tier_name(model)}: {message}")
+            self._report_error(message)
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(failed)
+
+    def _model_load_finished(self, ok: bool, message: str) -> None:
+        self.model_loading.hide()
+        self.model_combo.setEnabled(not self.active_kind)
+        self.model_status.set_status("Ready" if ok else "Unavailable", "good" if ok else "bad")
+        self.model_status.setVisible(self.width() >= 1280)
+        self.disclosure.setText(
+            "Private local chat · Tor search needs one-turn permission" if self.mode == "chat"
+            else "Early access · Agent network access is separate from Tor search"
+        )
+        self.set_status(message)
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+        self._sync_action_states()
+        self._update_live_status()
+
+    def _report_error(self, message: str) -> None:
+        """Hand a real failure to the errors feature; a no-op until it exists."""
+        del message
+
+    def _generation_event(self, kind: str, event: dict[str, Any]) -> None:
+        if kind == "generating":
+            seconds = float(event.get("seconds") or 0)
+            if seconds > 0:
+                self._live_tps = float(event.get("chunks") or 0) / seconds
+            if self.feature("thinking") and self.stream_block is not None:
+                self.stream_block.set_pending_label(
+                    "Thinking" if event.get("reasoning") else "Filtering private reasoning")
+        else:
+            self._last_stats = dict(event)
+            if event.get("tokens_per_second"):
+                self._live_tps = float(event["tokens_per_second"])
+            self._turn_reasoning += float(event.get("reasoning_seconds") or 0)
+            prompt = event.get("prompt_eval_count")
+            if isinstance(prompt, (int, float)):
+                self._context_used_real = int(prompt) + int(event.get("eval_count") or 0)
+            self._update_context_meter()
+        self._update_live_status()
+
+    def _update_live_status(self) -> None:
+        if not self.feature("modelPlus"):
+            return
+        running = self.active_kind == "chat"
+        self.speed_status.setText(
+            f"{self._live_tps:.0f} tok/s" if running and self._live_tps else "Idle")
+        used, total = self._model_power.get("vram_used"), self._model_power.get("vram_total")
+        if total:
+            self.vram_status.setText(f"VRAM {used / 1024:.1f} / {total / 1024:.0f} GB")
+        else:
+            in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
+            self.vram_status.setText(f"{in_vram / 1024 ** 3:.1f} GB in VRAM" if in_vram else "VRAM unknown")
+        used_ctx, limit = self._context_numbers()
+        fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))
+        self.ctx_status.setText(f"ctx {fmt(used_ctx)} / {fmt(limit)}")
+
+    def _after_reply(self, stopped: bool) -> None:
+        """What v2 adds under a finished Chat reply."""
+        if self.feature("thinking") and self._turn_reasoning > 0 and self.stream_block is not None:
+            self.transcript.add_widget(ThoughtLine(self._turn_reasoning))
+        self._live_tps = self._live_tps if not stopped else None
+        if self.feature("modelPlus"):
+            self._probe_model_power()
+        self._update_live_status()
+
+    # --- v2: context meter -------------------------------------------------
+
+    def _context_numbers(self) -> tuple[int, int]:
+        """(estimated tokens the next turn sends, the window it must fit)."""
+        estimate = getattr(self.desktop_core, "estimate_tokens", None)
+        count = estimate if callable(estimate) else (lambda *parts: sum(len(str(p)) for p in parts) // 4)
+        if getattr(self, "mode", "agent") == "agent":
+            limit = int(self.context_steps[self.context_slider.value()]) if hasattr(self, "context_slider") else 32768
+        else:
+            limit = int(getattr(self.core, "NUM_CTX", 0) or self.preferences.get("context_window", 16384))
+        parts: list[Any] = []
+        if self._context_used_real is not None and self.mode == "chat":
+            used = self._context_used_real
+        else:
+            used = 0
+            parts.append(self.chat_messages if self.mode == "chat" else "")
+        if self.feature("presets") and self.mode == "chat":
+            parts.append(getattr(self, "_preset_text", lambda: "")())
+        if self.mode == "agent":
+            parts.append(self._agents_md_text())
+        parts.append(self.composer.toPlainText())
+        files_chars = 0
+        if self.workspace:
+            root = Path(self.workspace)
+            budget = 256 * 1024                  # the same caps _build_user_payload applies
+            for relative in self.inspector.selected_context_files()[:12]:
+                try:
+                    size = min((root / relative).stat().st_size, MAX_TEXT_FILE_BYTES, budget)
+                except OSError:
+                    continue
+                files_chars += size
+                budget -= size
+        return used + count(*parts) + (files_chars + 3) // 4, max(1, limit)
+
+    def _agents_md_text(self) -> str:
+        agents = (self.current_snapshot or {}).get("agents_files") or []
+        if not agents or not self.workspace:
+            return ""
+        try:
+            return (Path(self.workspace) / agents[0]).read_text(encoding="utf-8", errors="replace")[:65536]
+        except OSError:
+            return ""
+
+    def _update_context_meter(self) -> None:
+        # The composer is built before the inspector and the preferences;
+        # nothing to measure until the whole window exists.
+        if not hasattr(self, "context_box") or not hasattr(self, "inspector") or not hasattr(self, "preferences"):
+            return
+        on = self.feature("contextMeter")
+        self.context_box.setVisible(on)
+        if not on:
+            self.context_warning.hide()
+            return
+        used, limit = self._context_numbers()
+        fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))
+        share = used / limit
+        self.context_meter.setValue(int(min(1.0, share) * 1000))
+        level = "warn" if share > 0.8 else ""
+        if self.context_meter.property("level") != level:
+            self.context_meter.setProperty("level", level)
+            self.context_meter.style().unpolish(self.context_meter)
+            self.context_meter.style().polish(self.context_meter)
+        self.context_meter_label.setText(f"{fmt(used)} / {fmt(limit)}")
+        files = len(self.inspector.selected_context_files())
+        agent_note = " The agent adds its own instructions on top of this." if self.mode == "agent" else ""
+        self.context_box.setToolTip(
+            f"Context: {used:,} of {limit:,} tokens. "
+            + ("System prompt, " if self.feature("presets") and self.mode == "chat" else "")
+            + ("AGENTS.md, " if self.mode == "agent" else "")
+            + f"{files} selected file(s) and this session’s messages."
+            + (" Measured by the model after the last reply." if self._context_used_real and self.mode == "chat"
+               else " Estimated at four characters per token.")
+            + agent_note
+        )
+        if share >= 1.0:
+            self.context_warning_label.setText(
+                "This session is over the model’s context. The oldest messages are left out of the next reply.")
+        elif share > 0.8:
+            self.context_warning_label.setText(
+                f"This session uses {share:.0%} of the context. Older messages will be left out soon. "
+                "Deselect files or start a new task.")
+        self.context_warning.setVisible(share > 0.8)
+
+    def _apply_feature_ladder(self, on: bool) -> None:
+        if on and not self._model_power:
+            self._probe_model_power()
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+
+    def _apply_feature_modelPlus(self, on: bool) -> None:
+        for label in (self.speed_status, self.vram_status, self.ctx_status):
+            label.setVisible(on)
+        if on and not self._model_power:
+            self._probe_model_power()
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+        self._update_live_status()
+
+    def _apply_feature_contextMeter(self, on: bool) -> None:
+        del on
+        self._update_context_meter()
 
     def _apply_feature_runPanel(self, on: bool) -> None:
         self.inspector.set_run_tab(on)

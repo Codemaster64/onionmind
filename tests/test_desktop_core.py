@@ -1122,7 +1122,8 @@ class WorkbenchV2CoreTests(unittest.TestCase):
         self.assertEqual(core.estimate_tokens("abcd" * 10), 10)
         self.assertEqual(core.estimate_tokens([{"content": "abcd"}, "abcd"]), 2)
         self.assertEqual(core.format_tokens(3140), "3.1k")
-        self.assertEqual(core.format_tokens(32768), "33k")
+        self.assertEqual(core.format_tokens(32768), "32k")
+        self.assertEqual(core.format_tokens(16384), "16k")
         self.assertEqual(core.format_tokens(512), "512")
 
     def test_errors_classify_from_the_engine_own_messages(self) -> None:

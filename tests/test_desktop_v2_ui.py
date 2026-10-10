@@ -450,5 +450,207 @@ class TimelineTests(V2Base):
             self._close(window)
 
 
+class _PowerCore:
+    """An engine stub with real-shaped model memory calls that record what ran."""
+
+    MODEL = "inferno"
+    BACKEND = "ollama"
+    NUM_CTX = 16384
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.loaded = [{"name": "inferno", "size": 17 * 1024 ** 3, "size_vram": 11 * 1024 ** 3}]
+
+    def installed_model_details(self):
+        return [{"name": "inferno", "size": 17 * 1024 ** 3}, {"name": "blaze", "size": 6 * 1024 ** 3},
+                {"name": "ember", "size": 3 * 1024 ** 3}]
+
+    def loaded_models(self):
+        return list(self.loaded)
+
+    def unload_model(self, name):
+        self.calls.append(("unload", name))
+        self.loaded = [m for m in self.loaded if m["name"] != name]
+
+    def load_model(self, name, keep_alive="30m"):
+        time.sleep(0.3)
+        self.calls.append(("load", name))
+        self.loaded = [{"name": name, "size": 6 * 1024 ** 3, "size_vram": 6 * 1024 ** 3}]
+        return True
+
+
+class LadderTests(V2Base):
+    def _items(self, window) -> list[tuple[str, object]]:
+        combo = window.model_combo
+        return [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())]
+
+    def test_off_the_model_menu_is_unchanged(self) -> None:
+        window = self._window()
+        try:
+            self.assertTrue(all(data is not None for _text, data in self._items(window)))
+            self.assertFalse(any("Fits" in text or "This machine" in text for text, _ in self._items(window)))
+        finally:
+            self._close(window)
+
+    def test_on_shows_this_machine_fit_labels_and_loads_the_picked_tier(self) -> None:
+        core = _PowerCore()
+        with mock.patch.object(desktop_core, "gpu_memory_mb", return_value=(11_000, 12_288)), \
+             mock.patch.object(desktop_core, "gpu_name", return_value="Test GPU"):
+            window = self._window(core=core, ladder=True)
+            try:
+                self.assertTrue(self._wait_until(lambda: window._model_power.get("vram_total")))
+                items = self._items(window)
+                self.assertTrue(items[0][0].startswith("This machine: 12 GB GPU (Test GPU)"))
+                self.assertIsNone(items[0][1])
+                self.assertFalse(window.model_combo.model().item(0).isEnabled())
+                labels = dict((data, text) for text, data in items if data)
+                self.assertTrue(labels["inferno"].endswith("In use"))
+                self.assertTrue(labels["blaze"].endswith("Fits"))
+                window.model_combo.setCurrentIndex(window.model_combo.findData("blaze"))
+                window._model_picked()
+                self.assertEqual(window._model_loading, "blaze")
+                self.assertFalse(window.model_loading.isHidden())
+                self.assertFalse(window.model_combo.isEnabled())
+                window.composer.setPlainText("hello")
+                self.assertFalse(window.send_button.isEnabled())
+                window.submit()
+                self.assertIn("still loading", window.status_label.text())
+                self.assertTrue(self._wait_until(lambda: window._model_loading is None, 5000))
+                self.assertEqual(core.calls, [("unload", "inferno"), ("load", "blaze")])
+                self.assertIn("is loaded and ready", window.status_label.text())
+                self.assertTrue(window.model_loading.isHidden())
+                self.assertTrue(window.send_button.isEnabled())
+            finally:
+                self._close(window)
+
+
+class ModelPlusTests(V2Base):
+    def test_off_no_live_stats_and_one_model_for_both_modes(self) -> None:
+        window = self._window()
+        try:
+            self.assertTrue(window.speed_status.isHidden())
+            window.set_mode("chat")
+            window.model_combo.setCurrentIndex(window.model_combo.findData("blaze"))
+            window.set_mode("agent")
+            self.assertEqual(window.current_model_id(), "blaze")
+        finally:
+            self._close(window)
+
+    def test_on_each_mode_remembers_its_tier_and_stats_are_real(self) -> None:
+        core = _PowerCore()
+        core.load_model = lambda name, keep_alive="30m": True
+        with mock.patch.object(desktop_core, "gpu_memory_mb", return_value=(4_096, 12_288)), \
+             mock.patch.object(desktop_core, "gpu_name", return_value=None):
+            window = self._window(core=core, modelPlus=True)
+            try:
+                self.assertFalse(window.speed_status.isHidden())
+                self.assertTrue(self._wait_until(lambda: window.vram_status.text() == "VRAM 4.0 / 12 GB"))
+                window.set_mode("chat")
+                window.model_combo.setCurrentIndex(window.model_combo.findData("ember"))
+                window.set_mode("agent")
+                window.model_combo.setCurrentIndex(window.model_combo.findData("inferno"))
+                window.set_mode("chat")
+                self.assertEqual(window.current_model_id(), "ember")
+                self.assertTrue(window.status_label.text().startswith("Chat uses"))
+                headers = [window.model_combo.itemText(i) for i in range(window.model_combo.count())
+                           if window.model_combo.itemData(i) is None]
+                self.assertTrue(any("Chat uses EMBER · Agent uses INFERNO" in h for h in headers), headers)
+                window.active_kind = "chat"
+                window._chat_event({"kind": "generating", "chunks": 40, "seconds": 2.0, "reasoning": False})
+                self.assertEqual(window.speed_status.text(), "20 tok/s")
+                window._chat_event({"kind": "stats", "tokens_per_second": 18.4,
+                                    "prompt_eval_count": 3000, "eval_count": 100})
+                self.assertEqual(window.speed_status.text(), "18 tok/s")
+                self.assertTrue(window.ctx_status.text().startswith("ctx 3.0k / 16k"), window.ctx_status.text())
+                window.active_kind = None
+                window._update_live_status()
+                self.assertEqual(window.speed_status.text(), "Idle")
+            finally:
+                window.active_kind = None
+                self._close(window)
+
+
+class ThinkingTests(V2Base):
+    def _pending(self, window):
+        block = window.transcript.add_message("assistant", "")
+        block.start_thinking("Thinking")
+        window.stream_block = block
+        window.active_kind = "chat"
+        return block
+
+    def test_off_labels_stay_and_no_thought_line(self) -> None:
+        window = self._window()
+        try:
+            block = self._pending(window)
+            window._chat_event({"kind": "generating", "chunks": 5, "seconds": 1.0, "reasoning": False})
+            self.assertEqual(block.thinking.label.text(), "Thinking")
+            window._chat_event({"kind": "stats", "reasoning_seconds": 4.2})
+            window._chat_complete({"answer": "Hi", "history": [], "stopped": False})
+            self.assertEqual(window.transcript.content.findChildren(ui.ThoughtLine), [])
+        finally:
+            window.active_kind = None
+            self._close(window)
+
+    def test_on_filter_phase_and_expandable_thought_for(self) -> None:
+        window = self._window(thinking=True)
+        try:
+            block = self._pending(window)
+            window._chat_event({"kind": "generating", "chunks": 5, "seconds": 1.0, "reasoning": True})
+            self.assertEqual(block.thinking.label.text(), "Thinking")
+            window._chat_event({"kind": "generating", "chunks": 9, "seconds": 2.0, "reasoning": False})
+            self.assertEqual(block.thinking.label.text(), "Filtering private reasoning")
+            window._chat_event({"kind": "stats", "reasoning_seconds": 3.0})
+            window._chat_event({"kind": "stats", "reasoning_seconds": 1.2})
+            window._chat_complete({"answer": "Hi", "history": [], "stopped": False})
+            lines = window.transcript.content.findChildren(ui.ThoughtLine)
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0].toggle.text(), "Thought for 4s")
+            self.assertTrue(lines[0].detail.isHidden())
+            lines[0].toggle.click()
+            self.assertFalse(lines[0].detail.isHidden())
+            self.assertNotIn("private plan", lines[0].detail.text())
+        finally:
+            window.active_kind = None
+            self._close(window)
+
+
+class ContextMeterTests(V2Base):
+    def test_off_nothing_in_the_composer_row(self) -> None:
+        window = self._window()
+        try:
+            self.assertTrue(window.context_box.isHidden())
+            self.assertTrue(window.context_warning.isHidden())
+        finally:
+            self._close(window)
+
+    def test_on_rises_with_files_and_warns_above_eighty_percent(self) -> None:
+        window = self._window(contextMeter=True)
+        try:
+            window.set_mode("chat")
+            window.chat_messages = []
+            window._context_used_real = None
+            self.assertFalse(window.context_box.isHidden())
+            window.composer.setPlainText("x" * 400)
+            self.assertEqual(window.context_meter_label.text(), "100 / 16k")
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "big.txt").write_text("y" * 40_000, encoding="utf-8")
+                window.workspace = tmp
+                window.inspector.populate_tree(["big.txt"])
+                item = window.inspector.file_tree.topLevelItem(0)
+                item.setCheckState(0, Qt.CheckState.Checked)
+                window._update_context_meter()
+                self.assertEqual(window.context_meter_label.text(), "9.9k / 16k")
+                self.assertTrue(window.context_warning.isHidden())
+                window.composer.setPlainText("x" * 20_000)
+                self.assertFalse(window.context_warning.isHidden())
+                self.assertEqual(window.context_meter.property("level"), "warn")
+                self.assertIn("of the context", window.context_warning_label.text())
+                window.composer.setPlainText("x" * 40_000)
+                self.assertIn("over the model’s context", window.context_warning_label.text())
+                window.workspace = None
+        finally:
+            self._close(window)
+
+
 if __name__ == "__main__":
     unittest.main()

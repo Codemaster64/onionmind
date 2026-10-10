@@ -586,8 +586,10 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
 
     The finished message carries Ollama's own counters in "_stats" (prompt and
     generated tokens, generation time, measured reasoning time); on_progress,
-    when given, gets (chunks, seconds) about twice a second while text arrives.
-    Ollama streams one token per chunk, so that is a live tok/s reading."""
+    when given, gets (chunks, seconds, reasoning) about twice a second while
+    text arrives. Ollama streams one token per chunk, so that is a live tok/s
+    reading; reasoning says whether the model is inside its private reasoning
+    right now (thinking chunks, or an open inline <think> block)."""
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
@@ -606,6 +608,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
     message = {"role": "assistant", "content": ""}
     started = time.monotonic()
     timeline, think_span, chunks, reported = [], [None, None], 0, started
+    inline_depth = 0
     try:
         for raw in r.iter_lines(decode_unicode=True):
             if stop_event is not None and stop_event.is_set():
@@ -620,8 +623,15 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
             chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
+                before = len(message["content"])
                 message["content"] += content
                 timeline.append((len(message["content"]), now))
+                # Count only tags that END in this chunk; the 12-character
+                # overlap catches a tag split across two chunks exactly once.
+                window_start = max(0, before - 12)
+                for tag in _THINK_TAG.finditer(message["content"], window_start):
+                    if tag.end() > before:
+                        inline_depth = max(0, inline_depth + (-1 if tag.group(1) else 1))
                 on_text(content)
             thinking = chunk.get("thinking") or ""
             if thinking:
@@ -632,7 +642,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
                 chunks += 1
                 if on_progress is not None and now - reported >= 0.5:
                     reported = now
-                    on_progress(chunks, now - started)
+                    on_progress(chunks, now - started, bool(thinking) or inline_depth > 0)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
@@ -970,8 +980,9 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
         return turn(messages, stop_event, allow_search=allow_search)
     progress = None
     if on_event:
-        def progress(chunks, seconds):
-            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds})
+        def progress(chunks, seconds, reasoning=False):
+            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds,
+                      "reasoning": bool(reasoning)})
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"

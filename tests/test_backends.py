@@ -322,13 +322,14 @@ def test_ollama_stream_reports_its_own_counters_and_reasoning_time():
          mock.patch.object(onionmind.time, "monotonic", side_effect=lambda: next(clock)):
         message = onionmind._ask_ollama_stream(
             [{"role": "user", "content": "q"}], lambda _chunk: None,
-            on_progress=lambda chunks, seconds: progress.append((chunks, seconds)))
+            on_progress=lambda chunks, seconds, reasoning: progress.append((chunks, seconds, reasoning)))
     stats = message["_stats"]
     assert stats["tokens_per_second"] == 20.0, stats
     assert stats["prompt_eval_count"] == 1234, stats
     assert stats["reasoning_seconds"] == 1.5, stats
     assert stats["num_ctx"] == onionmind.NUM_CTX, stats
     assert progress and progress[-1][0] >= 1, progress
+    assert progress[0][2] is True, progress          # the first report came mid-reasoning
     assert "plan" not in json.dumps(stats)
 
     inline = mock.Mock(status_code=200, ok=True)
@@ -343,6 +344,22 @@ def test_ollama_stream_reports_its_own_counters_and_reasoning_time():
         message = onionmind._ask_ollama_stream([{"role": "user", "content": "q"}], lambda _c: None)
     assert message["_stats"]["reasoning_seconds"] == 3.0, message["_stats"]
     assert "tokens_per_second" not in message["_stats"]
+
+    split = mock.Mock(status_code=200, ok=True)
+    split.iter_lines.return_value = [
+        json.dumps({"message": {"content": "<thi"}, "done": False}),
+        json.dumps({"message": {"content": "nk>hidden"}, "done": False}),
+        json.dumps({"message": {"content": "</th"}, "done": False}),
+        json.dumps({"message": {"content": "ink>shown"}, "done": False}),
+        json.dumps({"message": {}, "done": True}),
+    ]
+    clock = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    states = []
+    with mock.patch.object(onionmind.requests, "post", return_value=split), \
+         mock.patch.object(onionmind.time, "monotonic", side_effect=lambda: next(clock)):
+        onionmind._ask_ollama_stream([{"role": "user", "content": "q"}], lambda _c: None,
+                                     on_progress=lambda c, s, r: states.append(r))
+    assert states == [False, True, True, False], states   # a split tag counts once
 
 
 def test_turn_stream_emits_stats_and_search_counts_without_the_query():
