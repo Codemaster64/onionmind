@@ -2372,6 +2372,48 @@ __all__ = [
     "BundleUpdater",
     "pending_staging_dir",
     "prune_update_workdir",
+    "FEATURE_FLAGS",
+    "FEATURE_DEFAULTS",
+    "load_features",
+    "needs_web",
+    "web_query",
+    "PRESET_DEFAULTS",
+    "load_presets",
+    "active_preset",
+    "with_system_prompt",
+    "RULE_FLAGS",
+    "RULE_DEFAULTS",
+    "load_rules",
+    "store_rules",
+    "rule_decision",
+    "agent_rule_denials",
+    "parse_agent_line",
+    "agent_initialize_message",
+    "agent_task_message",
+    "agent_permission_response",
+    "agent_interrupt_message",
+    "describe_tool_request",
+    "edit_size",
+    "estimate_tokens",
+    "format_tokens",
+    "classify_error",
+    "search_sessions",
+    "sessions_older_than",
+    "hash_passphrase",
+    "verify_passphrase",
+    "EgressLog",
+    "agent_net_entries",
+    "network_log_csv",
+    "network_log_json",
+    "RevertRecord",
+    "revert_changes",
+    "undo_revert",
+    "change_stats",
+    "gpu_memory_mb",
+    "gpu_name",
+    "model_fit",
+    "node_version",
+    "node_supports_agent",
 ]
 
 
@@ -4606,6 +4648,840 @@ def prune_update_workdir(
                 shutil.rmtree(entry, ignore_errors=True)
         except OSError:
             continue
+
+
+# --- Workbench v2 ------------------------------------------------------
+#
+# The v2 workbench adds 24 features behind one flag dict. Everything below is
+# the Qt-free half: the flag store, the copy the features share, and the pure
+# helpers that turn real local state (sessions on disk, git, Ollama's own
+# numbers, the agent's stream) into what the UI shows. Nothing here opens a
+# network connection; the only processes it starts are git and nvidia-smi.
+
+FEATURE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("palette", "Command palette", "Ctrl+K jumps to projects, sessions, models and commands."),
+    ("boundary", "Boundary map", "A toolbar map of what stays on this machine and what leaves over Tor."),
+    ("provenance", "Where replies came from", "Each reply says it was answered on this machine, and whether a Tor search was used."),
+    ("webAsk", "Ask before searching the web", "When a question needs the web but Tor or Tor search is off, Onionmind asks first instead of guessing."),
+    ("approvals", "Ask before protected actions", "Agent pauses for Allow or Deny when it wants to edit, instead of stopping."),
+    ("runPanel", "Run tab", "The inspector gets a Run tab with the agent’s plan, status and output."),
+    ("timeline", "Agent steps as a timeline", "Tool activity shows as a compact timeline instead of cards."),
+    ("ladder", "Model power details", "The model menu shows what fits this GPU, and switching shows the model loading."),
+    ("thinking", "Thinking details", "Adds the privacy-filter step and a “Thought for Ns” line on replies."),
+    ("zones", "Activity by zone", "The Activity tab sorts events into Machine, Tor and Outside lanes."),
+    ("keyboard", "Keyboard shortcuts page", "Adds a Keyboard tab in Settings. Press ? to open it."),
+    ("setup", "First-launch setup", "A guided setup for model, Tor and project that you can run again."),
+    ("errors", "Error and recovery", "Clear messages with fix-it buttons when the model server stops, the GPU runs out of memory or a Tor circuit fails."),
+    ("msgActions", "Edit, regenerate and branch", "Edit and resend a message, ask again, copy, or start a new session from any reply."),
+    ("sessionSearch", "Search past sessions", "The session filter also searches message text across every project."),
+    ("contextMeter", "Context-window meter", "Shows how much of the model’s context this session uses, and warns before old messages are trimmed."),
+    ("undo", "Undo Agent changes", "Revert one file or all of them from the Changes tab, with Undo."),
+    ("rules", "Per-project Agent rules", "Settings tab for what Agent may do without asking, blocked paths and project instructions."),
+    ("lock", "Auto-delete and app lock", "Delete old conversations automatically and lock the window with a passphrase."),
+    ("netlog", "Network log export", "Export every connection that left this machine as JSON or CSV."),
+    ("modelPlus", "Model per mode and live stats", "Remember a tier for Chat and one for Agent, and show speed and memory in the status bar."),
+    ("presets", "Presets", "Pick a system prompt such as Code reviewer or Concise from the composer, and edit them in Settings."),
+    ("appearance", "Light theme, size and notifications", "Adds a light theme, interface size and notifications to Settings."),
+    ("empty", "Empty and first-use states", "Starter prompts in a new task, guidance when nothing has changed, and a no-model warning."),
+)
+
+# Every flag starts off except the one that makes the app ask before guessing.
+FEATURE_DEFAULTS: dict[str, bool] = {key: key == "webAsk" for key, _name, _desc in FEATURE_FLAGS}
+
+
+def load_features(settings: Mapping[str, Any]) -> dict[str, bool]:
+    """The validated flag view over settings["features"]; junk falls back."""
+    stored = settings.get("features") if isinstance(settings, Mapping) else None
+    features = dict(FEATURE_DEFAULTS)
+    if isinstance(stored, Mapping):
+        for key in FEATURE_DEFAULTS:
+            if isinstance(stored.get(key), bool):
+                features[key] = stored[key]
+    return features
+
+
+# webAsk: the prompt shapes that need the web. A heuristic on the user's own
+# words, run locally - it decides only whether to ASK, never to search.
+WEB_ASK_PATTERN = re.compile(
+    r"\b(latest|newest|newer|current(ly)?|today|this week|news|release[sd]?|version|"
+    r"changelog|look (it )?up|search|online|price|docs? for)\b",
+    re.IGNORECASE,
+)
+_WEB_QUERY_LEAD = re.compile(
+    r"^(is there|are there|can you|could you|please|what('s| is)|do you know)\s+",
+    re.IGNORECASE,
+)
+
+
+def needs_web(text: str) -> bool:
+    return bool(WEB_ASK_PATTERN.search(_as_text_core(text)))
+
+
+def web_query(text: str) -> str:
+    """The one query the webAsk card shows: the prompt minus its framing."""
+    query = re.sub(r"[?.!]+$", "", _as_text_core(text).strip())
+    return _WEB_QUERY_LEAD.sub("", query)[:70]
+
+
+# presets: the system prompt sent before the user's message. The default text
+# is only sent while the presets feature is on; with it off the request is the
+# same message list the workbench always sent.
+PRESET_DEFAULTS: tuple[dict[str, str], ...] = (
+    {"id": "default", "name": "Default", "short": "Balanced answers for everyday questions",
+     "text": "You are Onionmind, a private assistant running on this machine. Answer clearly and say when you are unsure."},
+    {"id": "review", "name": "Code reviewer", "short": "Looks for bugs, risks and missing tests",
+     "text": "Review code like a careful senior engineer. Point out bugs, security risks and missing tests first, then style. Quote the lines you mean."},
+    {"id": "concise", "name": "Concise", "short": "Short answers, no extra explanation",
+     "text": "Answer in as few words as possible. Use a list only when there are several steps."},
+    {"id": "teach", "name": "Explain step by step", "short": "Walks through the reasoning",
+     "text": "Explain step by step as if to a developer new to this codebase. Define terms the first time you use them."},
+)
+
+
+def load_presets(settings: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The four presets with any edited text applied; ids and names are fixed."""
+    edited = settings.get("preset_texts") if isinstance(settings, Mapping) else None
+    edited = edited if isinstance(edited, Mapping) else {}
+    presets = []
+    for preset in PRESET_DEFAULTS:
+        item = dict(preset)
+        text = edited.get(preset["id"])
+        if isinstance(text, str) and text.strip():
+            item["text"] = text
+        presets.append(item)
+    return presets
+
+
+def active_preset(settings: Mapping[str, Any]) -> dict[str, str]:
+    presets = load_presets(settings)
+    wanted = settings.get("preset") if isinstance(settings, Mapping) else None
+    return next((p for p in presets if p["id"] == wanted), presets[0])
+
+
+def with_system_prompt(messages: Iterable[Mapping[str, Any]], text: str) -> list[dict[str, Any]]:
+    """Messages with one leading system message; an existing one is replaced."""
+    items = [dict(m) for m in messages if m.get("role") != "system"]
+    return ([{"role": "system", "content": text}] if text.strip() else []) + items
+
+
+# rules: per-project Agent policy. Stored under settings["agent_rules"] keyed by
+# the project's normalized path, so two spellings of one folder share rules.
+RULE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("editTests", "Edit files in tests/ without asking", "Other edits still need your approval."),
+    ("runTests", "Run the test suite without asking", "Commands such as pytest, npm test or bundle exec rake test."),
+    ("readOnly", "Read-only: never edit files in this project", "Agent can read and run commands, but every edit is refused."),
+    ("noNetwork", "No network for Agent in this project", "Even the Tor-only bridge stays closed."),
+)
+RULE_DEFAULTS: dict[str, Any] = {
+    "editTests": False,
+    "runTests": True,
+    "readOnly": False,
+    "noNetwork": False,
+    "blocked": ".env, config/credentials.yml.enc",
+    "notes": "",
+}
+
+
+def _rule_key(workspace: Any) -> str:
+    text = _as_text_core(workspace).strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(text))))
+
+
+def load_rules(settings: Mapping[str, Any], workspace: Any) -> dict[str, Any]:
+    stored = settings.get("agent_rules") if isinstance(settings, Mapping) else None
+    entry = stored.get(_rule_key(workspace)) if isinstance(stored, Mapping) else None
+    rules = dict(RULE_DEFAULTS)
+    if isinstance(entry, Mapping):
+        for key, default in RULE_DEFAULTS.items():
+            value = entry.get(key)
+            if isinstance(default, bool) and isinstance(value, bool):
+                rules[key] = value
+            elif isinstance(default, str) and isinstance(value, str):
+                rules[key] = value
+    return rules
+
+
+def store_rules(settings: dict[str, Any], workspace: Any, rules: Mapping[str, Any]) -> dict[str, Any]:
+    """Write one project's rules into settings (in place) and return settings."""
+    key = _rule_key(workspace)
+    if not key:
+        return settings
+    table = settings.get("agent_rules")
+    table = dict(table) if isinstance(table, Mapping) else {}
+    clean = dict(RULE_DEFAULTS)
+    for name, default in RULE_DEFAULTS.items():
+        value = rules.get(name, default)
+        clean[name] = bool(value) if isinstance(default, bool) else _as_text_core(value)
+    table[key] = clean
+    settings["agent_rules"] = table
+    return settings
+
+
+def blocked_paths(rules: Mapping[str, Any]) -> list[str]:
+    raw = _as_text_core(rules.get("blocked", ""))
+    return [part.strip().replace("\\", "/") for part in raw.split(",") if part.strip()]
+
+
+# The tools qwen-code treats as edits and as shell commands. A permission
+# request names one of these; anything else is not an edit.
+AGENT_EDIT_TOOLS = frozenset({"edit", "write_file", "notebook_edit", "replace"})
+AGENT_SHELL_TOOLS = frozenset({"run_shell_command", "exec", "monitor"})
+_TEST_COMMAND = re.compile(
+    r"(^|[\s;&|/])(pytest|py\.test|unittest|tox|nox|npm (run )?test|yarn test|pnpm test|"
+    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake( test)?|"
+    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (check|test))\b|(^|[\s/])tests?/",
+    re.IGNORECASE,
+)
+
+
+def _request_path(tool_input: Mapping[str, Any]) -> str:
+    for key in ("file_path", "path", "absolute_path", "notebook_path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _relative_to(path: str, workspace: Any) -> str:
+    if not path:
+        return ""
+    root = _as_text_core(workspace)
+    try:
+        candidate = Path(path)
+        if root and candidate.is_absolute():
+            return candidate.resolve(strict=False).relative_to(
+                Path(root).resolve(strict=False)
+            ).as_posix()
+    except (OSError, ValueError):
+        return candidate.as_posix()
+    return Path(path).as_posix()
+
+
+def _strip_dot_slash(path: str) -> str:
+    while path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")
+
+
+def _matches_blocked(relative: str, blocked: Iterable[str]) -> Optional[str]:
+    import fnmatch
+
+    relative = _strip_dot_slash(relative)
+    for pattern in blocked:
+        clean = _strip_dot_slash(pattern).rstrip("/")
+        if not clean:
+            continue
+        if (
+            relative == clean
+            or relative.startswith(clean + "/")
+            or fnmatch.fnmatch(relative, clean)
+            or fnmatch.fnmatch(relative.rsplit("/", 1)[-1], clean)
+        ):
+            return pattern
+    return None
+
+
+def rule_decision(
+    rules: Mapping[str, Any],
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    workspace: Any,
+) -> tuple[str, str]:
+    """('allow' | 'deny' | 'ask', reason) for one agent permission request.
+
+    Deny wins over allow: a blocked path or a read-only project refuses even an
+    edit that editTests would otherwise let through. 'ask' means the person
+    decides (or, with approvals off, the run stops safely as it always has).
+    """
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    relative = _relative_to(_request_path(tool_input), workspace)
+    hit = _matches_blocked(relative, blocked_paths(rules)) if relative else None
+    if hit:
+        return "deny", f"{relative} is a blocked path in this project ({hit})"
+    if tool_name in AGENT_SHELL_TOOLS:
+        command = _as_text_core(tool_input.get("command"))
+        for pattern in blocked_paths(rules):
+            if pattern and pattern in command:
+                return "deny", f"the command touches a blocked path ({pattern})"
+        if rules.get("runTests") and _TEST_COMMAND.search(command):
+            return "allow", "project rule: run the test suite without asking"
+        return "ask", ""
+    if tool_name in AGENT_EDIT_TOOLS:
+        if rules.get("readOnly"):
+            return "deny", "this project is read-only for Agent"
+        parts = relative.split("/")
+        if rules.get("editTests") and parts and parts[0] in ("tests", "test"):
+            return "allow", "project rule: edits in tests/ allowed without asking"
+        return "ask", ""
+    return "ask", ""
+
+
+def agent_rule_denials(rules: Mapping[str, Any]) -> list[str]:
+    """qwen-code permission deny rules for a project's blocked paths.
+
+    Read rules cover every read tool and edit rules every edit tool, so a
+    blocked path is refused by the agent itself - even under YOLO, which never
+    reaches the deny list. Patterns are anchored at the project root ("/x"),
+    and a bare name also matches at any depth.
+    """
+    denials: list[str] = []
+    for pattern in blocked_paths(rules):
+        clean = _strip_dot_slash(pattern).rstrip("/")
+        if not clean or any(ch in clean for ch in "()"):
+            continue
+        anchored = [f"/{clean}"] + ([f"/**/{clean}"] if "/" not in clean else [])
+        for spec in anchored:
+            denials += [f"read_file({spec})", f"edit({spec})"]
+    return denials
+
+
+# Agent stream: qwen-code's stream-json protocol, read line by line from the
+# process the desktop already owns. Non-JSON lines (Onionmind's own banner,
+# stderr) come back as text; nothing here trusts the agent's prose as proof.
+
+def parse_agent_line(line: str) -> dict[str, Any]:
+    """One stdout line as a typed event: {"kind": ..., ...}."""
+    text = _as_text_core(line).strip()
+    if not text:
+        return {"kind": "blank"}
+    if not text.startswith("{"):
+        return {"kind": "text", "text": text}
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return {"kind": "text", "text": text}
+    if not isinstance(message, dict):
+        return {"kind": "text", "text": text}
+    kind = message.get("type")
+    if kind == "control_request":
+        request = message.get("request") or {}
+        if request.get("subtype") == "can_use_tool":
+            return {
+                "kind": "permission",
+                "request_id": _as_text_core(message.get("request_id")),
+                "tool": _as_text_core(request.get("tool_name")),
+                "tool_use_id": _as_text_core(request.get("tool_use_id")),
+                "input": request.get("input") if isinstance(request.get("input"), dict) else {},
+            }
+        return {"kind": "control", "subtype": _as_text_core(request.get("subtype")),
+                "request_id": _as_text_core(message.get("request_id"))}
+    if kind == "control_response":
+        response = message.get("response") or {}
+        return {"kind": "control_response",
+                "request_id": _as_text_core(response.get("request_id")),
+                "ok": response.get("subtype") == "success"}
+    if kind == "system":
+        return {"kind": "system", "subtype": _as_text_core(message.get("subtype")),
+                "session_id": _as_text_core(message.get("session_id"))}
+    if kind in ("assistant", "user"):
+        content = (message.get("message") or {}).get("content")
+        blocks = content if isinstance(content, list) else [{"type": "text", "text": _as_text_core(content)}]
+        events: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text" and kind == "assistant":
+                visible = strip_thinking(_as_text_core(block.get("text")))
+                if visible:
+                    events.append({"kind": "say", "text": visible})
+            elif block_type == "tool_use":
+                events.append({"kind": "tool_use", "id": _as_text_core(block.get("id")),
+                               "tool": _as_text_core(block.get("name")),
+                               "input": block.get("input") if isinstance(block.get("input"), dict) else {}})
+            elif block_type == "tool_result":
+                result = block.get("content")
+                if isinstance(result, list):
+                    result = " ".join(_as_text_core(item.get("text")) for item in result if isinstance(item, dict))
+                events.append({"kind": "tool_result", "id": _as_text_core(block.get("tool_use_id")),
+                               "error": bool(block.get("is_error")),
+                               "text": _as_text_core(result)[:2000]})
+        return {"kind": "batch", "events": events}
+    if kind == "result":
+        return {"kind": "result", "ok": not message.get("is_error"),
+                "subtype": _as_text_core(message.get("subtype")),
+                "text": strip_thinking(_as_text_core(message.get("result"))),
+                "duration_ms": message.get("duration_ms"),
+                "turns": message.get("num_turns")}
+    return {"kind": "other", "type": _as_text_core(kind)}
+
+
+def agent_initialize_message(request_id: str = "onionmind-init") -> str:
+    """The handshake qwen-code waits for before it reads a task (it hangs without one)."""
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "initialize"}}) + "\n"
+
+
+def agent_task_message(task: str, session_id: str = "onionmind") -> str:
+    return json.dumps({"type": "user", "session_id": session_id, "parent_tool_use_id": None,
+                       "message": {"role": "user", "content": task}}) + "\n"
+
+
+def agent_permission_response(
+    request_id: str, allow: bool, tool_input: Mapping[str, Any] | None = None, message: str = ""
+) -> str:
+    response: dict[str, Any] = {"behavior": "allow" if allow else "deny"}
+    if allow:
+        response["updatedInput"] = dict(tool_input or {})
+    else:
+        response["message"] = message or "Denied by the person running Onionmind."
+    return json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": request_id, "response": response}}) + "\n"
+
+
+def agent_interrupt_message(request_id: str = "onionmind-stop") -> str:
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "interrupt"}}) + "\n"
+
+
+def describe_tool_request(tool: str, tool_input: Mapping[str, Any], workspace: Any = None) -> str:
+    """Plain words for what the agent wants: 'edit src/app.py', 'run pytest -q'."""
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    if tool in AGENT_SHELL_TOOLS:
+        return f"run {_as_text_core(tool_input.get('command')).strip()[:160]}"
+    path = _relative_to(_request_path(tool_input), workspace)
+    if tool in AGENT_EDIT_TOOLS:
+        return f"edit {path}" if path else "edit a file"
+    if path:
+        return f"{tool.replace('_', ' ')} {path}"
+    return tool.replace("_", " ") or "use a tool"
+
+
+def edit_size(tool: str, tool_input: Mapping[str, Any]) -> tuple[int, int]:
+    """(+added, -removed) lines an edit request proposes, from its own input."""
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    if tool == "write_file":
+        return len(_as_text_core(tool_input.get("content")).splitlines()), 0
+    if tool in ("edit", "replace"):
+        old = _as_text_core(tool_input.get("old_string")).splitlines()
+        new = _as_text_core(tool_input.get("new_string")).splitlines()
+        return len(new), len(old)
+    return 0, 0
+
+
+# contextMeter: an honest estimate before a turn (characters / 4, the usual
+# rule of thumb), replaced by the model's own prompt_eval_count after one.
+
+def _character_count(part: Any) -> int:
+    if isinstance(part, Mapping):
+        return _character_count(part.get("content"))
+    if isinstance(part, (list, tuple)):
+        return sum(_character_count(item) for item in part)
+    return len(_as_text_core(part)) if part else 0
+
+
+def estimate_tokens(*parts: Any) -> int:
+    return (_character_count(parts) + 3) // 4
+
+
+def format_tokens(count: Optional[int]) -> str:
+    if count is None:
+        return "?"
+    if count < 1000:
+        return str(int(count))
+    value = count / 1000
+    return f"{value:.1f}k" if value < 10 else f"{value:.0f}k"
+
+
+# errors: classify the real failure text the engine already produces.
+_ERROR_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("oom", re.compile(r"out of memory|cuda error|cudaMalloc|insufficient (video )?memory|"
+                       r"requires more system memory|not enough memory|failed to allocate", re.IGNORECASE)),
+    ("server", re.compile(r"not running on 127\.0\.0\.1|no model server|connection refused|"
+                          r"model service is not running|could not reach the model", re.IGNORECASE)),
+    ("tor", re.compile(r"\btor\b.*(circuit|verif|not reachable|unavailable|failed)|"
+                       r"socks|could not verify", re.IGNORECASE)),
+)
+
+
+def classify_error(text: str) -> Optional[str]:
+    """'server' | 'oom' | 'tor' | None for a chat failure message."""
+    message = _as_text_core(text)
+    for key, pattern in _ERROR_CLASSES:
+        if pattern.search(message):
+            return key
+    return None
+
+
+# sessions: search across every project, age-based deletion, branching.
+
+def _session_value(session: Any, name: str, default: Any = None) -> Any:
+    if isinstance(session, Mapping):
+        return session.get(name, default)
+    return getattr(session, name, default)
+
+
+def search_sessions(
+    sessions: Iterable[Any], query: str, limit: int = 8, before: int = 28, after: int = 40
+) -> list[dict[str, Any]]:
+    """Message hits across every saved session, newest session first.
+
+    Each hit carries the snippet split around the match so the UI can
+    highlight it without re-searching. Reasoning was stripped at save time,
+    so only visible text is searched.
+    """
+    needle = _as_text_core(query).strip()
+    if len(needle) < 2:
+        return []
+    folded = needle.casefold()
+    hits: list[dict[str, Any]] = []
+    for session in sessions:
+        for index, message in enumerate(_session_value(session, "messages", ()) or ()):
+            if not isinstance(message, Mapping) or message.get("role") not in ("user", "assistant"):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            position = content.casefold().find(folded)
+            if position < 0:
+                continue
+            start = max(0, position - before)
+            end = min(len(content), position + len(needle) + after)
+            hits.append({
+                "session_id": _as_text_core(_session_value(session, "id")),
+                "title": _as_text_core(_session_value(session, "title", "Session")),
+                "workspace": _session_value(session, "workspace"),
+                "message_index": index,
+                "before": ("…" if start else "") + content[start:position].replace("\n", " "),
+                "match": content[position:position + len(needle)],
+                "after": content[position + len(needle):end].replace("\n", " ") + ("…" if end < len(content) else ""),
+            })
+            break                                # one hit per session keeps the list scannable
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        stamp = value
+    else:
+        try:
+            stamp = datetime.fromisoformat(_as_text_core(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def sessions_older_than(sessions: Iterable[Any], days: int, now: Optional[datetime] = None) -> list[Any]:
+    """Sessions whose last change is more than `days` days ago."""
+    if not days or days <= 0:
+        return []
+    now = now or datetime.now(timezone.utc)
+    old = []
+    for session in sessions:
+        stamp = _parse_timestamp(_session_value(session, "updated_at"))
+        if stamp is not None and (now - stamp).total_seconds() > days * 86400:
+            old.append(session)
+    return old
+
+
+AUTO_DELETE_CHOICES: tuple[int, ...] = (0, 1, 7, 30)
+LOCK_AFTER_CHOICES: tuple[int, ...] = (0, 5, 15, 60)
+
+
+# lock: a passphrase is stored only as a scrypt hash with its own salt.
+
+def hash_passphrase(passphrase: str, salt: Optional[bytes] = None) -> dict[str, str]:
+    salt = salt if salt is not None else os.urandom(16)
+    digest = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return {"kdf": "scrypt", "salt": salt.hex(), "hash": digest.hex()}
+
+
+def verify_passphrase(passphrase: str, record: Mapping[str, Any]) -> bool:
+    import hmac
+
+    try:
+        salt = bytes.fromhex(_as_text_core(record.get("salt")))
+        expected = bytes.fromhex(_as_text_core(record.get("hash")))
+    except (AttributeError, ValueError):
+        return False
+    if record.get("kdf") != "scrypt" or not salt or not expected:
+        return False
+    digest = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return hmac.compare_digest(digest, expected)
+
+
+# netlog: what left this machine, written by the desktop when it happens.
+# Times and destinations only - a prompt or a search query is never stored.
+
+class EgressLog:
+    ROUTES = ("Tor", "Direct", "Refused")
+
+    def __init__(self, path: PathInput) -> None:
+        self.path = Path(path).expanduser()
+
+    def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
+        """Record one connection. Never raises: logging must not break the action."""
+        entry = {
+            "time": (when or datetime.now().astimezone()).isoformat(timespec="seconds"),
+            "route": route if route in self.ROUTES else "Tor",
+            "what": _as_text_core(what)[:200],
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def entries(self, day: Optional[str] = None) -> list[dict[str, str]]:
+        """Entries for one local day (YYYY-MM-DD), oldest first; all when day is None."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        rows = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
+                continue
+            if day and not entry["time"].startswith(day):
+                continue
+            rows.append({"time": entry["time"], "route": _as_text_core(entry.get("route")),
+                         "what": _as_text_core(entry.get("what"))})
+        return rows
+
+    def counts(self, day: Optional[str] = None) -> dict[str, int]:
+        rows = self.entries(day)
+        return {
+            "search": sum(1 for row in rows if row["route"] == "Tor" and row["what"].startswith("Chat search")),
+            "tor": sum(1 for row in rows if row["route"] == "Tor"),
+            "direct": sum(1 for row in rows if row["route"] == "Direct"),
+        }
+
+
+_AGENT_NET_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
+
+
+def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[str, str]]:
+    """The agent bridge's own log (onionmind.py _net_log) as netlog rows.
+
+    Its lines name the destination and whether it went over Tor or was
+    refused; they never carry request bodies.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        match = _AGENT_NET_LINE.match(line.strip())
+        if not match or (day and match.group(1) != day):
+            continue
+        detail = match.group(3).strip()
+        lowered = detail.casefold()
+        route = "Refused" if "refused" in lowered else ("Tor" if lowered.startswith("tor") else "Local")
+        if route == "Local":
+            continue                              # loopback traffic never left the machine
+        rows.append({"time": f"{match.group(1)}T{match.group(2)}", "route": route,
+                     "what": f"Agent network · {detail}"[:200]})
+    return rows
+
+
+def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["time", "route", "what"])
+    for row in rows:
+        writer.writerow([row.get("time", ""), row.get("route", ""), row.get("what", "")])
+    return buffer.getvalue()
+
+
+def network_log_json(rows: Iterable[Mapping[str, Any]]) -> str:
+    clean = [{"time": row.get("time", ""), "route": row.get("route", ""), "what": row.get("what", "")}
+             for row in rows]
+    return json.dumps(clean, indent=2, ensure_ascii=False) + "\n"
+
+
+# undo: revert files to their last commit with a recoverable backup, so Undo
+# puts back exactly what was on disk - including files git never tracked.
+
+@dataclass(frozen=True)
+class RevertRecord:
+    root: str
+    backup: str
+    paths: tuple[str, ...]
+    untracked: tuple[str, ...]
+
+
+def _safe_relative(root: Path, relative: str) -> Path:
+    candidate = (root / relative).resolve(strict=False)
+    candidate.relative_to(root)                   # ValueError when it escapes
+    return candidate
+
+
+def revert_changes(
+    selected: PathInput, changes: Iterable[Any], backup_root: PathInput
+) -> RevertRecord:
+    """Back up each changed file, then restore it from HEAD (or remove it when untracked).
+
+    `changes` are WorkspaceChange-like (status, path). The backup lives under
+    backup_root, outside the project, until the next revert replaces it.
+    """
+    root = WorkspaceInspector._root(selected)
+    backup = Path(backup_root).expanduser() / uuid4().hex
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for change in changes:
+        status = _as_text_core(_session_value(change, "status", ""))
+        relative = _as_text_core(_session_value(change, "path", ""))
+        if not relative:
+            continue
+        source = _safe_relative(root, relative)
+        (untracked if status == "??" else tracked).append(relative)
+        if source.is_file():
+            target = backup / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    if tracked:
+        result = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--staged", "--worktree", "--", *tracked)
+        if result.returncode != 0:
+            # A file added to the index with no HEAD version cannot be restored
+            # from HEAD; unstage it and treat it as untracked instead.
+            WorkspaceInspector._git(root, "restore", "--staged", "--", *tracked)
+            for relative in list(tracked):
+                if WorkspaceInspector._git(root, "cat-file", "-e", f"HEAD:{relative}").returncode != 0:
+                    tracked.remove(relative)
+                    untracked.append(relative)
+            if tracked:
+                retry = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--worktree", "--", *tracked)
+                if retry.returncode != 0:
+                    raise RuntimeError(retry.stderr.decode("utf-8", "replace").strip() or "git restore failed")
+    for relative in untracked:
+        target = _safe_relative(root, relative)
+        if target.is_file() or target.is_symlink():
+            target.unlink()
+    (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
+    record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
+    (backup / ".onionmind-revert.json").write_text(
+        json.dumps({"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)}),
+        encoding="utf-8",
+    )
+    return record
+
+
+def undo_revert(record: RevertRecord) -> int:
+    """Copy the backed-up files back into the project. Returns files restored."""
+    root = Path(record.root)
+    backup = Path(record.backup)
+    restored = 0
+    for relative in record.paths:
+        source = backup / relative
+        if not source.is_file():
+            continue
+        target = _safe_relative(root, relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        restored += 1
+    return restored
+
+
+def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
+    """{path: (+added, -removed)} from `git diff --numstat HEAD`, empty when unknown."""
+    try:
+        root = WorkspaceInspector._root(selected)
+        result = WorkspaceInspector._git(root, "diff", "--numstat", "--no-ext-diff", "HEAD", "--")
+    except (ValueError, RuntimeError):
+        return {}
+    stats: dict[str, tuple[int, int]] = {}
+    if result.returncode != 0:
+        return stats
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            stats[parts[2]] = (int(parts[0]), int(parts[1]))
+    return stats
+
+
+# ladder / modelPlus: real hardware numbers, or None when the platform won't say.
+
+def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
+    """(used, total) MB of the first NVIDIA GPU, or (None, None) without one.
+
+    ponytail: NVIDIA only, like gpu_vram_mb. AMD (rocm-smi), Intel and Apple
+    unified memory report nothing here; the UI then says "unknown".
+    """
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            used, total = output.stdout.strip().splitlines()[0].split(",")[:2]
+            return int(used.strip()), int(total.strip())
+    except Exception:
+        pass
+    return None, None
+
+
+def gpu_name() -> Optional[str]:
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            return output.stdout.strip().splitlines()[0].strip()
+    except Exception:
+        pass
+    return None
+
+
+def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optional[int]) -> str:
+    """'Fits' / 'Tight' / 'Too big' / '' for an installed model's real file size.
+
+    Compares the on-disk size (what Ollama loads) with headroom for the KV
+    cache against VRAM, else RAM. '' means there is nothing honest to say.
+    """
+    if not size_bytes:
+        return ""
+    need_mb = size_bytes / (1024 * 1024) * 1.2
+    budget = vram_mb or (int(ram_mb * 0.85) if ram_mb else 0)
+    if not budget:
+        return ""
+    if need_mb <= budget:
+        return "Fits"
+    if need_mb <= budget * 1.35:
+        return "Tight"
+    return "Too big"
+
+
+def format_gb(mb: Optional[float]) -> str:
+    if mb is None:
+        return "?"
+    return f"{mb / 1024:.1f}"
+
+
+def node_version() -> Optional[str]:
+    """`node --version` without a console window, or None when Node is missing."""
+    executable = shutil.which("node")
+    if not executable:
+        return None
+    try:
+        output = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                timeout=10, creationflags=_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = output.stdout.strip()
+    return version or None
+
+
+def node_supports_agent(version: Optional[str]) -> bool:
+    """Qwen Code needs Node 22.19+ (or 24+)."""
+    match = re.match(r"v?(\d+)\.(\d+)", _as_text_core(version))
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return major >= 24 or (major == 22 and minor >= 19) or major == 23
 '@
 $desktopUi = @'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
