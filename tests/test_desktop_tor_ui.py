@@ -81,10 +81,13 @@ class TorIndicatorStateTests(unittest.TestCase):
                 self.assertEqual(control.iconSize().height(), 36)
 
     def test_control_keeps_a_visible_button_surface_and_border_at_rest(self) -> None:
-        rule = desktop._STYLE_TEMPLATE.split("QPushButton#torStatusAction {", 1)[1].split("}", 1)[0]
-        self.assertIn("background: #211f1c", rule)
-        self.assertIn("border: 1px solid #514b44", rule)
+        rule = desktop.build_style_sheet().split("QPushButton#torStatusAction {", 1)[1].split("}", 1)[0]
+        tokens = desktop.theme_tokens()
+        self.assertIn(f"background: {tokens['control']}", rule)
+        self.assertIn(f"border: 1px solid {tokens['line_strong']}", rule)
+        self.assertNotEqual(tokens["control"], tokens["bg"])   # a surface, not a hole
         self.assertNotIn("transparent", rule)
+        self.assertNotIn("@", rule)                              # every token resolved
 
     def test_connecting_icon_is_spinner_only_and_power_icon_stays_inside_target(self) -> None:
         ready = desktop._tor_control_icon("ready").pixmap(36, 36).toImage()

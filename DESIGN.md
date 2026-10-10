@@ -1,42 +1,48 @@
 ---
-name: "Onionmind Workbench"
+name: "Onionmind Workbench · Nocturne"
 description: "A calm native work loop for local inference, repository work, and honest review."
 colors:
-  graphite-window: "#181715"
-  graphite-workspace: "#191816"
-  graphite-panel: "#1c1b19"
-  graphite-terminal: "#171615"
-  graphite-raised: "#211f1d"
-  graphite-card: "#23211f"
-  graphite-tool: "#1e1d1b"
-  graphite-control: "#24221f"
-  charcoal-seam: "#403c36"
-  charcoal-seam-subtle: "#37342f"
-  bone: "#eee8df"
-  bone-strong: "#f5efe7"
-  bone-on-accent: "#faf6f0"
-  ash: "#aaa39a"
-  stone-icon: "#c9c1b7"
-  aubergine: "#5c4566"
-  aubergine-hover: "#684e73"
-  aubergine-selection: "#3a3040"
-  aubergine-mode: "#47364f"
-  aubergine-on-selection: "#f5edf8"
-  aubergine-focus: "#a481b4"
-  status-good: "#78b889"
-  status-warn: "#c9a36b"
-  status-bad: "#d47d6b"
+  nocturne-bg: "#161826"
+  nocturne-surface: "#232532"
+  nocturne-text: "#e9e9ed"
+  nocturne-accent: "#9184d9"
+  nocturne-divider: "color-mix(in srgb, #e9e9ed 16%, transparent)"
+  neutral-100: "#f3f5fe"
+  neutral-200: "#e4e7f5"
+  neutral-300: "#cfd3e5"
+  neutral-400: "#b2b6ca"
+  neutral-500: "#9397ab"
+  neutral-600: "#75798c"
+  neutral-700: "#595d6c"
+  neutral-800: "#3f424d"
+  neutral-900: "#292b31"
+  accent-100: "#f5f4ff"
+  accent-200: "#e7e5fe"
+  accent-300: "#d2cefd"
+  accent-400: "#b5abfc"
+  accent-500: "#968ae0"
+  accent-600: "#796cbf"
+  accent-700: "#5d5294"
+  accent-800: "#423a6a"
+  accent-900: "#2b2741"
+  status-good: "#74c692"
+  status-warn: "#e3b667"
+  status-bad: "#eb8373"
+  light-bg: "#f2f3f8"
+  light-surface: "#fbfbfe"
+  light-text: "#1d1f2b"
+  light-accent: "#6b5fc0"
 typography:
   brand:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'DejaVu Sans', sans-serif"
     fontSize: "11pt"
-    fontWeight: 650
+    fontWeight: 500
     lineHeight: "normal"
     letterSpacing: "normal"
   title:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'DejaVu Sans', sans-serif"
     fontSize: "1em"
-    fontWeight: 650
+    fontWeight: 500
     lineHeight: "normal"
     letterSpacing: "normal"
   body:
@@ -48,7 +54,7 @@ typography:
   label:
     fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'DejaVu Sans', sans-serif"
     fontSize: "8.5pt"
-    fontWeight: 650
+    fontWeight: 500
     lineHeight: "normal"
     letterSpacing: "normal"
   mono:
@@ -58,9 +64,9 @@ typography:
     lineHeight: "normal"
     letterSpacing: "normal"
 rounded:
-  compact: "3px"
-  control: "4px"
-  card: "5px"
+  compact: "4px"
+  control: "8px"
+  card: "12px"
   avatar: "16px"
 spacing:
   xs: "4px"
@@ -70,51 +76,52 @@ spacing:
   xl: "12px"
 components:
   button-primary:
-    backgroundColor: "{colors.aubergine}"
-    textColor: "{colors.bone-on-accent}"
+    backgroundColor: "transparent"
+    borderColor: "{colors.nocturne-accent}"
+    textColor: "{colors.nocturne-accent}"
     typography: "{typography.body}"
     rounded: "{rounded.control}"
     padding: "5px 17px"
   button-primary-hover:
-    backgroundColor: "{colors.aubergine-hover}"
-    textColor: "{colors.bone-on-accent}"
+    backgroundColor: "color-mix(in srgb, {colors.nocturne-accent} 12%, transparent)"
+    textColor: "{colors.nocturne-accent}"
     rounded: "{rounded.control}"
     padding: "5px 17px"
   button-secondary:
-    backgroundColor: "{colors.graphite-control}"
-    textColor: "{colors.bone}"
+    backgroundColor: "{colors.nocturne-surface}"
+    textColor: "{colors.nocturne-text}"
     typography: "{typography.body}"
     rounded: "{rounded.control}"
     padding: "5px 9px"
   composer:
-    backgroundColor: "{colors.graphite-control}"
-    textColor: "{colors.bone}"
+    backgroundColor: "{colors.nocturne-surface}"
+    textColor: "{colors.nocturne-text}"
     typography: "{typography.body}"
     rounded: "{rounded.control}"
     padding: "10px"
   card:
-    backgroundColor: "{colors.graphite-card}"
-    textColor: "{colors.bone}"
+    backgroundColor: "{colors.nocturne-surface}"
+    textColor: "{colors.nocturne-text}"
     rounded: "{rounded.card}"
     padding: "9px 10px"
   tool-card:
-    backgroundColor: "{colors.graphite-tool}"
-    textColor: "{colors.bone}"
+    backgroundColor: "{colors.nocturne-surface}"
+    textColor: "{colors.nocturne-text}"
     rounded: "{rounded.card}"
     padding: "8px 11px"
   status-pill:
-    backgroundColor: "{colors.graphite-raised}"
-    textColor: "{colors.bone}"
+    backgroundColor: "{colors.nocturne-surface}"
+    textColor: "{colors.nocturne-text}"
     rounded: "{rounded.control}"
     padding: "4px 8px"
   mode-selected:
-    backgroundColor: "{colors.aubergine-mode}"
-    textColor: "{colors.aubergine-on-selection}"
+    backgroundColor: "{colors.accent-800}"
+    textColor: "{colors.neutral-100}"
     rounded: "{rounded.control}"
     padding: "4px 16px"
   inspector-tabs:
-    backgroundColor: "{colors.graphite-panel}"
-    textColor: "{colors.ash}"
+    backgroundColor: "{colors.nocturne-bg}"
+    textColor: "{colors.neutral-400}"
     typography: "{typography.body}"
     padding: "12px 16px 10px"
 ---
@@ -127,7 +134,7 @@ components:
 
 Onionmind is one native workbench for choosing a repository and Onionmind model, describing work, watching an interruptible Chat or Agent run, and verifying what was observed. The transcript stays primary while projects, sessions, terminal output, context, changes, and activity remain part of the same legible loop.
 
-The interface is quiet and operational: matte warm graphite planes, fine charcoal seams, soft bone type, and aubergine held back for selection, focus, and the primary action. Density is compact and information-rich without becoming a dashboard; balanced Workbench A in Operate mode is the canonical expression.
+The interface is quiet and operational: a cool blue-black Nocturne ground, one-pixel divider seams, near-white type, and a blurple accent held back for selection, focus, and the primary action. Density is compact and information-rich without becoming a dashboard; balanced Workbench A in Operate mode is the canonical expression.
 
 **Key Characteristics:**
 
@@ -139,33 +146,27 @@ The interface is quiet and operational: matte warm graphite planes, fine charcoa
 
 ## Colors
 
-Warm near-black graphites establish the planes; bone and ash carry hierarchy; a single muted aubergine family marks interaction.
+The palette is **Nocturne**: a cool blue-black ground, one surface step above it, near-white text, and a single blurple accent. The stylesheet never names a hex value directly; `theme_tokens()` in `onionmind_desktop.py` derives every semantic role (pane, card, field, line, muted text, accent hover, status tints) from the palette, so the light theme is the same sheet over a different palette.
 
-### Primary
+### Roles
 
-- **Workbench Aubergine** (`aubergine`): the primary Send action and intentional high-emphasis controls.
-- **Aubergine Hover** (`aubergine-hover`): primary hover and the stronger selected-mode plane.
-- **Aubergine Selection** (`aubergine-selection`): selected projects, sessions, and list rows without turning the whole screen purple.
-- **Aubergine Focus** (`aubergine-focus`): the visible one-pixel keyboard-focus boundary.
+- **Ground** (`nocturne-bg`): the window and the transcript canvas.
+- **Pane** (surface at 35% over the ground): toolbar, rail, inspector, status bar.
+- **Surface** (`nocturne-surface`): cards, popovers, menus, tooltips.
+- **Divider** (text at 16%): every seam and control boundary.
+- **Text ramp** (`neutral-100`…`neutral-900`): strong labels at 100, body at the text token, metadata at 400–500, disabled at 600.
+- **Accent** (`nocturne-accent`, ramp `accent-100`…`accent-900`): focus, selection, the primary action's outline, the active tab, progress.
+- **Status** (`status-good`, `status-warn`, `status-bad`): sRGB renderings of oklch(0.76 0.11 155), oklch(0.80 0.11 80) and oklch(0.72 0.13 30); tinted at 12% for amber and red cards. Always paired with text.
 
-### Neutral
+### Light theme
 
-- **Warm Graphite** (`graphite-window`, `graphite-workspace`): the window and dominant transcript canvas.
-- **Graphite Planes** (`graphite-panel`, `graphite-raised`): toolbar, inspector, composer surround, and status containers.
-- **Dark Work Surfaces** (`graphite-terminal`, `graphite-card`, `graphite-tool`, `graphite-control`): terminal, cards, tool rows, fields, and controls.
-- **Charcoal Seams** (`charcoal-seam`, `charcoal-seam-subtle`): fine structural dividers and control boundaries.
-- **Soft Bone and Ash** (`bone`, `bone-strong`, `ash`): primary copy, strong labels, and subdued metadata.
-- **Warm Stone** (`stone-icon`): authored monochrome action icons.
+Behind the appearance feature: ground `light-bg`, surface `light-surface`, text `light-text`, accent `light-accent`, with both ramps reversed so a step means the same contrast in either theme. Status colours are darkened for contrast on the light ground.
 
-### Status
-
-- **Ready Green**, **Caution Ochre**, and **Failure Coral** (`status-good`, `status-warn`, `status-bad`): small state dots paired with explicit text, never standalone meaning.
-
-**The Restrained Aubergine Rule.** Aubergine marks selection, focus, and the primary action; it never becomes ambient decoration.
+**The Restrained Accent Rule.** The accent marks focus, selection and the primary action; it never becomes ambient decoration.
 
 ## Typography
 
-**UI Font:** the platform's proportional system UI family, with Segoe UI on Windows and Noto Sans or DejaVu Sans fallbacks on Linux.
+**UI Font:** Inter when the system has it (it is not bundled), otherwise the platform's proportional system UI family, with Segoe UI on Windows and Noto Sans or DejaVu Sans fallbacks on Linux. Headings use weight 500.
 
 **Monospace Font:** Cascadia Mono, Consolas, or DejaVu Sans Mono.
 
@@ -195,7 +196,7 @@ Use the small spacing scale inside controls and cards, with the 10–12px steps 
 
 ## Elevation & Depth
 
-The workbench has no shadows. Depth comes from closely spaced matte graphite tones and one-pixel charcoal seams: the terminal is darkest, controls and cards step slightly lighter, and the transcript remains a quiet uninterrupted plane. Hover and selection change tone within that vocabulary rather than lifting elements.
+The workbench has no shadows. Depth comes from closely spaced Nocturne tones and one-pixel divider seams: the terminal is darkest, controls and cards step slightly lighter, and the transcript remains a quiet uninterrupted plane. Hover and selection change tone within that vocabulary rather than lifting elements.
 
 **The Tonal Depth Rule.** Separate planes with matte tone shifts and one-pixel seams; do not add shadows, glow, gradients, glass, or blur.
 
@@ -205,27 +206,27 @@ The form language is compact and nearly square. List rows, attachments, checkbox
 
 Action icons are authored on an 18×18 canvas with a 1.45px warm-stone stroke, rounded caps and joins, and no fill unless the glyph requires a solid stop mark. Use the same platform-neutral line vocabulary across Windows and Linux; the supplied Onionmind logo is the only branded exception.
 
-**The Compact Native Rule.** Keep controls square and compact at 3–5px radii; reserve the 16px avatar radius for 32px identity marks.
+**The Compact Native Rule.** Controls use the 8px radius and cards and popovers the 12px radius; reserve the 16px avatar radius for 32px identity marks.
 
 ## Components
 
 ### Buttons
 
 - **Shape:** compact native rectangles with the control radius and a minimum 18px content height.
-- **Primary:** Workbench Aubergine with soft on-accent text and 5px × 17px padding; hover strengthens both fill and border, press returns to the workspace graphite.
-- **Secondary:** graphite control fill, one-pixel seam, and 5px × 9px padding; hover changes to a slightly lighter warm plane.
-- **Bare tools:** 18px authored icons with 4px padding and a transparent rest state; they gain a subtle graphite box on hover.
-- **Focus / Disabled:** replace the normal boundary with the one-pixel focus color for keyboard focus. Disabled controls retain their silhouette and use subdued text, fill, and seam colors.
+- **Primary:** an accent outline with accent text and no fill, 5px × 17px padding; hover and press tint the inside with the accent at 12% and 22%.
+- **Secondary:** control fill, one-pixel divider, and 5px × 9px padding; hover lifts it by 7% text.
+- **Bare tools:** 18px authored icons with 4px padding and a transparent rest state; they gain a subtle tinted box on hover.
+- **Focus / Disabled:** keyboard focus is a 2px accent boundary on every control. Disabled controls retain their silhouette and use subdued text, fill, and seam colors.
 
 ### Inputs / Fields
 
-- **Composer:** multiline proportional text on the graphite control plane, 10px internal padding, visible focus border, Enter to send, Shift+Enter for a newline, and file drop support.
+- **Composer:** multiline proportional text on the field plane, 10px internal padding, visible focus border, Enter to send, Shift+Enter for a newline, and file drop support.
 - **Terminal input:** the sole compact command field, using the mono role and the terminal plane. Terminal and diff output remain selectable.
 
 ### Navigation
 
-- **Rail:** left-aligned compact actions and 47px two-line project/session rows. Hover is tonal; selection uses the restrained aubergine plane plus text, not color alone.
-- **Inspector tabs:** proportional labels with 12px × 16px padding and a two-pixel aubergine underline for the active tab; the pane itself begins with a one-pixel seam.
+- **Rail:** left-aligned compact actions and 47px two-line project/session rows. Hover is tonal; selection uses the restrained accent tint plus text, not color alone.
+- **Inspector tabs:** proportional labels with 12px × 16px padding and a two-pixel accent underline for the active tab; the pane itself begins with a one-pixel seam.
 - **Responsive access:** pane toggles stay in the toolbar whenever automatic collapse hides a rail or inspector.
 
 ### Cards / Containers

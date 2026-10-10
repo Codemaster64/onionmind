@@ -94,7 +94,7 @@ from PySide6.QtWidgets import (
 APP_NAME = "Onionmind"
 APP_ID = "OnionmindDesktop"
 MODULE_DIR = Path(__file__).resolve().parent
-ACCENT = "#8d6aa0"
+ACCENT = "#9184d9"
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_TEXT_FILE_BYTES = 64 * 1024
@@ -106,141 +106,261 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "dist", "bu
 _SCREENSHOT_PATH: Optional[str] = None
 
 
+# Nocturne: the workbench palette (dark first, plus the light ramp the
+# appearance feature switches to). Ramps run 100 = lightest in dark and are
+# reversed in light, so "n400" means the same contrast step in both themes.
+NOCTURNE_DARK: dict[str, str] = {
+    "bg": "#161826", "surface": "#232532", "text": "#e9e9ed", "accent": "#9184d9",
+    "n100": "#f3f5fe", "n200": "#e4e7f5", "n300": "#cfd3e5", "n400": "#b2b6ca", "n500": "#9397ab",
+    "n600": "#75798c", "n700": "#595d6c", "n800": "#3f424d", "n900": "#292b31",
+    "a100": "#f5f4ff", "a200": "#e7e5fe", "a300": "#d2cefd", "a400": "#b5abfc", "a500": "#968ae0",
+    "a600": "#796cbf", "a700": "#5d5294", "a800": "#423a6a", "a900": "#2b2741",
+    # oklch(0.76 0.11 155), oklch(0.80 0.11 80), oklch(0.72 0.13 30) in sRGB
+    "good": "#74c692", "warn": "#e3b667", "bad": "#eb8373",
+}
+NOCTURNE_LIGHT: dict[str, str] = {
+    "bg": "#f2f3f8", "surface": "#fbfbfe", "text": "#1d1f2b", "accent": "#6b5fc0",
+    "n100": "#292b31", "n200": "#3f424d", "n300": "#4a4e5c", "n400": "#5f6373", "n500": "#75798c",
+    "n600": "#9397ab", "n700": "#c4c8d8", "n800": "#dcdfec", "n900": "#e8eaf4",
+    "a100": "#2b2741", "a200": "#423a6a", "a300": "#5d5294", "a400": "#796cbf", "a500": "#968ae0",
+    "a600": "#b5abfc", "a700": "#d2cefd", "a800": "#e1ddfd", "a900": "#ecebfd",
+    "good": "#2f8a55", "warn": "#9a6a12", "bad": "#b8483a",
+}
+_PALETTE: dict[str, str] = dict(NOCTURNE_DARK)
+
+
+def _mix(first: str, second: str, weight: float) -> str:
+    """first blended over second: weight 1.0 is all first. Solid hex, so Qt
+    style sheets get the same colour a CSS color-mix() would paint."""
+    a = QColor(first)
+    b = QColor(second)
+    w = max(0.0, min(1.0, weight))
+    return QColor(
+        round(a.red() * w + b.red() * (1 - w)),
+        round(a.green() * w + b.green() * (1 - w)),
+        round(a.blue() * w + b.blue() * (1 - w)),
+    ).name()
+
+
+def theme_tokens(palette: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Semantic roles over the palette - the only colours the sheet uses."""
+    p = palette or _PALETTE
+    bg, surface, text, accent = p["bg"], p["surface"], p["text"], p["accent"]
+    dark = QColor(bg).lightness() < 128
+    control = _mix(surface, bg, 0.55)
+    return {
+        "bg": bg,
+        "pane": _mix(surface, bg, 0.35),
+        "deep": _mix(bg, "#000000", 0.82) if dark else _mix(bg, "#ffffff", 0.6),
+        "composer": _mix(surface, bg, 0.5),
+        "card": surface,
+        "tool": _mix(surface, bg, 0.6),
+        "field": _mix(surface, bg, 0.7),
+        "line": _mix(text, bg, 0.16),
+        "line_soft": _mix(text, bg, 0.10),
+        "line_strong": _mix(text, bg, 0.30),
+        "text": text,
+        "strong": p["n100"] if dark else text,
+        "muted": p["n400"],
+        "faint": p["n500"],
+        "disabled": p["n600"],
+        "control": control,
+        "control_hover": _mix(text, control, 0.07),
+        "control_pressed": _mix(text, control, 0.14),
+        "accent": accent,
+        "accent_text": p["a300"],
+        "accent_hover": _mix(accent, bg, 0.12),
+        "accent_pressed": _mix(accent, bg, 0.22),
+        "accent_line": _mix(accent, bg, 0.5),
+        "selection": _mix(accent, bg, 0.30),
+        "on_accent": p["a100"] if dark else "#ffffff",
+        "avatar_user": p["a600"] if dark else accent,
+        "scroll": p["n800"],
+        "scroll_hover": p["n700"],
+        "good": p["good"], "warn": p["warn"], "bad": p["bad"],
+        "good_bg": _mix(p["good"], bg, 0.12), "good_line": _mix(p["good"], bg, 0.45),
+        "warn_bg": _mix(p["warn"], bg, 0.12), "warn_line": _mix(p["warn"], bg, 0.45),
+        "bad_bg": _mix(p["bad"], bg, 0.12), "bad_line": _mix(p["bad"], bg, 0.45),
+        "icon": p["n300"] if dark else p["n300"],
+    }
+
+
+def set_theme(name: str) -> None:
+    """Switch the process palette; callers then rebuild the sheet and icons."""
+    _PALETTE.clear()
+    _PALETTE.update(NOCTURNE_LIGHT if name == "light" else NOCTURNE_DARK)
+
+
+def current_theme() -> str:
+    return "light" if _PALETTE.get("bg") == NOCTURNE_LIGHT["bg"] else "dark"
+
+
 _STYLE_TEMPLATE = r"""
 * {
-    color: #eee8df;
+    color: @text@;
 }
-QMainWindow, QDialog { background: #181715; }
-QWidget#windowRoot, QWidget#centerPane, QWidget#transcriptViewport { background: #191816; }
-QWidget#toolbar { background: #1c1b19; border-bottom: 1px solid #37342f; }
-QWidget#leftRail { background: #1d1c1a; border-right: 1px solid #37342f; }
-QWidget#inspector { background: #1c1b19; border-left: 1px solid #37342f; }
-QFrame#terminalPane { background: #171615; border-top: 1px solid #403c36; }
-QFrame#composerFrame { background: #211f1d; border-top: 1px solid #403c36; }
-QFrame#card { background: #23211f; border: 1px solid #403c36; border-radius: 5px; }
-QFrame#toolCard { background: #1e1d1b; border: 1px solid #423e38; border-radius: 5px; }
-QFrame#modeSwitch { background: #191816; border: 1px solid #403c36; border-radius: 4px; }
-QFrame#separator { background: #3b3833; min-width: 1px; max-width: 1px; }
+QMainWindow, QDialog { background: @bg@; }
+QWidget#windowRoot, QWidget#centerPane, QWidget#transcriptViewport { background: @bg@; }
+QWidget#toolbar { background: @pane@; border-bottom: 1px solid @line@; }
+QWidget#leftRail { background: @pane@; border-right: 1px solid @line@; }
+QWidget#inspector { background: @pane@; border-left: 1px solid @line@; }
+QFrame#terminalPane { background: @deep@; border-top: 1px solid @line@; }
+QFrame#composerFrame { background: @composer@; border-top: 1px solid @line@; }
+QFrame#card { background: @card@; border: 1px solid @line@; border-radius: 12px; }
+QFrame#toolCard { background: @tool@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#modeSwitch { background: @bg@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#separator { background: @line@; min-width: 1px; max-width: 1px; }
+QFrame#railDivider { color: @line@; }
+QFrame#statusPill { background: @control@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#amberCard { background: @warn_bg@; border: 1px solid @warn_line@; border-radius: 12px; }
+QFrame#errorCard { background: @bad_bg@; border: 1px solid @bad_line@; border-radius: 12px; }
+QFrame#popover { background: @card@; border: 1px solid @line_strong@; border-radius: 12px; }
+QFrame#banner { background: @card@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#chip { background: transparent; border: 1px solid @line@; border-radius: 8px; }
+QFrame#boundaryPanel { background: @pane@; border-bottom: 1px solid @line@; }
+QFrame#zoneMachine { background: @card@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#zoneOutside { background: transparent; border: 1px solid @line@; border-radius: 8px; }
+QWidget#overlay { background: @bg@; }
 QScrollArea#settingsPage { background: transparent; border: none; }
 QScrollArea#settingsPage > QWidget > QWidget { background: transparent; }
 QLabel { background: transparent; }
-QLabel#brand { color: #f5efe7; font-size: @BRAND_PT@; font-weight: 650; }
-QLabel#sectionTitle { color: #aaa39a; font-size: @LABEL_PT@; font-weight: 650; }
-QLabel#muted, QLabel#meta, QLabel#disclosure { color: #aaa39a; }
-QLabel#title { color: #f2ece4; font-weight: 650; }
-QLabel#avatarUser { background: #74579a; color: #f9f5ef; border-radius: 16px; font-weight: 650; }
-QLabel#avatarAssistant { background: #282327; color: #b791c9; border: 1px solid #624c6c; border-radius: 16px; font-weight: 700; }
-QLabel#attachmentLabel { color: #cdbbd5; background: #2c252e; border: 1px solid #493d4e; border-radius: 3px; padding: 3px 7px; }
-QLabel#success { color: #84c08f; }
-QLabel#danger { color: #d88675; }
-QLabel#accent { color: #c3a1d3; }
-QLabel#thinkingLabel { color: #c9c1b7; }
+QLabel#brand { color: @strong@; font-size: @BRAND_PT@; font-weight: 500; }
+QLabel#sectionTitle { color: @faint@; font-size: @LABEL_PT@; font-weight: 500; }
+QLabel#muted, QLabel#meta, QLabel#disclosure { color: @muted@; }
+QLabel#title { color: @strong@; font-weight: 500; }
+QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 600; }
+QLabel#avatarAssistant { background: @card@; color: @accent_text@; border: 1px solid @accent_line@; border-radius: 16px; font-weight: 700; }
+QLabel#attachmentLabel { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 3px 7px; }
+QLabel#success { color: @good@; }
+QLabel#danger { color: @bad@; }
+QLabel#warning { color: @warn@; }
+QLabel#accent { color: @accent_text@; }
+QLabel#thinkingLabel { color: @muted@; }
+QLabel#chipLabel { color: @muted@; }
+QLabel#kbd { color: @muted@; background: @control@; border: 1px solid @line@; border-radius: 4px; padding: 1px 6px; }
 QPushButton, QToolButton, QComboBox, QLineEdit {
-    background: #24221f;
-    border: 1px solid #45413b;
-    border-radius: 4px;
+    background: @control@;
+    border: 1px solid @line@;
+    border-radius: 8px;
     padding: 5px 9px;
     min-height: 18px;
 }
-QPushButton:hover, QToolButton:hover, QComboBox:hover { background: #2c2926; border-color: #5a554d; }
-QPushButton:pressed, QToolButton:pressed { background: #191816; }
-QPushButton:disabled, QToolButton:disabled { color: #6f6961; background: #211f1d; border-color: #37342f; }
+QPushButton:hover, QToolButton:hover, QComboBox:hover { background: @control_hover@; border-color: @line_strong@; }
+QPushButton:pressed, QToolButton:pressed { background: @control_pressed@; }
+QPushButton:disabled, QToolButton:disabled { color: @disabled@; background: @control@; border-color: @line_soft@; }
 QPushButton:focus, QToolButton:focus, QComboBox:focus, QLineEdit:focus,
 QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTreeWidget:focus, QTabWidget:focus {
-    border: 1px solid #a481b4;
+    border: 2px solid @accent@;
 }
-QPushButton#primaryButton { background: #5c4566; border-color: #765984; color: #faf6f0; font-weight: 600; padding-left: 17px; padding-right: 17px; }
-QPushButton#primaryButton:hover { background: #684e73; border-color: #8a6b98; }
-QPushButton#primaryButton:disabled { background: #2b2729; border-color: #403a3f; color: #777078; }
-QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: #b8b1a8; }
-QPushButton#modeButton:checked { background: #47364f; color: #f5edf8; border: 1px solid #684f73; }
+QPushButton#primaryButton { background: transparent; border: 1px solid @accent@; color: @accent@; font-weight: 500; padding-left: 17px; padding-right: 17px; }
+QPushButton#primaryButton:hover { background: @accent_hover@; }
+QPushButton#primaryButton:pressed { background: @accent_pressed@; }
+QPushButton#primaryButton:focus { border: 2px solid @accent@; }
+QPushButton#primaryButton:disabled { background: transparent; border-color: @line@; color: @disabled@; }
+QPushButton#dangerButton { background: transparent; border: 1px solid @bad@; color: @bad@; }
+QPushButton#dangerButton:hover { background: @bad_bg@; }
+QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: @muted@; }
+QPushButton#modeButton:checked { background: @accent_pressed@; color: @strong@; border: 1px solid @accent_line@; }
 QPushButton#railAction { text-align: left; background: transparent; border-color: transparent; padding: 7px 9px; }
-QPushButton#railAction:hover { background: #292724; border-color: #3f3b36; }
+QPushButton#railAction:hover { background: @control_hover@; border-color: @line@; }
+QPushButton#linkButton { background: transparent; border-color: transparent; color: @accent@; padding: 2px 6px; }
+QPushButton#linkButton:hover { background: @accent_hover@; }
+QPushButton#chipButton { background: transparent; border: 1px solid @line@; border-radius: 8px; color: @muted@; padding: 2px 9px; }
+QPushButton#chipButton:hover { background: @control_hover@; color: @text@; }
+QPushButton#paletteRow { text-align: left; background: transparent; border-color: transparent; padding: 7px 10px; }
+QPushButton#paletteRow:hover, QPushButton#paletteRow[current="true"] { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton { background: transparent; border-color: transparent; padding: 4px; }
-QToolButton#bareButton:hover { background: #2a2825; border-color: #403c37; }
-QToolButton#bareButton:checked { background: #3a3040; border-color: #684f73; }
+QToolButton#bareButton:hover { background: @control_hover@; border-color: @line@; }
+QToolButton#bareButton:checked { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton:disabled { background: transparent; border-color: transparent; }
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #262421; border: 1px solid #4a453f; selection-background-color: #46384b; selection-color: #f5efe7; outline: 0; }
-QMenu { background: #24221f; border: 1px solid #4a453f; padding: 4px; }
-QMenu::item { border-radius: 3px; padding: 6px 26px 6px 9px; }
-QMenu::item:selected { background: #3a3040; color: #f5edf8; }
-QMenu::item:disabled { color: #746e67; }
-QMenu::separator { height: 1px; background: #403c36; margin: 4px 7px; }
-QListWidget, QTreeWidget {
+QComboBox QAbstractItemView { background: @card@; border: 1px solid @line_strong@; selection-background-color: @selection@; selection-color: @strong@; outline: 0; }
+QMenu { background: @card@; border: 1px solid @line_strong@; padding: 4px; }
+QMenu::item { border-radius: 6px; padding: 6px 26px 6px 9px; }
+QMenu::item:selected { background: @accent_hover@; color: @strong@; }
+QMenu::item:disabled { color: @disabled@; }
+QMenu::separator { height: 1px; background: @line@; margin: 4px 7px; }
+QListWidget, QTreeWidget, QTableWidget {
     background: transparent;
     border: none;
     outline: 0;
-    alternate-background-color: #211f1d;
+    alternate-background-color: @field@;
 }
-QListWidget::item, QTreeWidget::item { border-radius: 3px; padding: 5px; }
-QListWidget::item:hover, QTreeWidget::item:hover { background: #292724; }
-QListWidget::item:selected, QTreeWidget::item:selected { background: #3a3040; color: #f5edf8; }
+QListWidget::item, QTreeWidget::item { border-radius: 6px; padding: 5px; }
+QListWidget::item:hover, QTreeWidget::item:hover { background: @control_hover@; }
+QListWidget::item:selected, QTreeWidget::item:selected { background: @accent_hover@; color: @strong@; }
+QHeaderView::section { background: @pane@; color: @faint@; border: none; border-bottom: 1px solid @line@; padding: 5px 7px; }
+QTableWidget { gridline-color: @line_soft@; }
 QTreeWidget::branch { background: transparent; }
-QTreeView::indicator { width: 13px; height: 13px; border: 1px solid #625b53; border-radius: 2px; background: #1a1917; }
-QTreeView::indicator:hover { border-color: #a98abb; }
-QTreeView::indicator:checked { border-color: #a98abb; background: #7b5b8a; }
+QTreeView::indicator { width: 13px; height: 13px; border: 1px solid @line_strong@; border-radius: 3px; background: @field@; }
+QTreeView::indicator:hover { border-color: @accent@; }
+QTreeView::indicator:checked { border-color: @accent@; background: @accent@; }
 QTextEdit, QPlainTextEdit {
-    background: #191816;
-    border: 1px solid #403c36;
-    border-radius: 4px;
-    selection-background-color: #624d6d;
-    selection-color: #fffaf5;
+    background: @field@;
+    border: 1px solid @line@;
+    border-radius: 8px;
+    selection-background-color: @selection@;
+    selection-color: @strong@;
     padding: 7px;
 }
-QTextEdit#composer { background: #24211f; border: 1px solid #4a453e; padding: 10px; }
-QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView {
+QTextEdit#composer { background: @field@; border: 1px solid @line@; padding: 10px; }
+QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView, QPlainTextEdit#runOutput {
     font-family: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: @MONO_PT@;
-    background: #171615;
+    background: @deep@;
     border: none;
     border-radius: 0;
     padding: 7px 10px;
 }
-QLineEdit#terminalInput { font-family: "Cascadia Mono", "Consolas", monospace; background: #1b1a18; border-color: #3f3b36; }
-QTabWidget::pane { border: none; border-top: 1px solid #38352f; top: -1px; }
-QTabBar::tab { background: transparent; color: #b7b0a7; padding: 12px 16px 10px 16px; border-bottom: 2px solid transparent; }
-QTabBar::tab:hover { color: #eee8df; }
-QTabBar::tab:selected { color: #f5efe8; border-bottom-color: #9570a7; }
-QCheckBox { spacing: 7px; color: #c8c0b7; }
-QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #5b554e; background: #1a1917; border-radius: 3px; }
-QCheckBox::indicator:checked { background: #86659a; border-color: #a17bb6; }
-QProgressBar { background: #191816; border: 1px solid #403c36; border-radius: 3px; text-align: center; min-height: 18px; }
-QProgressBar::chunk { background: #80608f; }
-QSplitter::handle { background: #37342f; }
-QSplitter::handle:hover { background: #71557c; }
-QStatusBar { background: #151412; border-top: 1px solid #35322d; color: #9f988f; }
+QLineEdit#terminalInput { font-family: "Cascadia Mono", "Consolas", monospace; background: @deep@; border-color: @line@; }
+QTabWidget::pane { border: none; border-top: 1px solid @line@; top: -1px; }
+QTabBar::tab { background: transparent; color: @muted@; padding: 12px 16px 10px 16px; border-bottom: 2px solid transparent; }
+QTabBar::tab:hover { color: @text@; }
+QTabBar::tab:selected { color: @strong@; border-bottom-color: @accent@; }
+QCheckBox { spacing: 7px; color: @text@; }
+QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid @line_strong@; background: @field@; border-radius: 4px; }
+QCheckBox::indicator:checked { background: @accent@; border-color: @accent@; }
+QCheckBox:focus { color: @strong@; }
+QRadioButton { spacing: 7px; color: @text@; }
+QProgressBar { background: @field@; border: 1px solid @line@; border-radius: 6px; text-align: center; min-height: 18px; }
+QProgressBar::chunk { background: @accent@; border-radius: 5px; }
+QProgressBar#meter { background: @line@; border: none; border-radius: 2px; min-height: 4px; max-height: 4px; }
+QProgressBar#meter::chunk { background: @accent@; border-radius: 2px; }
+QProgressBar#meter[level="warn"]::chunk { background: @warn@; }
+QSplitter::handle { background: @line@; }
+QSplitter::handle:hover { background: @accent_line@; }
+QStatusBar { background: @pane@; border-top: 1px solid @line@; color: @faint@; }
 QStatusBar::item { border: none; }
-QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #b7b0a7; padding: 2px 8px; }
-QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
-QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
-QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
+QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 8px; color: @muted@; padding: 2px 8px; }
+QPushButton#updateStatus:hover { background: @control_hover@; border-color: @line@; color: @strong@; }
+QPushButton#updateStatus[attention="true"] { background: @accent_pressed@; border: 1px solid @accent@; border-radius: 8px; color: @strong@; font-weight: 600; padding: 2px 12px; }
+QPushButton#updateStatus[attention="true"]:hover { background: @accent_hover@; }
 QPushButton#torStatusAction {
-    background: #211f1c;
-    border: 1px solid #514b44;
-    border-radius: 7px;
-    color: #c8c0b7;
-    font-weight: 600;
+    background: @control@;
+    border: 1px solid @line_strong@;
+    border-radius: 12px;
+    color: @text@;
+    font-weight: 500;
     min-width: 116px;
     min-height: 36px;
     padding: 2px 10px 2px 3px;
     text-align: left;
 }
-QPushButton#torStatusAction[torState="ready"] { background: #1d2720; border-color: #527c5c; color: #a9d4b2; }
-QPushButton#torStatusAction[torState="checking"] { background: #292318; border-color: #806a40; color: #dfbf7d; }
-QPushButton#torStatusAction[torState="error"] { background: #2b1f1c; border-color: #8d574d; color: #e49a89; }
-QPushButton#torStatusAction:hover { background: #2e2b27; border-color: #81786e; }
-QPushButton#torStatusAction:focus { background: #24221f; border-color: #a481b4; }
-QPushButton#torStatusAction:pressed { background: #191816; border-color: #b793c6; }
-QPushButton#torStatusAction:disabled { background: #1c1a18; border-color: #3d3934; color: #817982; }
-QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
-QScrollBar::handle:vertical:hover { background: #5b554e; }
+QPushButton#torStatusAction[torState="ready"] { background: @good_bg@; border-color: @good_line@; color: @good@; }
+QPushButton#torStatusAction[torState="checking"] { background: @warn_bg@; border-color: @warn_line@; color: @warn@; }
+QPushButton#torStatusAction[torState="error"] { background: @bad_bg@; border-color: @bad_line@; color: @bad@; }
+QPushButton#torStatusAction:hover { background: @control_hover@; border-color: @line_strong@; }
+QPushButton#torStatusAction:focus { border: 2px solid @accent@; }
+QPushButton#torStatusAction:pressed { background: @control_pressed@; border-color: @accent@; }
+QPushButton#torStatusAction:disabled { background: @control@; border-color: @line_soft@; color: @disabled@; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+QScrollBar::handle:vertical { background: @scroll@; min-height: 30px; border-radius: 4px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: @scroll_hover@; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar:horizontal { background: #191816; height: 10px; }
-QScrollBar::handle:horizontal { background: #49443e; min-width: 30px; border-radius: 4px; margin: 2px; }
-QToolTip { background: #2a2825; color: #f2ece4; border: 1px solid #514c45; padding: 5px; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:horizontal { background: @scroll@; min-width: 30px; border-radius: 4px; margin: 2px; }
+QToolTip { background: @card@; color: @strong@; border: 1px solid @line_strong@; padding: 5px; }
 """
 
 
@@ -249,14 +369,18 @@ def build_style_sheet(scale: float = 1.0) -> str:
 
     Every other rule inherits the application font, which apply_text_scale
     scales from the captured platform base - so one knob moves all text
-    without a second size system.
+    without a second size system. Colours come from the current palette's
+    semantic roles (theme_tokens), so a theme switch is one rebuild.
     """
     scale = max(0.75, min(1.5, float(scale)))
-    return (
+    sheet = (
         _STYLE_TEMPLATE.replace("@BRAND_PT@", f"{11 * scale:g}pt")
         .replace("@LABEL_PT@", f"{8.5 * scale:g}pt")
         .replace("@MONO_PT@", f"{9 * scale:g}pt")
     )
+    for name, value in sorted(theme_tokens().items(), key=lambda item: -len(item[0])):
+        sheet = sheet.replace(f"@{name}@", value)
+    return sheet
 
 
 STYLE_SHEET = build_style_sheet(1.0)
@@ -532,8 +656,9 @@ def _friendly_error(core: Any, exc: BaseException) -> str:
     return _brand_runtime_text(text)
 
 
-def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
+def _icon(name: str, size: int = 18, color: Optional[str] = None) -> QIcon:
     """Render Onionmind's compact, platform-neutral monochrome icon language."""
+    color = color or theme_tokens()["icon"]
     canvas = QPixmap(size, size)
     canvas.fill(Qt.GlobalColor.transparent)
     painter = QPainter(canvas)
@@ -642,6 +767,76 @@ def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
             line(5, 7, 7.2, 9)
             line(7.2, 9, 5, 11)
             line(9.2, 11, 12.5, 11)
+    elif name == "sparkle":
+        for x1, y1, x2, y2 in ((9, 2.5, 9, 6), (9, 12, 9, 15.5), (2.5, 9, 6, 9), (12, 9, 15.5, 9)):
+            line(x1, y1, x2, y2)
+        line(6, 6, 7.4, 7.4)
+        line(12, 12, 10.6, 10.6)
+        line(12, 6, 10.6, 7.4)
+        line(6, 12, 7.4, 10.6)
+    elif name == "lock":
+        box(4, 8, 10, 7.5, 1.4)
+        painter.drawArc(QRectF(5.8, 3, 6.4, 8), 0, 180 * 16)
+        line(9, 10.8, 9, 12.6)
+    elif name == "search":
+        painter.drawEllipse(QRectF(3, 3, 9, 9))
+        line(10.8, 10.8, 15, 15)
+    elif name == "cpu":
+        box(5, 5, 8, 8, 1)
+        for offset in (7, 9, 11):
+            line(offset, 2.5, offset, 5)
+            line(offset, 13, offset, 15.5)
+            line(2.5, offset, 5, offset)
+            line(13, offset, 15.5, offset)
+    elif name == "shield":
+        path = QPainterPath(QPointF(9, 2.5))
+        path.lineTo(14.5, 4.5)
+        path.cubicTo(14.5, 10, 12.5, 13.5, 9, 15.5)
+        path.cubicTo(5.5, 13.5, 3.5, 10, 3.5, 4.5)
+        path.closeSubpath()
+        painter.drawPath(path)
+    elif name == "globe":
+        painter.drawEllipse(QRectF(2.5, 2.5, 13, 13))
+        painter.drawEllipse(QRectF(6, 2.5, 6, 13))
+        line(2.8, 9, 15.2, 9)
+    elif name == "copy":
+        box(6, 6, 9, 9.5, 1.2)
+        line(3.5, 12, 3.5, 3.5)
+        line(3.5, 3.5, 11, 3.5)
+    elif name == "regenerate":
+        painter.drawArc(QRectF(3, 3, 12, 12), 60 * 16, 300 * 16)
+        line(12.6, 2.6, 12.2, 5.6)
+        line(12.2, 5.6, 15.1, 6)
+    elif name == "branch":
+        painter.drawEllipse(QRectF(3.5, 2.5, 3.5, 3.5))
+        painter.drawEllipse(QRectF(3.5, 12, 3.5, 3.5))
+        painter.drawEllipse(QRectF(11, 5, 3.5, 3.5))
+        line(5.25, 6, 5.25, 12)
+        painter.drawArc(QRectF(5.25, 4, 7.5, 7.5), 180 * 16, 90 * 16)
+    elif name == "revert":
+        line(3.5, 7, 7, 3.5)
+        line(3.5, 7, 7, 10.5)
+        path = QPainterPath(QPointF(3.8, 7))
+        path.lineTo(11, 7)
+        path.cubicTo(15.5, 7, 15.5, 14.5, 11, 14.5)
+        path.lineTo(7, 14.5)
+        painter.drawPath(path)
+    elif name == "keyboard":
+        box(2, 5, 14, 9, 1.4)
+        for x in (5, 8, 11):
+            line(x, 8, x + 0.4, 8)
+        line(5.5, 11, 12.5, 11)
+    elif name == "warning":
+        path = QPainterPath(QPointF(9, 2.5))
+        path.lineTo(16, 15)
+        path.lineTo(2, 15)
+        path.closeSubpath()
+        painter.drawPath(path)
+        line(9, 7, 9, 10.5)
+        line(9, 12.6, 9, 12.8)
+    elif name == "check":
+        line(3.5, 9.5, 7.5, 13.5)
+        line(7.5, 13.5, 14.5, 4.5)
     elif name == "attach":
         path = QPainterPath(QPointF(6.2, 8.2))
         path.cubicTo(6.2, 4.2, 11.8, 4.2, 11.8, 8.2)
@@ -660,11 +855,12 @@ def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
 
 def _tor_control_icon(state: str, angle: int = 0, size: int = 36) -> QIcon:
     """Render one clean 1B-style power target or one verification spinner."""
+    tokens = theme_tokens()
     colors = {
-        "off": ("#3a3733", "#ddd5cc"),
-        "ready": ("#4f7c5a", "#ffffff"),
-        "checking": ("#453b2b", "#f0c97e"),
-        "error": ("#633a33", "#ffd2c8"),
+        "off": (tokens["line_strong"], tokens["strong"]),
+        "ready": (_mix(tokens["good"], "#000000", 0.62), "#ffffff"),
+        "checking": (tokens["warn_line"], tokens["warn"]),
+        "error": (tokens["bad_line"], "#ffffff"),
     }
     fill, ink = colors.get(state, colors["off"])
     canvas = QPixmap(size, size)
@@ -725,6 +921,10 @@ def _register_system_fonts(app: QApplication) -> None:
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
     ]
     ui_family = ""
+    # Nocturne's face is Inter at weight 500 for headings. It is not bundled,
+    # so it wins only where the system already has it.
+    if "Inter" in QFontDatabase.families():
+        ui_family = "Inter"
     for path in candidates:
         if not path.is_file():
             continue
@@ -800,9 +1000,9 @@ class SafeWorker:
 
 
 class StatusDot(QWidget):
-    def __init__(self, color: str = "#a39b91", parent: Optional[QWidget] = None) -> None:
+    def __init__(self, color: Optional[str] = None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._color = QColor(color)
+        self._color = QColor(color or theme_tokens()["faint"])
         self.setFixedSize(10, 10)
         self.setAccessibleName("Status indicator")
 
@@ -819,22 +1019,29 @@ class StatusDot(QWidget):
         painter.drawEllipse(2, 2, 6, 6)
 
 
+class _StateColors:
+    """StatusPill.COLORS, read from the live palette so a theme switch repaints."""
+
+    _ROLES = {"good": "good", "warn": "warn", "bad": "bad", "idle": "faint", "busy": "accent"}
+
+    def get(self, state: str, default: Any = None) -> Any:
+        role = self._ROLES.get(state)
+        return theme_tokens()[role] if role else default
+
+    def __getitem__(self, state: str) -> str:
+        return theme_tokens()[self._ROLES[state]]
+
+
 class StatusPill(QFrame):
     clicked = Signal()
 
-    COLORS = {
-        "good": "#78b889",
-        "warn": "#c9a36b",
-        "bad": "#d47d6b",
-        "idle": "#8e8880",
-        "busy": "#a98abb",
-    }
+    COLORS = _StateColors()
 
     def __init__(self, prefix: str, text: str, state: str = "idle", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.prefix = prefix
         self.setObjectName("statusPill")
-        self.setStyleSheet("QFrame#statusPill { background:#211f1d; border:1px solid #403c36; border-radius:4px; }")
+        self._state = state
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(5)
@@ -848,9 +1055,13 @@ class StatusPill(QFrame):
         self.setAccessibleName(f"{prefix} status: {text}")
 
     def set_status(self, text: str, state: str = "idle") -> None:
+        self._state = state
         self.label.setText(text)
         self.dot.set_color(self.COLORS.get(state, self.COLORS["idle"]))
         self.setAccessibleName(f"{self.prefix} status: {text}")
+
+    def refresh_theme(self) -> None:
+        self.dot.set_color(self.COLORS.get(self._state, self.COLORS["idle"]))
 
     def make_clickable(self) -> None:
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1090,7 +1301,8 @@ class ThinkingDots(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         for index, x in enumerate((6, 17, 28)):
             active = index == self._frame
-            painter.setBrush(QColor("#b791c9" if active else "#625b63"))
+            tokens = theme_tokens()
+            painter.setBrush(QColor(tokens["accent"] if active else tokens["line_strong"]))
             radius = 3.0 if active else 2.5
             painter.drawEllipse(QPointF(float(x), 8.0), radius, radius)
 
@@ -2038,7 +2250,7 @@ class LeftRail(QWidget):
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet("color:#3a3732;")
+        divider.setObjectName("railDivider")
         layout.addWidget(divider)
         session_header = QHBoxLayout()
         session_label = QLabel("SESSIONS")
@@ -2898,6 +3110,129 @@ class ModelManagerDialog(QDialog):
         self.progress.setFormat("Installed locally")
 
 
+def _feature_catalog(desktop_core: Any) -> tuple[tuple[str, str, str], ...]:
+    """(key, name, description) for every v2 feature, from the core. Without
+    the core there are no v2 features: the workbench is exactly the original."""
+    return tuple(getattr(desktop_core, "FEATURE_FLAGS", ()) or ())
+
+
+class FeatureToggles(QWidget):
+    """The list of v2 features with Turn all on / Turn all off.
+
+    Used twice - in the toolbar sparkle popover and in Settings -> Features -
+    and both drive the same window.features dict, so they never disagree.
+    """
+
+    INTRO = (
+        "Everything from the original workbench stays where it is. These add to it, "
+        "and each one stays hidden until you turn it on."
+    )
+
+    def __init__(self, window: Any, parent: Optional[QWidget] = None, *, compact: bool = False) -> None:
+        super().__init__(parent)
+        self.window = window
+        self.boxes: dict[str, QCheckBox] = {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("New features")
+        title.setObjectName("title")
+        self.count_label = QLabel()
+        self.count_label.setObjectName("meta")
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.count_label)
+        outer.addLayout(header)
+        intro = QLabel(self.INTRO)
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        rows = QWidget()
+        rows_layout = QVBoxLayout(rows)
+        rows_layout.setContentsMargins(0, 4, 0, 4)
+        rows_layout.setSpacing(8 if compact else 10)
+        for key, name, description in _feature_catalog(getattr(window, "desktop_core", None)):
+            box = QCheckBox(name)
+            box.setObjectName(f"feature_{key}")
+            box.setAccessibleName(f"{name}. {description}")
+            box.setToolTip(description)
+            box.setChecked(bool(window.features.get(key)))
+            box.toggled.connect(lambda checked, flag=key: self.window.set_feature(flag, checked))
+            note = QLabel(description)
+            note.setObjectName("meta")
+            note.setWordWrap(True)
+            note.setContentsMargins(24, 0, 0, 0)
+            rows_layout.addWidget(box)
+            rows_layout.addWidget(note)
+            self.boxes[key] = box
+        if compact:
+            scroll = QScrollArea()
+            scroll.setObjectName("settingsPage")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(rows)
+            scroll.setMinimumHeight(260)
+            outer.addWidget(scroll, 1)
+        else:
+            outer.addWidget(rows)
+        footer = QHBoxLayout()
+        self.all_on = QPushButton("Turn all on")
+        self.all_on.setAccessibleName("Turn all new features on")
+        self.all_on.clicked.connect(lambda: self.window.set_all_features(True))
+        self.all_off = QPushButton("Turn all off")
+        self.all_off.setAccessibleName("Turn all new features off")
+        self.all_off.clicked.connect(lambda: self.window.set_all_features(False))
+        self.run_setup = QPushButton("Run setup")
+        self.run_setup.setAccessibleName("Run first-launch setup again")
+        self.run_setup.clicked.connect(lambda: self.window.open_setup())
+        footer.addWidget(self.all_on)
+        footer.addWidget(self.all_off)
+        footer.addStretch(1)
+        footer.addWidget(self.run_setup)
+        outer.addLayout(footer)
+        self.sync()
+
+    def sync(self) -> None:
+        features = self.window.features
+        for key, box in self.boxes.items():
+            if box.isChecked() != bool(features.get(key)):
+                box.blockSignals(True)
+                box.setChecked(bool(features.get(key)))
+                box.blockSignals(False)
+        on = sum(1 for key in self.boxes if features.get(key))
+        self.count_label.setText(f"{on} of {len(self.boxes)} on")
+        self.run_setup.setVisible(bool(features.get("setup")))
+
+
+class FeaturesPopover(QFrame):
+    """The toolbar sparkle popover: the same toggles as Settings -> Features."""
+
+    def __init__(self, window: Any) -> None:
+        super().__init__(window, Qt.WindowType.Popup)
+        self.setObjectName("popover")
+        self.setAccessibleName("New features")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        self.toggles = FeatureToggles(window, self, compact=True)
+        layout.addWidget(self.toggles)
+        self.resize(400, 520)
+
+    def show_below(self, anchor: QWidget) -> None:
+        self.toggles.sync()
+        point = anchor.mapToGlobal(anchor.rect().bottomRight())
+        screen = anchor.screen()
+        height = 520
+        if screen is not None:
+            height = min(520, screen.availableGeometry().bottom() - point.y() - 12)
+        self.resize(400, max(260, height))
+        self.move(point.x() - self.width(), point.y() + 6)
+        self.show()
+        first = next(iter(self.toggles.boxes.values()), None)
+        if first is not None:
+            first.setFocus(Qt.FocusReason.PopupFocusReason)
+
+
 class SettingsDialog(QDialog):
     def __init__(
         self,
@@ -2925,10 +3260,21 @@ class SettingsDialog(QDialog):
         preferences = dict(getattr(self._window(), "preferences", {}) or {})
         tabs = QTabWidget(self)
         tabs.setAccessibleName("Onionmind settings sections")
+        self.tabs = tabs
         tabs.addTab(self._page(self._general_page(preferences)), "General")
         tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
         tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
         tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
+        # v2: one tab that lists the features, then the tabs individual
+        # features own, added and removed live as they are switched.
+        self.feature_toggles: Optional[FeatureToggles] = None
+        self._feature_tabs: dict[str, QWidget] = {}
+        window = self._window()
+        if window is not None and _feature_catalog(window.desktop_core):
+            self.feature_toggles = FeatureToggles(window, self)
+            tabs.addTab(self._page(self._padded(self.feature_toggles)), "Features")
+            window.featuresChanged.connect(self._sync_features)
+            self._sync_features()
 
         self.storage_feedback = QLabel()
         self.storage_feedback.setObjectName("meta")
@@ -2949,6 +3295,61 @@ class SettingsDialog(QDialog):
         pending = update_bridge.pending() if update_bridge and update_bridge.available else None
         if pending is not None:
             self._offer_restart(str(pending))
+
+    # Feature-owned tabs, in the order they appear after Features.
+    FEATURE_TABS: tuple[tuple[str, str, str], ...] = (
+        ("keyboard", "Keyboard", "_keyboard_page"),
+        ("rules", "Agent rules", "_rules_page"),
+        ("presets", "Presets", "_presets_page"),
+    )
+
+    @staticmethod
+    def _padded(content: QWidget) -> QWidget:
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.addWidget(content)
+        layout.addStretch(1)
+        return holder
+
+    def _sync_features(self, *_args: Any) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if self.feature_toggles is not None:
+            self.feature_toggles.sync()
+        for key, label, builder_name in self.FEATURE_TABS:
+            on = bool(window.features.get(key))
+            page = self._feature_tabs.get(key)
+            builder = getattr(self, builder_name, None)
+            if on and page is None and callable(builder):
+                page = self._page(builder())
+                self._feature_tabs[key] = page
+                self.tabs.addTab(page, label)
+            elif not on and page is not None:
+                index = self.tabs.indexOf(page)
+                if index >= 0:
+                    self.tabs.removeTab(index)
+                page.deleteLater()
+                self._feature_tabs.pop(key, None)
+        for key, section in getattr(self, "_feature_sections", {}).items():
+            section.setVisible(bool(window.features.get(key)))
+
+    def show_tab(self, label: str) -> bool:
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == label:
+                self.tabs.setCurrentIndex(index)
+                return True
+        return False
+
+    def done(self, result: int) -> None:
+        window = self._window()
+        if window is not None and self.feature_toggles is not None:
+            try:
+                window.featuresChanged.disconnect(self._sync_features)
+            except (RuntimeError, TypeError):
+                pass
+        super().done(result)
 
     @staticmethod
     def _page(content: QWidget) -> QScrollArea:
@@ -3376,12 +3777,12 @@ class SettingsDialog(QDialog):
         parser = _optional_callable(self.desktop_core(), "parse_context_window")
         tokens = parser(text) if callable(parser) else self._context_tokens(text)
         if tokens is None:
-            self.context_hint.setStyleSheet("color: #d88675;")
+            self.context_hint.setStyleSheet(f"color: {theme_tokens()['bad']};")
             self.context_hint.setText("Enter a token count, for example 24000 or 24k.")
             return
         warner = _optional_callable(self.desktop_core(), "context_window_warning")
         warning = warner(tokens) if callable(warner) else ""
-        self.context_hint.setStyleSheet("color: #d88675;" if warning else "")
+        self.context_hint.setStyleSheet(f"color: {theme_tokens()['bad']};" if warning else "")
         self.context_hint.setText(
             warning or f"{tokens:,} tokens · type any count, or pick a preset from the list"
         )
@@ -3592,6 +3993,8 @@ class SettingsDialog(QDialog):
 
 
 class OnionmindWindow(QMainWindow):
+    featuresChanged = Signal(object)
+
     def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
         super().__init__()
         self.core = core
@@ -3607,6 +4010,8 @@ class OnionmindWindow(QMainWindow):
         self.harness_bridge = HarnessBridge(desktop_core, core)
         self.update_bridge = UpdateBridge(core, desktop_core)
         self.settings_data = {} if demo else self.settings_bridge.load()
+        self.features: dict[str, bool] = self._load_features()
+        self._features_popover: Optional[FeaturesPopover] = None
         self.workspace: Optional[str] = None
         self.current_snapshot: dict[str, Any] = {}
         self.current_session: Any = None
@@ -3635,6 +4040,7 @@ class OnionmindWindow(QMainWindow):
         self.preferences = self._load_preferences()
         self._apply_preferences()
         self._install_shortcuts()
+        self._apply_features()
         if demo:
             self._populate_demo()
         else:
@@ -3739,6 +4145,15 @@ class OnionmindWindow(QMainWindow):
         )
         self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
+
+        self.features_button = QToolButton()
+        self.features_button.setObjectName("bareButton")
+        self.features_button.setIcon(_icon("sparkle"))
+        self.features_button.setToolTip("New features. Each stays hidden until you turn it on.")
+        self.features_button.setAccessibleName("New features")
+        self.features_button.clicked.connect(self.open_features_popover)
+        self.features_button.setVisible(bool(_feature_catalog(self.desktop_core)))
+        toolbar_layout.addWidget(self.features_button)
 
         terminal_toggle = QToolButton()
         terminal_toggle.setObjectName("bareButton")
@@ -6426,6 +6841,64 @@ class OnionmindWindow(QMainWindow):
             return
         self.inspector.append_activity("Restarting Onionmind to apply the staged update")
         QApplication.instance().quit()
+
+    # --- v2 features -----------------------------------------------------
+    #
+    # One dict, saved with the other settings. Each feature owns an
+    # _apply_feature_<key>(on) hook that shows or hides its own UI, so turning
+    # a flag off restores the original workbench at once, without a restart.
+
+    def _load_features(self) -> dict[str, bool]:
+        loader = getattr(self.desktop_core, "load_features", None)
+        if not callable(loader):
+            return {}
+        try:
+            return dict(loader(self.settings_data))
+        except Exception:
+            return {}
+
+    def feature(self, key: str) -> bool:
+        return bool(self.features.get(key))
+
+    def set_feature(self, key: str, on: bool) -> None:
+        if key not in self.features or self.features[key] == bool(on):
+            return
+        self.features[key] = bool(on)
+        self._store_features()
+
+    def set_all_features(self, on: bool) -> None:
+        if not self.features:
+            return
+        for key in self.features:
+            self.features[key] = bool(on)
+        self._store_features()
+
+    def _store_features(self) -> None:
+        self.settings_data["features"] = dict(self.features)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_features()
+        on = sum(1 for value in self.features.values() if value)
+        self.set_status(f"New features: {on} of {len(self.features)} on")
+
+    def _apply_features(self) -> None:
+        for key, on in self.features.items():
+            hook = getattr(self, f"_apply_feature_{key}", None)
+            if callable(hook):
+                hook(bool(on))
+        popover = self._features_popover
+        if popover is not None:
+            popover.toggles.sync()
+        self.featuresChanged.emit(dict(self.features))
+
+    def open_features_popover(self) -> None:
+        if self._features_popover is None:
+            self._features_popover = FeaturesPopover(self)
+        self._features_popover.show_below(self.features_button)
+
+    def open_setup(self) -> None:
+        """First-launch setup; the setup feature replaces this."""
+        self.set_status("Turn on First-launch setup in New features to run it.")
 
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
