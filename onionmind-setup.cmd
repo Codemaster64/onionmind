@@ -7250,6 +7250,52 @@ class TranscriptView(QScrollArea):
         self._scroll_later()
         return block
 
+    def remove_message(self, block: Optional["MessageBlock"]) -> None:
+        if block is None:
+            return
+        if block in self._message_blocks:
+            self._message_blocks.remove(block)
+        self.layout.removeWidget(block)
+        block.hide()
+        block.deleteLater()
+
+    def add_widget(self, widget: QWidget, indent: int = 44) -> QWidget:
+        """A v2 card (webAsk, approval, provenance) aligned with message copy."""
+        holder = QWidget()
+        holder_layout = QHBoxLayout(holder)
+        holder_layout.setContentsMargins(indent, 0, 0, 12)
+        holder_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignLeft)
+        holder_layout.addStretch(1)
+        widget.setMaximumWidth(max(320, self.viewport().width() - indent - 96))
+        self.layout.addWidget(holder)
+        self._scroll_later()
+        return holder
+
+    def remove_widget(self, holder: Optional[QWidget]) -> None:
+        if holder is None:
+            return
+        self.layout.removeWidget(holder)
+        holder.hide()
+        holder.deleteLater()
+
+    def add_timeline_step(self, title: str, detail: str, state: str) -> "TimelineStep":
+        """Append one step to the timeline that follows the latest message."""
+        last = self.layout.itemAt(self.layout.count() - 1) if self.layout.count() else None
+        holder = last.widget() if last is not None else None
+        timeline = getattr(holder, "timeline", None)
+        if not isinstance(timeline, TimelineView):
+            timeline = TimelineView()
+            holder = QWidget()
+            holder.timeline = timeline
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(44, 0, 0, 12)
+            holder_layout.addWidget(timeline, 0, Qt.AlignmentFlag.AlignLeft)
+            holder_layout.addStretch(1)
+            self.layout.addWidget(holder)
+        step = timeline.add_step(title, detail, state)
+        self._scroll_later()
+        return step
+
     def add_tool_card(self, title: str, rows: list[tuple[str, str]]) -> ToolActivityCard:
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
@@ -7277,6 +7323,324 @@ class TranscriptView(QScrollArea):
 
     def _scroll_later(self) -> None:
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+
+
+class TimelineStep(QWidget):
+    """One step: a 9px node on the 1px line, a title and a detail.
+
+    While a step runs its node is an arc spinner (still when motion is
+    reduced); finished steps are filled, failed or refused ones hollow red.
+    """
+
+    def __init__(self, title: str, detail: str, state: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._state = state
+        self._angle = 0
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(22, 3, 0, 3)
+        layout.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("title")
+        self.detail_label = QLabel(detail)
+        self.detail_label.setObjectName("meta")
+        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.detail_label, 1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(90)
+        self.timer.timeout.connect(self._spin)
+        self.set_state(state, detail)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str, detail: Optional[str] = None) -> None:
+        self._state = state
+        if detail is not None:
+            self.detail_label.setText(detail)
+        self.setAccessibleName(f"{self.title_label.text()}: {self.detail_label.text()} ({state})")
+        if state == "running" and _ui_animations_enabled():
+            self.timer.start()
+        else:
+            self.timer.stop()
+        self.update()
+
+    def _spin(self) -> None:
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        tokens = theme_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(tokens["line_strong"]), 1))
+        painter.drawLine(QPointF(8.5, 0), QPointF(8.5, self.height()))
+        centre = QPointF(8.5, self.height() / 2)
+        rect = QRectF(centre.x() - 4.5, centre.y() - 4.5, 9, 9)
+        colour = {"done": tokens["accent"], "error": tokens["bad"], "denied": tokens["bad"],
+                  "waiting": tokens["warn"]}.get(self._state, tokens["faint"])
+        if self._state == "running":
+            painter.setBrush(QColor(tokens["bg"]))
+            painter.setPen(QPen(QColor(tokens["line_strong"]), 1.4))
+            painter.drawEllipse(rect)
+            pen = QPen(QColor(tokens["accent"]), 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawArc(rect, (90 - self._angle) * 16, 120 * 16)
+        elif self._state in ("error", "denied", "waiting"):
+            painter.setBrush(QColor(tokens["bg"]))
+            painter.setPen(QPen(QColor(colour), 1.6))
+            painter.drawEllipse(rect)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colour))
+            painter.drawEllipse(rect)
+        painter.end()
+
+
+class TimelineView(QWidget):
+    """Agent and tool steps as a compact vertical timeline instead of cards."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("timeline")
+        self.setAccessibleName("Steps")
+        self.layout_ = QVBoxLayout(self)
+        self.layout_.setContentsMargins(0, 0, 0, 0)
+        self.layout_.setSpacing(0)
+        self.steps: list[TimelineStep] = []
+        self.setMinimumWidth(420)
+
+    def add_step(self, title: str, detail: str, state: str) -> TimelineStep:
+        step = TimelineStep(title, detail, state, self)
+        self.steps.append(step)
+        self.layout_.addWidget(step)
+        return step
+
+
+class NoticeCard(QFrame):
+    """A titled card with copy and action buttons: amber for questions
+    (webAsk, approvals), red for errors. Buttons are real QPushButtons, so
+    every action is reachable from the keyboard."""
+
+    def __init__(self, kind: str, title: str, body: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("errorCard" if kind == "error" else "amberCard")
+        self.setAccessibleName(title)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(7)
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(_icon("warning", 16, theme_tokens()["bad" if kind == "error" else "warn"]).pixmap(16, 16))
+        head.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("title")
+        self.title_label.setWordWrap(True)
+        head.addWidget(self.title_label, 1)
+        layout.addLayout(head)
+        self.rows = QVBoxLayout()
+        self.rows.setSpacing(4)
+        layout.addLayout(self.rows)
+        self.body_label = QLabel(body)
+        self.body_label.setObjectName("meta")
+        self.body_label.setWordWrap(True)
+        self.body_label.setVisible(bool(body))
+        layout.addWidget(self.body_label)
+        self.buttons = QHBoxLayout()
+        self.buttons.setSpacing(7)
+        self.buttons.addStretch(1)
+        layout.addLayout(self.buttons)
+        self.spinner_label = QLabel()
+        self.spinner_label.setObjectName("meta")
+        self.spinner_label.hide()
+        layout.addWidget(self.spinner_label)
+
+    def add_row(self, label: str, value: str) -> QLabel:
+        row = QHBoxLayout()
+        name = QLabel(label)
+        name.setObjectName("meta")
+        name.setFixedWidth(60)
+        text = QLabel(value)
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.TextFormat.PlainText)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        row.addWidget(name, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(text, 1)
+        self.rows.addLayout(row)
+        return text
+
+    def add_button(self, text: str, callback: Callable[[], None], primary: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        if primary:
+            button.setObjectName("primaryButton")
+        button.setAccessibleName(text)
+        button.clicked.connect(callback)
+        self.buttons.addWidget(button)
+        return button
+
+    def set_busy(self, text: str) -> None:
+        for index in range(self.buttons.count()):
+            widget = self.buttons.itemAt(index).widget()
+            if widget is not None:
+                widget.setEnabled(False)
+        self.spinner_label.setText(text)
+        self.spinner_label.show()
+
+
+class RunPanel(QWidget):
+    """The inspector's Run tab: one Agent run's status, plan, approval and output.
+
+    Every row comes from the agent's own stream - its todo list when it keeps
+    one, otherwise the tools it actually called - never from a script.
+    """
+
+    STATES = {
+        "pending": "Pending", "running": "Working…", "waiting": "Waiting for you",
+        "done": "Done", "stopped": "Stopped by you", "denied": "Denied · nothing written",
+        "error": "Failed",
+    }
+    EMPTY = (
+        "No agent run yet. Switch the composer to Agent to start one. Its plan, "
+        "approvals and output show up here."
+    )
+
+    stopRequested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 10, 2, 3)
+        layout.setSpacing(8)
+        head = QHBoxLayout()
+        self.status_label = QLabel("No run")
+        self.status_label.setObjectName("title")
+        self.elapsed_label = QLabel("")
+        self.elapsed_label.setObjectName("meta")
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setAccessibleName("Stop the Agent run")
+        self.stop_button.clicked.connect(self.stopRequested)
+        self.stop_button.setEnabled(False)
+        head.addWidget(self.status_label)
+        head.addWidget(self.elapsed_label)
+        head.addStretch(1)
+        head.addWidget(self.stop_button)
+        layout.addLayout(head)
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("meta")
+        self.meta_label.setWordWrap(True)
+        layout.addWidget(self.meta_label)
+        self.empty_label = QLabel(self.EMPTY)
+        self.empty_label.setObjectName("meta")
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
+        plan_title = QLabel("PLAN")
+        plan_title.setObjectName("sectionTitle")
+        layout.addWidget(plan_title)
+        self.plan = QListWidget()
+        self.plan.setAccessibleName("Agent plan")
+        self.plan.setMaximumHeight(190)
+        layout.addWidget(self.plan)
+        self.approval_holder = QVBoxLayout()
+        layout.addLayout(self.approval_holder)
+        output_title = QLabel("OUTPUT")
+        output_title.setObjectName("sectionTitle")
+        layout.addWidget(output_title)
+        self.output = QPlainTextEdit()
+        self.output.setObjectName("runOutput")
+        self.output.setReadOnly(True)
+        self.output.setAccessibleName("Agent output")
+        self.output.document().setMaximumBlockCount(4000)
+        layout.addWidget(self.output, 1)
+        self._started: Optional[float] = None
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+        self._rows: dict[str, QListWidgetItem] = {}
+        self._todo_mode = False
+
+    def start(self, meta: str) -> None:
+        self.plan.clear()
+        self._rows.clear()
+        self._todo_mode = False
+        self.output.clear()
+        self.clear_approval()
+        self.meta_label.setText(meta)
+        self.empty_label.hide()
+        self.status_label.setText("Running")
+        self.stop_button.setEnabled(True)
+        self._started = time.monotonic()
+        self._tick()
+        self.timer.start()
+
+    def finish(self, status: str) -> None:
+        self.status_label.setText(status)
+        self.stop_button.setEnabled(False)
+        self.timer.stop()
+        self._tick()
+        for key, item in self._rows.items():
+            state = item.data(Qt.ItemDataRole.UserRole)
+            if state in ("running", "waiting", "pending") and not self._todo_mode:
+                self.set_step(key, "stopped", None)
+
+    def set_status(self, status: str) -> None:
+        self.status_label.setText(status)
+
+    def _tick(self) -> None:
+        if self._started is None:
+            self.elapsed_label.setText("")
+            return
+        seconds = int(time.monotonic() - self._started)
+        self.elapsed_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
+
+    def set_step(self, key: str, state: str, title: Optional[str], detail: str = "") -> None:
+        if self._todo_mode and not key.startswith("todo:"):
+            self.append_output(f"{title or key} · {self.STATES.get(state, state)}")
+            return
+        item = self._rows.get(key)
+        if item is None:
+            item = QListWidgetItem()
+            self._rows[key] = item
+            self.plan.addItem(item)
+        if title is not None:
+            item.setData(Qt.ItemDataRole.UserRole + 1, title)
+        name = item.data(Qt.ItemDataRole.UserRole + 1) or key
+        item.setData(Qt.ItemDataRole.UserRole, state)
+        mark = {"done": "✓", "denied": "✕", "error": "✕", "stopped": "■", "waiting": "!",
+                "running": "›", "pending": "·"}.get(state, "·")
+        label = detail or self.STATES.get(state, state)
+        item.setText(f"{mark}  {name}\n    {label}")
+        item.setToolTip(f"{name}: {label}")
+
+    def set_todos(self, todos: Iterable[Any]) -> None:
+        """The agent's own todo list (its todo_write tool) becomes the plan."""
+        self._todo_mode = True
+        for key in [k for k in self._rows if k.startswith("todo:")]:
+            item = self._rows.pop(key)
+            self.plan.takeItem(self.plan.row(item))
+        for index, todo in enumerate(todos):
+            if not isinstance(todo, dict):
+                continue
+            status = {"completed": "done", "in_progress": "running"}.get(_as_text(todo.get("status")), "pending")
+            self.set_step(f"todo:{index}", status, _as_text(todo.get("content"))[:120] or f"Step {index + 1}")
+
+    def append_output(self, text: str) -> None:
+        if text:
+            self.output.appendPlainText(text.rstrip("\n"))
+
+    def show_approval(self, card: QWidget) -> None:
+        self.clear_approval()
+        self.approval_holder.addWidget(card)
+
+    def clear_approval(self) -> None:
+        while self.approval_holder.count():
+            widget = self.approval_holder.takeAt(0).widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
 
 
 class SessionBridge:
@@ -7621,7 +7985,8 @@ class HarnessBridge:
                 self.spec = None
 
     def _launcher(self, model: str, task: str, cwd: str = "",
-                  yolo: bool = False) -> Optional[list[str]]:
+                  yolo: bool = False, stream: bool = False,
+                  deny: Iterable[str] = (), no_network: bool = False) -> Optional[list[str]]:
         """``onionmind.py --agent``: the one place Tor is verified and enforced.
 
         Launching the agent directly would inherit this window's environment,
@@ -7635,11 +8000,18 @@ class HarnessBridge:
                 "--model", model]
         if yolo:
             argv.append("--yolo")
+        if stream:
+            # v2: the structured mode. The task goes to stdin, not the argv.
+            argv.append("--stream-json")
+        if no_network:
+            argv.append("--no-network")
+        for rule in deny:
+            argv += ["--deny", rule]
         if cwd:
             # The working directory is an argument, not just the process cwd:
             # run_agent writes the project settings there before it starts.
             argv += ["--cwd", cwd]
-        return argv + [task]
+        return argv if stream else argv + [task]
 
     @property
     def limitation(self) -> str:
@@ -7679,8 +8051,9 @@ class HarnessBridge:
         )
 
     def build(self, *, model: str, task: str, cwd: str,
-              yolo: bool = False) -> tuple[list[str], str]:
-        launcher = self._launcher(model, task, cwd, yolo)
+              yolo: bool = False, stream: bool = False,
+              deny: Iterable[str] = (), no_network: bool = False) -> tuple[list[str], str]:
+        launcher = self._launcher(model, task, cwd, yolo, stream, deny, no_network)
         if launcher is None:                     # check() refuses first; belt and braces
             raise RuntimeError(
                 "Onionmind Agent has no Tor-verified launcher, so it will not start."
@@ -8439,6 +8812,20 @@ class InspectorPane(QWidget):
         self.tabs.addTab(self.context_tab, "Context")
         self.tabs.addTab(self.changes_tab, "Changes")
         self.tabs.addTab(self.activity_tab, "Activity")
+        # v2 runPanel: built always, shown as a fourth tab only while the
+        # feature is on.
+        self.run_panel = RunPanel()
+
+    def set_run_tab(self, visible: bool) -> None:
+        index = self.tabs.indexOf(self.run_panel)
+        if visible and index < 0:
+            self.tabs.addTab(self.run_panel, "Run")
+        elif not visible and index >= 0:
+            self.tabs.removeTab(index)
+
+    def show_run_tab(self) -> None:
+        if self.tabs.indexOf(self.run_panel) >= 0:
+            self.tabs.setCurrentWidget(self.run_panel)
 
     def append_activity(self, text: str) -> None:
         stamp = datetime.now().strftime("%H:%M")
@@ -9690,6 +10077,20 @@ class OnionmindWindow(QMainWindow):
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
         self._update_timer: Optional[QTimer] = None
+        # v2 run state: the webAsk question, the structured agent stream, and
+        # open timeline steps. All empty while the features are off.
+        self._web_ask_generation = 0
+        self._web_ask_card: Optional[QWidget] = None
+        self._web_ask_task = ""
+        self._agent_stream = False
+        self._agent_buffer = b""
+        self._agent_rules: Optional[dict[str, Any]] = None
+        self._agent_steps: dict[str, Any] = {}
+        self._agent_permission: Optional[dict[str, Any]] = None
+        self._agent_cards: list[QWidget] = []
+        self._agent_outcome: Optional[str] = None
+        self._run_allow_all = False
+        self._open_steps: dict[str, Any] = {}
         self._build_window()
         self.preferences = self._load_preferences()
         self._apply_preferences()
@@ -9874,6 +10275,7 @@ class OnionmindWindow(QMainWindow):
 
         self.inspector = InspectorPane()
         self.inspector.refreshRequested.connect(self.refresh_workspace)
+        self.inspector.run_panel.stopRequested.connect(self.stop_active)
         self.main_splitter.addWidget(self.inspector)
         self.main_splitter.setSizes([224, 860, 292])
         self.main_splitter.setStretchFactor(0, 0)
@@ -10604,14 +11006,22 @@ class OnionmindWindow(QMainWindow):
             self.settings_bridge.save(self.settings_data)
         self.set_status(f"Model set to {self._describe_model(model)}")
 
+    def _approval_text(self, yolo: bool) -> str:
+        if yolo:
+            return "YOLO - no approval prompts"
+        if self.feature("approvals"):
+            return "Asks before protected actions"
+        return "Protected actions stop safely"
+
     def _yolo_toggled(self, on: bool) -> None:
         """The label beside the box states what is actually armed, not a default."""
-        self.approval_state.setText(
-            "YOLO - no approval prompts" if on else "Protected actions stop safely"
-        )
+        self.approval_state.setText(self._approval_text(on))
         self.inspector.append_activity(
             "YOLO armed: edits and commands run unattended; network boundary unchanged"
-            if on else "Approvals on: protected actions stop safely"
+            if on else (
+                "Approvals on: protected actions wait for your answer"
+                if self.feature("approvals") else "Approvals on: protected actions stop safely"
+            )
         )
 
     def set_mode(self, mode: str) -> None:
@@ -11687,6 +12097,8 @@ class OnionmindWindow(QMainWindow):
         if self.mode == "chat":
             if search_allowed:
                 self._start_chat(True)
+            elif self._web_ask_wanted(task):
+                self._ask_before_search(task)
             else:
                 self._start_chat()
         else:
@@ -12006,14 +12418,16 @@ class OnionmindWindow(QMainWindow):
             state = "Running through Tor · fails closed" if name == "web_search" else "Running locally"
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Searching via Tor" if name == "web_search" else "Using local tool")
-            self.transcript.add_tool_card(display_name, [(detail or "Tool request", state)])
+            self._tool_started(display_name, detail or "Tool request", state)
             activity = "Tor search started" if name == "web_search" else f"Local tool started: {display_name}"
             self.inspector.append_activity(activity)
         elif kind == "tool_finished":
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Thinking")
             state = "Tor result returned" if name == "web_search" else "Finished"
-            self.transcript.add_tool_card(display_name, [("Tool result", state)])
+            if name == "web_search" and event.get("results") is not None and self.feature("timeline"):
+                state = f"{event.get('results')} results over Tor"
+            self._tool_finished(display_name, "Tool result", state)
             activity = "Tor search finished" if name == "web_search" else f"Local tool finished: {display_name}"
             self.inspector.append_activity(activity)
         elif kind == "tool_refused":
@@ -12085,6 +12499,30 @@ class OnionmindWindow(QMainWindow):
         model = self.current_model_id()
         workspace = self.workspace
         yolo = self.yolo_consent.isChecked()
+        # v2: the structured stream when a feature needs it, and this
+        # project's rules - which only ever narrow what the agent may do.
+        stream = self._uses_agent_stream()
+        rules = self._project_rules() if self.feature("rules") else None
+        deny: list[str] = []
+        no_network = False
+        if rules is not None:
+            if rules.get("readOnly"):
+                yolo = False                     # every edit must reach the host to be refused
+            denials = getattr(self.desktop_core, "agent_rule_denials", None)
+            deny = list(denials(rules)) if callable(denials) else []
+            no_network = bool(rules.get("noNetwork"))
+            notes = _as_text(rules.get("notes")).strip()
+            if notes:
+                task += "\n\nProject instructions for this repository:\n" + notes
+        self._agent_stream = stream
+        self._agent_rules = rules
+        self._agent_task_text = task
+        self._agent_steps = {}
+        self._agent_permission = None
+        self._agent_outcome = None
+        self._run_allow_all = False
+        self._agent_buffer = b""
+        self._agent_yolo = yolo
         self.harness_generation += 1
         generation = self.harness_generation
         self.stream_block = self.transcript.add_message(
@@ -12100,7 +12538,9 @@ class OnionmindWindow(QMainWindow):
             if not available:
                 return {"available": False, "reason": reason}
             argv, cwd = self.harness_bridge.build(model=model, task=task,
-                                                  cwd=workspace, yolo=yolo)
+                                                  cwd=workspace, yolo=yolo,
+                                                  stream=stream, deny=deny,
+                                                  no_network=no_network)
             return {"available": True, "argv": argv, "cwd": cwd}
 
         worker = self._start_worker(prepare)
@@ -12154,16 +12594,37 @@ class OnionmindWindow(QMainWindow):
         process = QProcess(self)
         self.harness_process = process
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        if self._agent_stream:
+            # JSON lines on stdout must not interleave with stderr chatter.
+            process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+            process.readyReadStandardError.connect(self._read_harness_errors)
         process.setWorkingDirectory(cwd)
         process.readyReadStandardOutput.connect(self._read_harness_output)
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
         process.start(argv[0], argv[1:])
+        if self._agent_stream:
+            # The handshake first - qwen never reads the task without it - then
+            # the task itself, on stdin rather than in the process list.
+            self._agent_write(
+                self.desktop_core.agent_initialize_message()
+                + self.desktop_core.agent_task_message(self._agent_task_text)
+            )
+        if self.feature("runPanel"):
+            self.inspector.run_panel.start(self._run_meta())
+            self.toggle_inspector(True)
+            self.inspector.show_run_tab()
         self.set_status("Onionmind Agent is working…")
         self.inspector.append_activity("Agent run started; output is not yet proof of disk changes")
 
     def _read_harness_output(self) -> None:
         if self.harness_process is None:
+            return
+        if self._agent_stream:
+            self._agent_buffer += bytes(self.harness_process.readAllStandardOutput())
+            while b"\n" in self._agent_buffer:
+                line, self._agent_buffer = self._agent_buffer.split(b"\n", 1)
+                self._handle_agent_line(line.decode("utf-8", errors="replace"))
             return
         chunk = bytes(self.harness_process.readAllStandardOutput()).decode("utf-8", errors="replace")
         clean = _brand_runtime_text(ANSI_ESCAPE.sub("", chunk))
@@ -12178,6 +12639,13 @@ class OnionmindWindow(QMainWindow):
             return
         self.tor_in_use = False
         normal = status == QProcess.ExitStatus.NormalExit
+        if self._agent_stream:
+            rest = self._agent_buffer.decode("utf-8", errors="replace")
+            self._agent_buffer = b""
+            if rest.strip():
+                self._handle_agent_line(rest)
+            self._clear_agent_cards()
+            self._finish_run_panel(normal and exit_code == 0)
         suffix = f"\n\nAgent {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
         if self.stream_block is not None:
             self.stream_block.append_text(suffix)
@@ -12222,6 +12690,9 @@ class OnionmindWindow(QMainWindow):
     def stop_active(self) -> None:
         if not self.active_kind:
             return
+        if self.active_kind == "chat" and self.stop_event is None and self._web_ask_task:
+            self._cancel_web_ask()
+            return
         if self.active_kind == "chat" and self.stop_event is not None:
             self.stop_event.set()
             if self.stream_block is not None:
@@ -12240,6 +12711,9 @@ class OnionmindWindow(QMainWindow):
                 self._set_active(None)
                 self.save_current_session()
             else:
+                if self._agent_outcome is None:
+                    self._agent_outcome = "stopped"
+                self._clear_agent_cards()
                 self.harness_process.terminate()
                 QTimer.singleShot(1500, self._kill_harness_if_running)
                 self.set_status(
@@ -12495,6 +12969,355 @@ class OnionmindWindow(QMainWindow):
             return
         self.inspector.append_activity("Restarting Onionmind to apply the staged update")
         QApplication.instance().quit()
+
+    # --- v2: webAsk -------------------------------------------------------
+
+    def _web_ask_wanted(self, task: str) -> bool:
+        matcher = getattr(self.desktop_core, "needs_web", None)
+        return self.feature("webAsk") and callable(matcher) and bool(matcher(task))
+
+    def _ask_before_search(self, task: str) -> None:
+        """Pause a Chat turn that looks like it needs the web, and ask."""
+        self._web_ask_generation += 1
+        generation = self._web_ask_generation
+        self._web_ask_task = task
+        block = self.transcript.add_message("assistant", "")
+        block.start_thinking("Thinking")
+        self.stream_block = block
+        QTimer.singleShot(900, lambda: self._show_web_ask(generation))
+
+    def _show_web_ask(self, generation: int) -> None:
+        if generation != self._web_ask_generation or not self._web_ask_task or self.active_kind != "chat":
+            return
+        self.transcript.remove_message(self.stream_block)
+        self.stream_block = None
+        tor_on = self.tor_phase == "running" and _tor_is_enabled(self.core)
+        why = (
+            "Tor search is off for this turn. If you allow it, this one query goes over Tor to "
+            "DuckDuckGo’s onion service. Your prompt, files and the rest of the conversation stay "
+            "on this machine."
+            if tor_on else
+            "Tor is off, so nothing can go out right now. If you allow it, Onionmind starts Tor, "
+            "sends this one query to DuckDuckGo’s onion service, and leaves Tor on afterwards."
+        )
+        card = NoticeCard("ask", "Onionmind wants to search the web to answer this", why)
+        query = getattr(self.desktop_core, "web_query", lambda text: text[:70])(self._web_ask_task)
+        card.add_row("Query", query)
+        card.add_button("Answer without searching", lambda: self._resolve_web_ask(False))
+        allow = card.add_button(
+            "Search once over Tor" if tor_on else "Turn on Tor and search once",
+            lambda: self._resolve_web_ask(True), primary=True,
+        )
+        self._web_ask_card = self.transcript.add_widget(card)
+        allow.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.set_status("Onionmind wants to search the web. Waiting for your permission.")
+        self.inspector.append_activity("Asked permission to search the web")
+        self._notify("Onionmind needs your approval", "It wants to search the web for this answer.")
+
+    def _resolve_web_ask(self, allow: bool) -> None:
+        if not self._web_ask_task or self.active_kind != "chat":
+            return
+        self.transcript.remove_widget(self._web_ask_card)
+        self._web_ask_card = None
+        self._web_ask_task = ""
+        if allow:
+            starting = self.tor_phase != "running"
+            if not _tor_is_enabled(self.core):
+                _set_tor_enabled(self.core, True)
+            self.inspector.append_activity("Search allowed once over Tor")
+            self._start_chat(True)
+            self.set_status("Starting Tor for this search…" if starting else "Searching over Tor…")
+        else:
+            self.inspector.append_activity("Answered without searching; nothing left this machine")
+            self._start_chat(False)
+            self.set_status("Answering from the model alone, without the web.")
+
+    def _cancel_web_ask(self) -> None:
+        self._web_ask_generation += 1
+        self._web_ask_task = ""
+        self.transcript.remove_widget(self._web_ask_card)
+        self._web_ask_card = None
+        self.transcript.remove_message(self.stream_block)
+        self.stream_block = None
+        self.set_status("Stopped before anything was sent.")
+        self.inspector.append_activity("Run stopped by you before a search was allowed")
+        self._set_active(None)
+        self.save_current_session()
+
+    # --- v2: tool steps (cards, or the timeline) ---------------------------
+
+    def _tool_started(self, title: str, detail: str, state_text: str, key: Optional[str] = None) -> None:
+        if self.feature("timeline"):
+            self._open_steps[key or title] = self.transcript.add_timeline_step(title, detail, "running")
+        else:
+            self.transcript.add_tool_card(title, [(detail, state_text)])
+
+    def _tool_finished(self, title: str, row_label: str, state_text: str,
+                       ok: bool = True, key: Optional[str] = None, state: Optional[str] = None) -> None:
+        step = self._open_steps.pop(key or title, None)
+        final = state or ("done" if ok else "error")
+        if self.feature("timeline"):
+            if step is not None:
+                step.set_state(final, state_text)
+            else:
+                self.transcript.add_timeline_step(title, state_text, final)
+        else:
+            self.transcript.add_tool_card(title, [(row_label, state_text)])
+
+    # --- v2: structured Agent runs (approvals, rules, Run tab, timeline) ---
+
+    AGENT_TOOL_LABELS = {
+        "read_file": "Read file", "read_many_files": "Read files", "list_directory": "List folder",
+        "glob": "Find files", "grep_search": "Search project", "search_file_content": "Search project",
+        "edit": "Edit file", "write_file": "Edit file", "replace": "Edit file",
+        "notebook_edit": "Edit file", "run_shell_command": "Shell command",
+        "web_fetch": "Fetch over Tor", "web_search": "Search over Tor",
+        "mcp__onionmind__web_search": "Search over Tor", "mcp__onionmind__web_fetch": "Fetch over Tor",
+    }
+
+    def _uses_agent_stream(self) -> bool:
+        if not callable(getattr(self.desktop_core, "parse_agent_line", None)):
+            return False
+        return any(self.feature(key) for key in ("approvals", "runPanel", "timeline", "rules"))
+
+    def _project_rules(self) -> Optional[dict[str, Any]]:
+        loader = getattr(self.desktop_core, "load_rules", None)
+        if not callable(loader) or not self.workspace:
+            return None
+        return dict(loader(self.settings_data, self.workspace))
+
+    def _run_meta(self) -> str:
+        display = getattr(self.desktop_core, "describe_model", None)
+        tier = ""
+        if callable(display):
+            try:
+                tier = _as_text(_field(display(self.current_model_id()), "tier", "")) or ""
+            except Exception:
+                tier = ""
+        network = "no network (project rule)" if self._agent_rules and self._agent_rules.get("noNetwork") else "Tor-only network"
+        approvals = (
+            "YOLO" if getattr(self, "_agent_yolo", False)
+            else "asks before edits" if self.feature("approvals")
+            else "protected actions stop safely"
+        )
+        return f"Agent · {tier or self.current_model_id()} · {network} · {approvals}"
+
+    def _agent_write(self, text: str) -> None:
+        process = self.harness_process
+        if process is not None and process.state() != QProcess.ProcessState.NotRunning:
+            process.write(text.encode("utf-8"))
+
+    def _agent_log(self, text: str) -> None:
+        """One readable line to the terminal and the Run tab output."""
+        clean = _brand_runtime_text(ANSI_ESCAPE.sub("", text)).rstrip()
+        if not clean:
+            return
+        self.terminal.append(clean + "\n")
+        self.inspector.run_panel.append_output(clean)
+
+    def _read_harness_errors(self) -> None:
+        if self.harness_process is None:
+            return
+        chunk = bytes(self.harness_process.readAllStandardError()).decode("utf-8", errors="replace")
+        for line in chunk.splitlines():
+            self._agent_log(line)
+
+    def _handle_agent_line(self, line: str) -> None:
+        parse = getattr(self.desktop_core, "parse_agent_line", None)
+        event = parse(line) if callable(parse) else {"kind": "text", "text": line}
+        kind = event.get("kind")
+        if kind == "text":
+            text = _brand_runtime_text(event.get("text", ""))
+            self._agent_log(text)
+            if self.stream_block is not None:
+                self.stream_block.append_text(text + "\n")
+        elif kind == "batch":
+            for item in event.get("events", []):
+                sub = item.get("kind")
+                if sub == "say":
+                    if self.stream_block is not None:
+                        self.stream_block.append_text("\n" + item.get("text", "") + "\n")
+                    self._agent_log(item.get("text", ""))
+                elif sub == "tool_use":
+                    self._agent_tool_use(item)
+                elif sub == "tool_result":
+                    self._agent_tool_result(item)
+        elif kind == "permission":
+            self._agent_permission_requested(event)
+        elif kind == "result":
+            # The turn is over; closing stdin lets qwen exit on its own.
+            if self.harness_process is not None:
+                self.harness_process.closeWriteChannel()
+        self.transcript._scroll_later()
+
+    def _agent_tool_use(self, item: dict[str, Any]) -> None:
+        tool = _as_text(item.get("tool"))
+        tool_input = item.get("input") or {}
+        if tool in ("todo_write", "TodoWrite"):
+            todos = tool_input.get("todos") if isinstance(tool_input, dict) else None
+            if isinstance(todos, list):
+                self.inspector.run_panel.set_todos(todos)
+            return
+        describe = getattr(self.desktop_core, "describe_tool_request", None)
+        detail = describe(tool, tool_input, self.workspace) if callable(describe) else tool
+        label = self.AGENT_TOOL_LABELS.get(tool, tool.replace("_", " ").strip().title() or "Tool")
+        key = _as_text(item.get("id")) or detail
+        self._agent_steps[key] = {"label": label, "detail": detail, "tool": tool}
+        self.inspector.run_panel.set_step(key, "running", detail)
+        self._agent_log(f"› {detail}")
+        if self.feature("timeline"):
+            self._tool_started(label, detail, "Running", key=key)
+
+    def _agent_tool_result(self, item: dict[str, Any]) -> None:
+        key = _as_text(item.get("id"))
+        step = self._agent_steps.get(key, {"label": "Tool", "detail": key})
+        text = _as_text(item.get("text"))
+        lowered = text.casefold()
+        denied = "denied by permission rules" in lowered or "operation cancelled" in lowered
+        state = "denied" if denied else ("error" if item.get("error") else "done")
+        summary = {"denied": "Refused · nothing written", "error": "Failed", "done": "OK"}[state]
+        if state == "done" and step.get("tool") in ("edit", "write_file", "replace"):
+            summary = "Written · check Changes for what is on disk"
+        self.inspector.run_panel.set_step(key, state, None, summary)
+        first = text.strip().splitlines()[0][:160] if text.strip() else summary
+        self._agent_log(f"  {first}")
+        self._tool_finished(step["label"], step["detail"], summary, ok=state == "done", key=key, state=state)
+
+    def _agent_permission_requested(self, event: dict[str, Any]) -> None:
+        core = self.desktop_core
+        tool = _as_text(event.get("tool"))
+        tool_input = event.get("input") or {}
+        request_id = _as_text(event.get("request_id"))
+        describe = getattr(core, "describe_tool_request", None)
+        what = describe(tool, tool_input, self.workspace) if callable(describe) else tool
+        decision, reason = "ask", ""
+        if self._agent_rules is not None and callable(getattr(core, "rule_decision", None)):
+            decision, reason = core.rule_decision(self._agent_rules, tool, tool_input, self.workspace)
+        project = Path(self.workspace).name if self.workspace else "this project"
+        if decision == "allow":
+            self._agent_write(core.agent_permission_response(request_id, True, tool_input))
+            self.inspector.append_activity(f"Project rule: {reason} ({project}) - {what}")
+            return
+        if decision == "deny":
+            self._agent_write(core.agent_permission_response(request_id, False, message=f"Refused: {reason}."))
+            self.inspector.append_activity(f"Refused by a project rule: {reason}")
+            self._agent_log(f"  refused: {reason}")
+            return
+        if self._run_allow_all:
+            self._agent_write(core.agent_permission_response(request_id, True, tool_input))
+            self.inspector.append_activity(f"Allowed for this run: {what}")
+            return
+        key = _as_text(event.get("tool_use_id")) or what
+        if not self.feature("approvals"):
+            # Today's contract: where nobody is asked, a protected action stops
+            # the run safely instead of continuing.
+            self._agent_write(core.agent_permission_response(
+                request_id, False,
+                message="Headless runs can't ask for approval, so Onionmind stopped instead of continuing."))
+            self._agent_write(core.agent_interrupt_message())
+            self._agent_outcome = f"halted:{what}"
+            self.inspector.run_panel.set_step(key, "stopped", None,
+                                              "Stopped before the edit: a headless run has no one to ask")
+            self.inspector.append_activity(f"Stopped before a protected action: {what}")
+            return
+        self._agent_permission = {"request_id": request_id, "input": tool_input, "what": what, "key": key}
+        added, removed = getattr(core, "edit_size", lambda *_a: (0, 0))(tool, tool_input)
+        is_edit = tool in getattr(core, "AGENT_EDIT_TOOLS", ())
+        size = f" · +{added} / −{removed}" if is_edit and (added or removed) else ""
+        title = "Onionmind Agent wants to edit a file" if is_edit else (
+            "Onionmind Agent wants to run a command" if tool in getattr(core, "AGENT_SHELL_TOOLS", ())
+            else "Onionmind Agent wants to use a protected tool")
+        target = what.split(" ", 1)[1] if " " in what else what
+        consequence = "Nothing is written until you allow it." if is_edit else "Nothing runs until you allow it."
+        card = NoticeCard("ask", title, f"{target}{size} · inside {project}. {consequence}")
+        self._approval_buttons(card)
+        self._agent_cards.append(self.transcript.add_widget(card))
+        if self.feature("runPanel"):
+            run_card = NoticeCard("ask", f"{what[0].upper() + what[1:]}?",
+                                  (f"+{added} / −{removed} in one file inside this project. " if is_edit else "")
+                                  + consequence)
+            self._approval_buttons(run_card)
+            self.inspector.run_panel.show_approval(run_card)
+            self.inspector.run_panel.set_status("Waiting for you")
+        self.inspector.run_panel.set_step(key, "waiting", None)
+        if self.stream_block is not None:
+            self.stream_block.set_pending_label("Waiting for your approval")
+        self.set_status(f"Waiting for your approval: {what}")
+        self.inspector.append_activity(f"Waiting for approval: {what}")
+        self._notify("Onionmind needs your approval", f"Agent wants to {what}.")
+
+    def _approval_buttons(self, card: "NoticeCard") -> None:
+        card.add_button("Deny", lambda: self._answer_permission("deny"))
+        card.add_button("Allow for this run", lambda: self._answer_permission("run"))
+        allow = card.add_button("Allow once", lambda: self._answer_permission("once"), primary=True)
+        QTimer.singleShot(0, lambda: allow.setFocus(Qt.FocusReason.OtherFocusReason))
+
+    def _answer_permission(self, answer: str) -> None:
+        pending = self._agent_permission
+        if pending is None:
+            return
+        self._agent_permission = None
+        self._clear_agent_cards()
+        core = self.desktop_core
+        what = pending["what"]
+        if answer == "deny":
+            self._agent_write(core.agent_permission_response(
+                pending["request_id"], False, message="Denied by the person running Onionmind."))
+            # Deny stops the run there: qwen ends the turn without another
+            # model call (checked against qwen-code 0.25.0).
+            self._agent_write(core.agent_interrupt_message())
+            self._agent_outcome = f"denied:{what}"
+            self.inspector.run_panel.set_step(pending["key"], "denied", None)
+            self.inspector.run_panel.set_status("Edit denied")
+            self.set_status("Edit denied. Nothing was written for it.")
+            self.inspector.append_activity(f"Denied: {what}")
+            return
+        self._agent_write(core.agent_permission_response(pending["request_id"], True, pending["input"]))
+        if answer == "run":
+            self._run_allow_all = True
+            self.inspector.append_activity("Edits allowed for the rest of this run")
+        else:
+            self.inspector.append_activity("Edit allowed once")
+        self.inspector.run_panel.set_step(pending["key"], "running", None)
+        self.inspector.run_panel.set_status("Running")
+        self.set_status("Onionmind Agent is working…")
+
+    def _clear_agent_cards(self) -> None:
+        for holder in self._agent_cards:
+            self.transcript.remove_widget(holder)
+        self._agent_cards = []
+        self.inspector.run_panel.clear_approval()
+
+    def _finish_run_panel(self, clean_exit: bool) -> None:
+        outcome = self._agent_outcome or ""
+        what = outcome.split(":", 1)[1] if ":" in outcome else ""
+        if outcome.startswith("denied"):
+            status = "Edit denied"
+            note = f"You denied {what}, so Onionmind stopped there. Nothing was written for it."
+        elif outcome.startswith("halted"):
+            status = "Stopped before an edit"
+            note = (f"Stopped before a protected action: {what}. Headless runs can’t ask for approval, "
+                    "so Onionmind stopped instead of continuing. That action was not run.")
+        elif outcome == "stopped":
+            status, note = "Stopped", "Stopped. Onionmind ended the run and cancelled the process it had started."
+        else:
+            status, note = ("Done" if clean_exit else "Stopped"), ""
+        self.inspector.run_panel.finish(status)
+        if note and self.stream_block is not None:
+            self.stream_block.append_text("\n" + note)
+        if status == "Done":
+            self._notify("Agent run finished", f"{self._session_title()} · {Path(self.workspace or '').name}")
+
+    def _apply_feature_runPanel(self, on: bool) -> None:
+        self.inspector.set_run_tab(on)
+
+    def _apply_feature_approvals(self, on: bool) -> None:
+        del on
+        self.approval_state.setText(self._approval_text(self.yolo_consent.isChecked()))
+
+    def _notify(self, title: str, body: str) -> None:
+        """OS notification; the appearance feature supplies the real one."""
+        del title, body
 
     # --- v2 features -----------------------------------------------------
     #

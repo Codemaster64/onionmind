@@ -154,5 +154,301 @@ class FeatureStoreTests(V2Base):
             self._close(window)
 
 
+FIXTURE_LINES = (Path(__file__).resolve().parent / "qwen-stream-sample.jsonl").read_text(
+    encoding="utf-8").splitlines()
+
+
+class _FakeProcess:
+    """Stands in for the agent QProcess: records what the window writes to it."""
+
+    def __init__(self) -> None:
+        self.written: list[dict] = []
+        self.closed = False
+        self.terminated = False
+
+    def write(self, data: bytes) -> int:
+        for line in data.decode("utf-8").splitlines():
+            if line.strip():
+                self.written.append(json.loads(line))
+        return len(data)
+
+    def state(self):
+        return QProcess.ProcessState.Running
+
+    def closeWriteChannel(self) -> None:
+        self.closed = True
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.terminated = True
+
+
+def _cards(window, title_part: str) -> list:
+    return [card for card in window.transcript.content.findChildren(ui.NoticeCard)
+            if title_part in card.title_label.text() and card.isVisibleTo(window)]
+
+
+def _button(widget, text: str) -> QPushButton:
+    return next(b for b in widget.findChildren(QPushButton) if b.text() == text)
+
+
+class WebAskTests(V2Base):
+    PROMPT = "Is there a newer minitest release?"
+
+    def _chat_window(self, **features):
+        window = self._window(**features)
+        window.set_mode("chat")
+        started: list[bool] = []
+        window._start_chat = lambda allow_search=False: started.append(allow_search)
+        return window, started
+
+    def test_off_sends_straight_to_the_model_with_no_card(self) -> None:
+        window, started = self._chat_window(webAsk=False)
+        try:
+            window.composer.setPlainText(self.PROMPT)
+            window.submit()
+            self.assertEqual(started, [False])
+            self.app.processEvents()
+            self.assertEqual(_cards(window, "search the web"), [])
+        finally:
+            self._close(window)
+
+    def test_on_pauses_shows_the_query_and_answers_locally(self) -> None:
+        window, started = self._chat_window()
+        try:
+            window.tor_phase = "running"
+            window.composer.setPlainText(self.PROMPT)
+            window.submit()
+            self.assertEqual(started, [])
+            self.assertTrue(self._wait_until(lambda: _cards(window, "search the web")))
+            card = _cards(window, "search the web")[0]
+            labels = [l.text() for l in card.findChildren(ui.QLabel)]
+            self.assertIn("a newer minitest release", labels)
+            self.assertIn("Search once over Tor", [b.text() for b in card.findChildren(QPushButton)])
+            _button(card, "Answer without searching").click()
+            self.assertEqual(started, [False])
+            self.assertEqual(window.status_label.text(), "Answering from the model alone, without the web.")
+        finally:
+            self._close(window)
+
+    def test_tor_off_variant_turns_tor_on_and_searches_once(self) -> None:
+        enabled: list[bool] = []
+        core = SimpleNamespace(MODEL="inferno", BACKEND="onionmind",
+                               tor_enabled=lambda: bool(enabled and enabled[-1]),
+                               set_tor_enabled=enabled.append)
+        window = self._window(core=core)
+        window.set_mode("chat")
+        started: list[bool] = []
+        window._start_chat = lambda allow_search=False: started.append(allow_search)
+        try:
+            window.tor_phase = "off"
+            window.composer.setPlainText("What is the latest PySide6 version?")
+            window.submit()
+            self.assertTrue(self._wait_until(lambda: _cards(window, "search the web")))
+            card = _cards(window, "search the web")[0]
+            _button(card, "Turn on Tor and search once").click()
+            self.assertEqual(enabled, [True])
+            self.assertEqual(started, [True])
+        finally:
+            self._close(window)
+
+    def test_stop_while_asking_sends_nothing(self) -> None:
+        window, started = self._chat_window()
+        try:
+            window.composer.setPlainText(self.PROMPT)
+            window.submit()
+            self.assertTrue(self._wait_until(lambda: _cards(window, "search the web")))
+            window.stop_active()
+            self.assertIsNone(window.active_kind)
+            self.assertEqual(started, [])
+            self.app.processEvents()
+            self.assertEqual(_cards(window, "search the web"), [])
+        finally:
+            self._close(window)
+
+    def test_ordinary_prompts_are_never_held_back(self) -> None:
+        window, started = self._chat_window()
+        try:
+            window.composer.setPlainText("Explain how this project is structured")
+            window.submit()
+            self.assertEqual(started, [False])
+        finally:
+            self._close(window)
+
+
+class AgentStreamBase(V2Base):
+    def _agent_window(self, **features):
+        window = self._window(**features)
+        window.workspace = "/work/demo"
+        window.active_kind = "agent"
+        window._agent_stream = True
+        window._agent_rules = None
+        window._agent_outcome = None
+        window._run_allow_all = False
+        process = _FakeProcess()
+        window.harness_process = process
+        window.stream_block = window.transcript.add_message("assistant", "", "Onionmind Agent")
+        return window, process
+
+    def _feed(self, window, lines) -> None:
+        for line in lines:
+            window._handle_agent_line(line)
+        self.app.processEvents()
+
+
+class ApprovalTests(AgentStreamBase):
+    def test_off_keeps_the_plain_agent_and_its_stop_safely_contract(self) -> None:
+        window = self._window()
+        try:
+            self.assertFalse(window._uses_agent_stream())
+            self.assertEqual(window.approval_state.text(), "Protected actions stop safely")
+            core = SimpleNamespace(__file__="/x/onionmind.py", run_agent=lambda *a, **k: 0)
+            argv = ui.HarnessBridge(desktop_core, core)._launcher("m", "the task", "/w")
+            self.assertEqual(argv[-1], "the task")
+            self.assertNotIn("--stream-json", argv)
+        finally:
+            self._close(window)
+
+    def test_on_pauses_for_allow_once_and_writes_the_answer_to_the_agent(self) -> None:
+        window, process = self._agent_window(approvals=True)
+        try:
+            self.assertEqual(window.approval_state.text(), "Asks before protected actions")
+            core = SimpleNamespace(__file__="/x/onionmind.py", run_agent=lambda *a, **k: 0)
+            argv = ui.HarnessBridge(desktop_core, core)._launcher("m", "secret task", "/w", stream=True)
+            self.assertIn("--stream-json", argv)
+            self.assertNotIn("secret task", argv)
+            self._feed(window, FIXTURE_LINES[:4])      # banner, init, tool_use, permission
+            cards = _cards(window, "wants to edit a file")
+            self.assertEqual(len(cards), 1)
+            self.assertIn("hello.txt · +1 / −0 · inside demo", cards[0].body_label.text())
+            self.assertEqual(process.written, [])         # nothing answered yet: it waits
+            _button(cards[0], "Allow once").click()
+            answer = process.written[-1]["response"]
+            self.assertEqual(answer["response"]["behavior"], "allow")
+            self.assertEqual(answer["request_id"], json.loads(FIXTURE_LINES[3])["request_id"])
+            self.app.processEvents()
+            self.assertEqual(_cards(window, "wants to edit a file"), [])
+            self._feed(window, FIXTURE_LINES[4:])
+            self.assertTrue(process.closed)                # result: stdin closed so qwen exits
+            self.assertIn("Done.", window.stream_block.text)
+        finally:
+            self._close(window)
+
+    def test_deny_refuses_and_interrupts_the_run(self) -> None:
+        window, process = self._agent_window(approvals=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:4])
+            _button(_cards(window, "wants to edit a file")[0], "Deny").click()
+            self.assertEqual(process.written[0]["response"]["response"]["behavior"], "deny")
+            self.assertEqual(process.written[1]["request"]["subtype"], "interrupt")
+            self.assertTrue(window._agent_outcome.startswith("denied:edit hello.txt"))
+        finally:
+            self._close(window)
+
+    def test_allow_for_this_run_answers_later_requests_itself(self) -> None:
+        window, process = self._agent_window(approvals=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:4])
+            _button(_cards(window, "wants to edit a file")[0], "Allow for this run").click()
+            again = json.loads(FIXTURE_LINES[3])
+            again["request_id"] = "second"
+            self._feed(window, [json.dumps(again)])
+            self.assertEqual(_cards(window, "wants to edit a file"), [])
+            self.assertEqual(process.written[-1]["response"]["request_id"], "second")
+            self.assertEqual(process.written[-1]["response"]["response"]["behavior"], "allow")
+        finally:
+            self._close(window)
+
+    def test_stream_without_approvals_still_stops_safely(self) -> None:
+        window, process = self._agent_window(runPanel=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:4])
+            self.assertEqual(_cards(window, "wants to edit a file"), [])
+            self.assertEqual(process.written[0]["response"]["response"]["behavior"], "deny")
+            self.assertEqual(process.written[1]["request"]["subtype"], "interrupt")
+            self.assertTrue(window._agent_outcome.startswith("halted:"))
+        finally:
+            self._close(window)
+
+
+class RunPanelTests(AgentStreamBase):
+    def test_off_leaves_the_three_original_tabs(self) -> None:
+        window = self._window()
+        try:
+            tabs = window.inspector.tabs
+            self.assertEqual([tabs.tabText(i) for i in range(tabs.count())], ["Context", "Changes", "Activity"])
+        finally:
+            self._close(window)
+
+    def test_on_adds_run_with_real_steps_todos_status_and_stop(self) -> None:
+        window, process = self._agent_window(runPanel=True, approvals=True)
+        try:
+            tabs = window.inspector.tabs
+            self.assertEqual(tabs.tabText(tabs.count() - 1), "Run")
+            panel = window.inspector.run_panel
+            panel.start(window._run_meta())
+            self.assertIn("Tor-only network · asks before edits", panel.meta_label.text())
+            self._feed(window, FIXTURE_LINES[:3])
+            self.assertIn("edit hello.txt", panel.plan.item(0).text())
+            self.assertIn("Working…", panel.plan.item(0).text())
+            self._feed(window, [FIXTURE_LINES[3]])
+            self.assertEqual(panel.status_label.text(), "Waiting for you")
+            self.assertEqual(panel.approval_holder.count(), 1)
+            todo = json.dumps({"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": "t1", "name": "todo_write", "input": {"todos": [
+                    {"content": "Read the parser", "status": "completed"},
+                    {"content": "Fix the bug", "status": "in_progress"}]}}]}})
+            self._feed(window, [todo])
+            texts = [panel.plan.item(i).text() for i in range(panel.plan.count())]
+            self.assertTrue(any("Read the parser" in t and "Done" in t for t in texts), texts)
+            self.assertTrue(any("Fix the bug" in t for t in texts), texts)
+            panel.stop_button.click()       # wired to stop_active at build time
+            self.assertTrue(process.terminated)
+            self.assertEqual(window._agent_outcome, "stopped")
+            window._finish_run_panel(False)
+            self.assertEqual(panel.status_label.text(), "Stopped")
+            self.assertFalse(panel.stop_button.isEnabled())
+        finally:
+            self._close(window)
+
+    def test_turning_it_off_removes_the_tab_at_once(self) -> None:
+        window = self._window(runPanel=True)
+        try:
+            window.set_feature("runPanel", False)
+            tabs = window.inspector.tabs
+            self.assertEqual(tabs.count(), 3)
+        finally:
+            self._close(window)
+
+
+class TimelineTests(V2Base):
+    def test_off_tool_activity_stays_as_cards(self) -> None:
+        window = self._window()
+        try:
+            before = len(window.transcript._tool_cards)
+            window._chat_event({"kind": "tool_started", "name": "web_search", "arguments": {"query": "q"}})
+            window._chat_event({"kind": "tool_finished", "name": "web_search", "results": 3})
+            self.assertEqual(len(window.transcript._tool_cards), before + 2)
+            self.assertEqual(window.transcript.content.findChildren(ui.TimelineView), [])
+        finally:
+            self._close(window)
+
+    def test_on_steps_join_one_timeline_and_settle(self) -> None:
+        window = self._window(timeline=True)
+        try:
+            before = len(window.transcript._tool_cards)
+            window._chat_event({"kind": "tool_started", "name": "web_search", "arguments": {"query": "q"}})
+            timeline = window.transcript.content.findChildren(ui.TimelineView)[-1]
+            self.assertEqual(timeline.steps[0].state, "running")
+            window._chat_event({"kind": "tool_finished", "name": "web_search", "results": 3})
+            self.assertEqual(timeline.steps[0].state, "done")
+            self.assertEqual(timeline.steps[0].detail_label.text(), "3 results over Tor")
+            self.assertEqual(len(window.transcript._tool_cards), before)
+        finally:
+            self._close(window)
+
+
 if __name__ == "__main__":
     unittest.main()
