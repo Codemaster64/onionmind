@@ -126,7 +126,13 @@ object Agent {
         } catch (_: Exception) { /* teardown must never fail a search */ }
     }
 
-    fun webSearch(query: String, n: Int = 5): String {
+    fun webSearch(query: String, n: Int = 5): String = searchWeb(query, n).text
+
+    /** One search's outcome: the text the model reads plus the hits behind it,
+     *  so provenance can count results and name domains without re-parsing. */
+    data class SearchResult(val text: String, val hits: List<Triple<String, String, String>>, val error: String?)
+
+    fun searchWeb(query: String, n: Int = 5): SearchResult {
         var err: String? = null
         repeat(2) {                                 // each attempt gets a fresh circuit
             val (u, p) = Socks5Socket.randomCreds()
@@ -142,12 +148,14 @@ object Agent {
                     val hits = parseResults(resp.body?.string() ?: "", n)
                     if (hits.isEmpty()) { err = "empty result page"; return@repeat }
                     System.err.println("[tor] searched \"$query\" -> ${hits.size} results")
-                    return hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }
+                    return SearchResult(
+                        hits.joinToString("\n") { "- ${it.first}\n  ${it.second}\n  ${it.third}" }, hits, null)
                 }
             } catch (e: Exception) { err = e.message }
             finally { retire(http) }
         }
-        return "(search failed on the onion service after fresh-circuit retries: $err)"
+        return SearchResult(
+            "(search failed on the onion service after fresh-circuit retries: $err)", emptyList(), err ?: "failed")
     }
 
     /** Per-result-BLOCK parsing, ported from onionmind.py's parse_results:
@@ -319,6 +327,9 @@ object Agent {
         val assistant: JsonObject? = null,
         val finishReason: String = "",
         val error: String? = null,
+        val promptTokens: Int? = null,
+        val completionTokens: Int? = null,
+        val tokensPerSecond: Double? = null,
     )
 
     private fun chat(llamaUrl: String, messages: List<JsonObject>, maxTokens: Int,
@@ -392,7 +403,17 @@ object Agent {
                 }
             }
             val reason = (choice["finish_reason"] as? JsonPrimitive)?.content ?: ""
-            return ChatReply(assistant, reason)
+            // llama-server reports its own counts: "usage" (OpenAI shape) and
+            // "timings" (llama.cpp). Absent fields stay null - never guessed.
+            fun num(obj: JsonElement?, key: String): Double? =
+                ((obj as? JsonObject)?.get(key) as? JsonPrimitive)?.doubleOrNull
+            val usage = wire["usage"]; val timings = wire["timings"]
+            val prompt = (num(timings, "prompt_n")?.let { n -> n + (num(timings, "cache_n") ?: 0.0) }
+                ?: num(usage, "prompt_tokens"))?.toInt()
+            val completion = (num(timings, "predicted_n") ?: num(usage, "completion_tokens"))?.toInt()
+            val speed = num(timings, "predicted_per_second")?.takeIf { it > 0 }
+            return ChatReply(assistant, reason, promptTokens = prompt,
+                completionTokens = completion, tokensPerSecond = speed)
         }
     }
 
@@ -418,13 +439,14 @@ object Agent {
     }
 
     private fun recover(llamaUrl: String, messages: MutableList<JsonObject>,
-                        firstAnswer: String): String {
+                        firstAnswer: String, stats: TurnStats? = null): String {
         val recoveryHistory = messages.toMutableList()
         recoveryHistory.add(buildJsonObject {
             put("role", "user")
             put("content", FINALIZE_PROMPT)
         })
         val recovered = chat(llamaUrl, recoveryHistory, FINAL_NUM_PREDICT, finalOnly = true)
+        record(stats, recovered)
         val recoveredAnswer = recovered.assistant?.let {
             stripThinking((it["content"] as? JsonPrimitive)?.content.orEmpty())
         }.orEmpty()
@@ -461,18 +483,42 @@ object Agent {
     fun turn(llamaUrl: String, messages: MutableList<JsonObject>,
              allowSearch: Boolean = false,
              shouldStop: () -> Boolean = { false },
+             stats: TurnStats? = null,
              search: (String) -> String = { q -> webSearch(q) }): String {
+        val started = System.nanoTime()
+        try {
+            return runTurn(llamaUrl, messages, allowSearch, shouldStop, stats, search)
+        } finally {
+            stats?.elapsedMs = (System.nanoTime() - started) / 1_000_000
+        }
+    }
+
+    private fun record(stats: TurnStats?, reply: ChatReply) {
+        if (stats == null) return
+        reply.promptTokens?.let { stats.promptTokens = it }
+        reply.completionTokens?.let { stats.completionTokens = it }
+        reply.tokensPerSecond?.let { stats.tokensPerSecond = it }
+        val assistant = reply.assistant ?: return
+        val raw = (assistant["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+        if (reasoningState(assistant).isNotBlank() || THINK_TAG.containsMatchIn(raw))
+            stats.reasoningHidden = true
+    }
+
+    private fun runTurn(llamaUrl: String, messages: MutableList<JsonObject>,
+                        allowSearch: Boolean, shouldStop: () -> Boolean,
+                        stats: TurnStats?, search: (String) -> String): String {
         var partial = ""
         for (round in 0 until 6) {
             if (shouldStop()) return stopped(partial)
             val reply = chat(llamaUrl, messages, NUM_PREDICT, allowSearch = allowSearch)
             if (reply.error != null) return reply.error
+            record(stats, reply)
             val assistant = reply.assistant!!
             messages.add(assistant)
             val calls = assistant["tool_calls"]?.jsonArray ?: run {
                 val answer = stripThinking((assistant["content"] as? JsonPrimitive)?.content ?: "")
                 if (answer.isEmpty() || limited(reply.finishReason))
-                    return recover(llamaUrl, messages, answer)
+                    return recover(llamaUrl, messages, answer, stats)
                 compact(messages, answer)
                 return answer
             }

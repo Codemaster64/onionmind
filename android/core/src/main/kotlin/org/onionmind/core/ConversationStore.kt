@@ -27,6 +27,19 @@ object ConversationStore {
         }
     }
 
+    /**
+     * lock: delete the conversation when it has not changed for [days] days
+     * (0 = keep). Returns true when it deleted one. Age is the file's last
+     * write, i.e. the last turn - reading it does not keep it alive.
+     */
+    fun expire(dir: File, days: Int, now: Long = System.currentTimeMillis()): Boolean {
+        if (days <= 0) return false
+        val file = File(dir, FILE_NAME)
+        if (!file.isFile) return false
+        if (now - file.lastModified() < days * 86_400_000L) return false
+        return file.delete()
+    }
+
     fun save(dir: File, messages: List<JsonObject>) {
         dir.mkdirs()
         val file = File(dir, FILE_NAME)

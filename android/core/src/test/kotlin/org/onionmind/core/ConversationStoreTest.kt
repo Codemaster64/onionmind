@@ -7,6 +7,7 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ConversationStoreTest {
@@ -45,5 +46,18 @@ class ConversationStoreTest {
         assertTrue(ConversationStore.load(dir).isEmpty())
         ConversationStore.save(dir, mutableListOf(user("after corruption")))
         assertEquals(1, ConversationStore.load(dir).size)
+    }
+
+    @Test
+    fun `auto-delete removes only a conversation older than the limit`() {
+        val dir = createTempDirectory("onionmind-conv").toFile()
+        ConversationStore.save(dir, mutableListOf(user("keep me")))
+        val written = File(dir, "conversation.json").lastModified()
+        assertFalse(ConversationStore.expire(dir, 0, written + 400L * 86_400_000))   // off
+        assertFalse(ConversationStore.expire(dir, 7, written + 6L * 86_400_000))
+        assertEquals(1, ConversationStore.load(dir).size)
+        assertTrue(ConversationStore.expire(dir, 7, written + 8L * 86_400_000))
+        assertTrue(ConversationStore.load(dir).isEmpty())
+        assertFalse(ConversationStore.expire(dir, 7, written + 8L * 86_400_000))     // nothing left
     }
 }

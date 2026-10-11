@@ -60,6 +60,12 @@ class OwnedLoopbackProcess(
         return ownsLiveChild(owned) && listenerOpen() && ownsLiveChild(owned)
     }
 
+    /** Our child is running, whether or not it is listening yet (loading). */
+    fun alive(): Boolean {
+        val owned = synchronized(lock) { child } ?: return false
+        return ownsLiveChild(owned)
+    }
+
     /** Destroy only the child this instance launched; never act on a port owner. */
     fun stop() {
         val owned = synchronized(lock) {

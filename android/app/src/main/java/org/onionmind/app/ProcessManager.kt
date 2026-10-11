@@ -3,6 +3,7 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.onionmind.core.EgressLog
 import org.onionmind.core.ModelSource
 import org.onionmind.core.OwnedLoopbackProcess
 import java.io.File
@@ -147,6 +148,11 @@ object ProcessManager {
             if (out.exists()) out.delete()
             var expected = m.bytes
             val sources = listOfNotNull(m.url, m.mirrorUrl).distinct()
+            // netlog: downloads go direct over HTTPS, not Tor - say so in the
+            // log too. Host and model name only, never the full URL.
+            sources.mapNotNull { runCatching { URL(it).host }.getOrNull() }.distinct().forEach { host ->
+                Workbench.recordEgress(ctx, EgressLog.DIRECT, host, "model download", m.name)
+            }
             var sourceIndex = 0
             if (expected > 0 && part.length() > expected) part.delete()
 
@@ -334,7 +340,7 @@ object ProcessManager {
                 "-m", File(modelDir(ctx), m.file).absolutePath,
                 "--host", "127.0.0.1",
                 "--port", LLAMA_PORT.toString(),
-                "-c", "16384",
+                "-c", "16384",   // = ContextWindow.TOKENS (WorkbenchTest checks)
             ).apply {
                 redirectErrorStream(true)
                 environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir
@@ -371,6 +377,7 @@ object ProcessManager {
         val dir = File(ctx.filesDir, "tor").apply { mkdirs() }
         File(dir, "torrc").writeText("SocksPort 9050\nDataDirectory ${File(dir, "data").apply { mkdirs() }.absolutePath}\nCookieAuthentication 0\nAvoidDiskWrites 1\nLog notice file ${File(dir, "log").absolutePath}")
         tor = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libtor.so").absolutePath, "-f", File(dir, "torrc").absolutePath).redirectErrorStream(true).start()
+        Workbench.recordEgress(ctx, EgressLog.TOR, "Tor network", "start Tor", "relay directory and circuits")
         Thread { try { tor!!.inputStream.readBytes() } catch (_: Exception) {} }.start()
         return true
     }
@@ -387,6 +394,7 @@ object ProcessManager {
 
     private fun stopLlama() = llama.stop()
     fun llamaReady(): Boolean = llama.ready()
+    fun llamaLoading(): Boolean = llama.alive() && !llama.ready()
     fun torReady() = tor?.isAlive == true && portOpen(9050)
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }
