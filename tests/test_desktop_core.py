@@ -1019,5 +1019,241 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertTrue(vram is None or vram > 0)
 
 
+
+FIXTURES = Path(__file__).resolve().parent
+
+
+class WorkbenchV2CoreTests(unittest.TestCase):
+    def test_every_flag_defaults_off_except_web_ask_and_junk_falls_back(self) -> None:
+        self.assertEqual(len(core.FEATURE_FLAGS), 24)
+        defaults = core.load_features({})
+        self.assertEqual({k for k, on in defaults.items() if on}, {"webAsk"})
+        loaded = core.load_features({"features": {"palette": True, "webAsk": False,
+                                                  "lock": "yes", "bogus": True}})
+        self.assertTrue(loaded["palette"])
+        self.assertFalse(loaded["webAsk"])
+        self.assertFalse(loaded["lock"])           # a non-bool is junk, not truthy
+        self.assertNotIn("bogus", loaded)
+        self.assertEqual(core.load_features({"features": "nope"}), defaults)
+
+    def test_web_ask_matches_web_shaped_prompts_and_trims_the_query(self) -> None:
+        self.assertTrue(core.needs_web("Is there a newer minitest release?"))
+        self.assertTrue(core.needs_web("look it up please"))
+        self.assertFalse(core.needs_web("Explain how this project is structured"))
+        self.assertEqual(core.web_query("Is there a newer minitest release?"),
+                         "a newer minitest release")
+        self.assertLessEqual(len(core.web_query("what is " + "x" * 200)), 70)
+
+    def test_presets_keep_ids_and_apply_edits_and_system_prompt_is_single(self) -> None:
+        presets = core.load_presets({"preset_texts": {"concise": "Be brief.", "review": "  "}})
+        self.assertEqual([p["id"] for p in presets], ["default", "review", "concise", "teach"])
+        self.assertEqual(presets[2]["text"], "Be brief.")
+        self.assertTrue(presets[1]["text"].startswith("Review code"))  # blank edit ignored
+        self.assertEqual(core.active_preset({"preset": "teach"})["name"], "Explain step by step")
+        self.assertEqual(core.active_preset({"preset": "missing"})["id"], "default")
+        messages = core.with_system_prompt(
+            [{"role": "system", "content": "old"}, {"role": "user", "content": "hi"}], "new")
+        self.assertEqual(messages, [{"role": "system", "content": "new"},
+                                    {"role": "user", "content": "hi"}])
+
+    def test_rules_are_per_project_and_decide_requests_deny_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings: dict = {}
+            core.store_rules(settings, tmp, {"editTests": True, "readOnly": False,
+                                             "blocked": ".env, secrets/"})
+            rules = core.load_rules(settings, tmp + os.sep)   # same folder, other spelling
+            self.assertTrue(rules["editTests"])
+            self.assertEqual(core.load_rules(settings, tmp + "-other"), core.RULE_DEFAULTS)
+            write = lambda rel: {"file_path": os.path.join(tmp, rel), "content": "x"}
+            self.assertEqual(core.rule_decision(rules, "write_file", write("tests/a.py"), tmp)[0], "allow")
+            self.assertEqual(core.rule_decision(rules, "write_file", write("src/a.py"), tmp)[0], "ask")
+            self.assertEqual(core.rule_decision(rules, "edit", write(".env"), tmp)[0], "deny")
+            self.assertEqual(core.rule_decision(rules, "edit", write("secrets/k.pem"), tmp)[0], "deny")
+            self.assertEqual(core.rule_decision(rules, "read_file", write("config/.env"), tmp)[0], "deny")
+            self.assertEqual(core.rule_decision(rules, "run_shell_command",
+                                                {"command": "python -m pytest -q"}, tmp)[0], "allow")
+            self.assertEqual(core.rule_decision(rules, "run_shell_command",
+                                                {"command": "cat .env"}, tmp)[0], "deny")
+            self.assertEqual(core.rule_decision(rules, "run_shell_command",
+                                                {"command": "rm -rf build"}, tmp)[0], "ask")
+            read_only = dict(rules, readOnly=True)
+            self.assertEqual(core.rule_decision(read_only, "write_file", write("tests/a.py"), tmp)[0], "deny")
+
+    def test_agent_paths_are_made_relative_on_any_platform(self) -> None:
+        self.assertEqual(core.describe_tool_request("write_file", {"file_path": "/work/demo/a/b.py"}, "/work/demo"),
+                         "edit a/b.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "C:\\proj\\src\\x.py"}, "C:\\proj"),
+                         "edit src/x.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "/elsewhere/x.py"}, "/work/demo"),
+                         "edit /elsewhere/x.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "/work/demo-other/x.py"}, "/work/demo"),
+                         "edit /work/demo-other/x.py")
+
+    def test_blocked_paths_become_agent_deny_rules_for_reads_and_edits(self) -> None:
+        denials = core.agent_rule_denials({"blocked": ".env, config/credentials.yml.enc, ./x/"})
+        self.assertIn("read_file(/.env)", denials)
+        self.assertIn("edit(/**/.env)", denials)
+        self.assertIn("edit(/config/credentials.yml.enc)", denials)
+        self.assertNotIn("read_file(/**/config/credentials.yml.enc)", denials)
+        self.assertIn("read_file(/x)", denials)
+        self.assertEqual(core.agent_rule_denials({"blocked": "bad(name)"}), [])
+
+    def test_real_qwen_stream_lines_parse_into_typed_events(self) -> None:
+        lines = (FIXTURES / "qwen-stream-sample.jsonl").read_text(encoding="utf-8").splitlines()
+        events = [core.parse_agent_line(line) for line in lines]
+        kinds = [event["kind"] for event in events]
+        self.assertEqual(kinds, ["text", "system", "batch", "permission", "batch", "batch", "result"])
+        tool = events[2]["events"][0]
+        self.assertEqual((tool["kind"], tool["tool"]), ("tool_use", "write_file"))
+        permission = events[3]
+        self.assertEqual(permission["tool"], "write_file")
+        self.assertEqual(permission["input"]["file_path"], "/work/demo/hello.txt")
+        self.assertEqual(core.describe_tool_request("write_file", permission["input"], "/work/demo"),
+                         "edit hello.txt")
+        self.assertEqual(core.edit_size("write_file", permission["input"]), (1, 0))
+        result = events[4]["events"][0]
+        self.assertEqual((result["kind"], result["error"]), ("tool_result", False))
+        self.assertEqual(events[5]["events"], [{"kind": "say", "text": "Done."}])
+        self.assertTrue(events[6]["ok"])
+        allow = json.loads(core.agent_permission_response(permission["request_id"], True, permission["input"]))
+        self.assertEqual(allow["response"]["request_id"], permission["request_id"])
+        self.assertEqual(allow["response"]["response"]["behavior"], "allow")
+        deny = json.loads(core.agent_permission_response("r", False, message="no"))
+        self.assertEqual(deny["response"]["response"], {"behavior": "deny", "message": "no"})
+        self.assertEqual(json.loads(core.agent_initialize_message())["request"]["subtype"], "initialize")
+        self.assertEqual(json.loads(core.agent_task_message("do it"))["message"]["content"], "do it")
+
+    def test_agent_reasoning_never_surfaces_as_said_text(self) -> None:
+        line = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "<think>private plan</think>Visible."}]}})
+        self.assertEqual(core.parse_agent_line(line)["events"], [{"kind": "say", "text": "Visible."}])
+
+    def test_token_estimate_and_labels(self) -> None:
+        self.assertEqual(core.estimate_tokens("abcd" * 10), 10)
+        self.assertEqual(core.estimate_tokens([{"content": "abcd"}, "abcd"]), 2)
+        self.assertEqual(core.format_tokens(3140), "3.1k")
+        self.assertEqual(core.format_tokens(32768), "32k")
+        self.assertEqual(core.format_tokens(16384), "16k")
+        self.assertEqual(core.format_tokens(512), "512")
+
+    def test_errors_classify_from_the_engine_own_messages(self) -> None:
+        self.assertEqual(core.classify_error("Ollama is not running on 127.0.0.1:11434. Start it, then retry."), "server")
+        self.assertEqual(core.classify_error("No model server on 11434 (ollama) or 8080 (llama-server). Start one."), "server")
+        self.assertEqual(core.classify_error('Ollama returned 500: {"error":"CUDA error: out of memory"}'), "oom")
+        self.assertEqual(core.classify_error("Tor circuit could not be verified"), "tor")
+        self.assertIsNone(core.classify_error("Model 'x' is not installed. See what is: ollama list"))
+
+    def test_session_search_spans_projects_and_splits_the_match(self) -> None:
+        sessions = [
+            {"id": "a", "title": "One", "workspace": "/p1",
+             "messages": [{"role": "user", "content": "Fix the login redirect loop now"}]},
+            {"id": "b", "title": "Two", "workspace": "/p2",
+             "messages": [{"role": "assistant", "content": "The REDIRECT happens in auth.py"},
+                          {"role": "tool", "content": "redirect"}]},
+            {"id": "c", "title": "Three", "workspace": None, "messages": [{"role": "user", "content": "nothing"}]},
+        ]
+        hits = core.search_sessions(sessions, "redirect")
+        self.assertEqual([h["session_id"] for h in hits], ["a", "b"])
+        self.assertEqual(hits[1]["match"], "REDIRECT")
+        self.assertTrue(hits[0]["before"].endswith("login "))
+        self.assertEqual(core.search_sessions(sessions, "r"), [])
+
+    def test_age_based_deletion_uses_real_timestamps(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        sessions = [{"id": "new", "updated_at": (now - timedelta(hours=2)).isoformat()},
+                    {"id": "old", "updated_at": (now - timedelta(days=9)).isoformat()},
+                    {"id": "bad", "updated_at": "yesterday"}]
+        self.assertEqual([s["id"] for s in core.sessions_older_than(sessions, 7, now)], ["old"])
+        self.assertEqual(core.sessions_older_than(sessions, 0, now), [])
+
+    def test_passphrase_is_stored_only_as_a_salted_hash(self) -> None:
+        record = core.hash_passphrase("correct horse")
+        self.assertNotIn("correct horse", json.dumps(record))
+        self.assertTrue(core.verify_passphrase("correct horse", record))
+        self.assertFalse(core.verify_passphrase("wrong", record))
+        self.assertFalse(core.verify_passphrase("x", {"kdf": "md5", "salt": "00", "hash": "00"}))
+        self.assertNotEqual(core.hash_passphrase("same")["hash"], core.hash_passphrase("same")["hash"])
+
+    def test_egress_log_keeps_times_and_destinations_and_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = core.EgressLog(Path(tmp) / "egress.jsonl")
+            log.append("Tor", "Chat search · DuckDuckGo onion service")
+            log.append("Direct", "Model download · registry.ollama.ai")
+            log.append("Bogus", "Update check · github.com")
+            day = datetime_today()
+            rows = log.entries(day)
+            self.assertEqual([r["route"] for r in rows], ["Tor", "Direct", "Tor"])
+            self.assertEqual(log.counts(day), {"search": 1, "tor": 2, "direct": 1})
+            self.assertEqual(log.entries("1999-01-01"), [])
+            csv_text = core.network_log_csv(rows)
+            self.assertTrue(csv_text.startswith("time,route,what\n"))
+            self.assertEqual(len(json.loads(core.network_log_json(rows))), 3)
+            agent_log = Path(tmp) / "agent-net.log"
+            agent_log.write_text(
+                f"{day} 10:00:01 tor example.org:443\n{day} 10:00:02 local 127.0.0.1:11434\n"
+                f"{day} 10:00:03 REFUSED 1.2.3.4:80\n1999-01-01 00:00:00 tor old.example:443\n",
+                encoding="utf-8")
+            agent_rows = core.agent_net_entries(agent_log, day)
+            self.assertEqual([r["route"] for r in agent_rows], ["Tor", "Refused"])
+            self.assertTrue(agent_rows[0]["what"].startswith("Agent network"))
+
+    def test_revert_restores_head_and_undo_brings_the_work_back(self) -> None:
+        if shutil_which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as backups:
+            root = Path(tmp)
+            run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+            run("init", "-q")
+            run("config", "user.email", "t@example.invalid")
+            run("config", "user.name", "t")
+            (root / "a.txt").write_text("original\n", encoding="utf-8")
+            (root / "b.txt").write_text("keep\n", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-q", "-m", "init")
+            (root / "a.txt").write_text("agent edit\n", encoding="utf-8")
+            (root / "new.txt").write_text("brand new\n", encoding="utf-8")
+            (root / "staged.txt").write_text("staged new\n", encoding="utf-8")
+            run("add", "staged.txt")
+            stats = core.change_stats(root)
+            self.assertEqual(stats.get("a.txt"), (1, 1))
+            snapshot = core.WorkspaceInspector().inspect(root)
+            record = core.revert_changes(root, snapshot.changes, backups)
+            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "original\n")
+            self.assertFalse((root / "new.txt").exists())
+            self.assertFalse((root / "staged.txt").exists())
+            self.assertEqual(core.WorkspaceInspector().inspect(root).changes, ())
+            restored = core.undo_revert(record)
+            self.assertEqual(restored, 3)
+            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "agent edit\n")
+            self.assertEqual((root / "new.txt").read_text(encoding="utf-8"), "brand new\n")
+            with self.assertRaises(ValueError):
+                core.revert_changes(root, [{"status": "M", "path": "../escape.txt"}], backups)
+
+    def test_model_fit_and_node_version_gate(self) -> None:
+        gib = 1024 ** 3
+        self.assertEqual(core.model_fit(5 * gib, 12_288, None), "Fits")
+        self.assertEqual(core.model_fit(11 * gib, 12_288, None), "Tight")
+        self.assertEqual(core.model_fit(17 * gib, 12_288, None), "Too big")
+        self.assertEqual(core.model_fit(None, 12_288, None), "")
+        self.assertEqual(core.model_fit(5 * gib, None, None), "")
+        self.assertTrue(core.node_supports_agent("v22.19.0"))
+        self.assertTrue(core.node_supports_agent("v24.1.0"))
+        self.assertFalse(core.node_supports_agent("v22.18.9"))
+        self.assertFalse(core.node_supports_agent(None))
+        used, total = core.gpu_memory_mb()
+        self.assertTrue(total is None or (used is not None and 0 <= used <= total))
+
+
+def datetime_today() -> str:
+    from datetime import datetime
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def shutil_which(name: str):
+    import shutil
+    return shutil.which(name)
+
+
 if __name__ == "__main__":
     unittest.main()

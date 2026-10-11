@@ -48,6 +48,7 @@ jobs:
           python tests/test_desktop_ui.py
           python tests/test_desktop_thinking_ui.py
           python tests/test_desktop_tor_ui.py
+          python tests/test_desktop_v2_ui.py
 
       - name: Validate desktop build inputs
         shell: powershell

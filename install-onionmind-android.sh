@@ -67,6 +67,8 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
+OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
+OLLAMA_GENERATE = "http://127.0.0.1:11434/api/generate"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
 MODEL  = "inferno"
@@ -410,9 +412,16 @@ def parse_results(page, n=5):
     return out
 
 
+# What the last search returned, for a client that shows where a reply came
+# from: the result count and the result sites' domains, never the query.
+_last_search = {"results": 0, "domains": []}
+
+
 def web_search(query, n=5):
     """One attempt = one fresh Tor circuit. A 200 with zero results is a failure too."""
+    global _last_search
     err = None
+    _last_search = {"results": 0, "domains": []}
     for _ in range(2):                           # each attempt gets a fresh circuit
         try:
             resp = requests.post(ENDPOINT, data={"q": query}, headers={"User-Agent": UA},
@@ -424,6 +433,13 @@ def web_search(query, n=5):
         hits = parse_results(resp.text, n)
         if hits:                                 # empty 200 == rate-limited or reshaped
             print(f"[tor] searched {query!r} -> {len(hits)} results", file=sys.stderr)
+            domains = []
+            for _t, _s, u in hits:
+                host = urllib.parse.urlparse(u).hostname or ""
+                host = host[4:] if host.startswith("www.") else host
+                if host and host not in domains:
+                    domains.append(host)
+            _last_search = {"results": len(hits), "domains": domains}
             return "\n".join(f"- {t}\n  {s}\n  {u}" for t, s, u in hits)
         err = "empty result page"
     print(f"[tor] search failed for {query!r}: {err}", file=sys.stderr)
@@ -549,9 +565,31 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
     return message
 
 
+def _reasoning_seconds(timeline, content, think_span):
+    """How long the model spent reasoning: the span of its thinking chunks, or
+    for models that inline <think> in the content, first chunk to the chunk
+    that closed the last reasoning block. None when it did not reason (or the
+    block never closed). Only a duration - the reasoning itself is dropped."""
+    if think_span[0] is not None:
+        return max(0.0, think_span[1] - think_span[0])
+    closing = [tag for tag in _THINK_TAG.finditer(content or "") if tag.group(1)]
+    if not closing or not timeline:
+        return None
+    end = closing[-1].end()
+    finished = next((stamp for length, stamp in timeline if length >= end), timeline[-1][1])
+    return max(0.0, finished - timeline[0][1])
+
+
 def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDICT,
-                       think=None, allow_search=False):
-    """Stream one Ollama response while retaining tool-call compatibility."""
+                       think=None, allow_search=False, on_progress=None):
+    """Stream one Ollama response while retaining tool-call compatibility.
+
+    The finished message carries Ollama's own counters in "_stats" (prompt and
+    generated tokens, generation time, measured reasoning time); on_progress,
+    when given, gets (chunks, seconds, reasoning) about twice a second while
+    text arrives. Ollama streams one token per chunk, so that is a live tok/s
+    reading; reasoning says whether the model is inside its private reasoning
+    right now (thinking chunks, or an open inline <think> block)."""
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
@@ -568,6 +606,9 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
     if not r.ok:
         sys.exit(f"Ollama returned {r.status_code}: {r.text[:200]}")
     message = {"role": "assistant", "content": ""}
+    started = time.monotonic()
+    timeline, think_span, chunks, reported = [], [None, None], 0, started
+    inline_depth = 0
     try:
         for raw in r.iter_lines(decode_unicode=True):
             if stop_event is not None and stop_event.is_set():
@@ -578,19 +619,46 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
                 event = json.loads(raw)
             except ValueError:
                 continue          # a partial or non-JSON line must not kill the stream
+            now = time.monotonic()
             chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
+                before = len(message["content"])
                 message["content"] += content
+                timeline.append((len(message["content"]), now))
+                # Count only tags that END in this chunk; the 12-character
+                # overlap catches a tag split across two chunks exactly once.
+                window_start = max(0, before - 12)
+                for tag in _THINK_TAG.finditer(message["content"], window_start):
+                    if tag.end() > before:
+                        inline_depth = max(0, inline_depth + (-1 if tag.group(1) else 1))
                 on_text(content)
             thinking = chunk.get("thinking") or ""
             if thinking:
                 message["thinking"] = message.get("thinking", "") + thinking
+                think_span[0] = think_span[0] if think_span[0] is not None else now
+                think_span[1] = now
+            if content or thinking:
+                chunks += 1
+                if on_progress is not None and now - reported >= 0.5:
+                    reported = now
+                    on_progress(chunks, now - started, bool(thinking) or inline_depth > 0)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
                 if event.get("done_reason"):
                     message["_done_reason"] = event["done_reason"]
+                stats = {key: event[key] for key in (
+                    "eval_count", "eval_duration", "prompt_eval_count",
+                    "prompt_eval_duration", "load_duration", "total_duration")
+                    if isinstance(event.get(key), (int, float))}
+                if stats.get("eval_count") and stats.get("eval_duration"):
+                    stats["tokens_per_second"] = stats["eval_count"] / (stats["eval_duration"] / 1e9)
+                reasoning = _reasoning_seconds(timeline, message["content"], think_span)
+                if reasoning is not None:
+                    stats["reasoning_seconds"] = reasoning
+                stats["num_ctx"] = NUM_CTX
+                message["_stats"] = stats
                 break
     finally:
         r.close()
@@ -650,6 +718,59 @@ def installed_models():
         return [m["name"] for m in r.json().get("models", []) if m.get("name")]
     except (requests.RequestException, ValueError, TypeError, KeyError):
         return []
+
+
+def installed_model_details():
+    """Installed models with their real on-disk size: [{"name", "size"}].
+
+    The size is what Ollama loads, so it is the honest number to compare with
+    this machine's memory. Empty when the model service does not answer."""
+    try:
+        r = requests.get(OLLAMA_TAGS, proxies=NOPROXY, timeout=3)
+        if not r.ok:
+            return []
+        return [{"name": m["name"], "size": int(m.get("size") or 0)}
+                for m in r.json().get("models", []) if m.get("name")]
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        return []
+
+
+def loaded_models():
+    """What the model service holds in memory right now: [{"name", "size",
+    "size_vram"}] from /api/ps. Empty on llama-server, which has no such call."""
+    if BACKEND == "llama-server":
+        return []
+    try:
+        r = requests.get(OLLAMA_PS, proxies=NOPROXY, timeout=3)
+        if not r.ok:
+            return []
+        return [{"name": m.get("name") or m.get("model", ""), "size": int(m.get("size") or 0),
+                 "size_vram": int(m.get("size_vram") or 0)}
+                for m in r.json().get("models", []) if m.get("name") or m.get("model")]
+    except (requests.RequestException, ValueError, TypeError):
+        return []
+
+
+def unload_model(name):
+    """Ask the local model service to drop a model from memory now."""
+    r = requests.post(OLLAMA_GENERATE, proxies=NOPROXY, timeout=60,
+                      json={"model": name, "keep_alive": 0})
+    if not r.ok:
+        raise RuntimeError(r.text[:200] or f"unload failed ({r.status_code})")
+    return True
+
+
+def load_model(name, keep_alive="30m"):
+    """Load a model into memory without generating anything (an empty
+    request is Ollama's documented preload). Blocks until it is loaded."""
+    r = requests.post(OLLAMA_GENERATE, proxies=NOPROXY, timeout=600,
+                      json={"model": name, "keep_alive": keep_alive,
+                            "options": {"num_ctx": NUM_CTX}})
+    if r.status_code == 404:
+        raise RuntimeError(f"Model {name!r} is not installed.")
+    if not r.ok:
+        raise RuntimeError(r.text[:200] or f"load failed ({r.status_code})")
+    return True
 
 
 def pull_model(name, on_progress=None, stop_event=None):
@@ -857,12 +978,23 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
     """
     if BACKEND != "ollama":
         return turn(messages, stop_event, allow_search=allow_search)
+    progress = None
+    if on_event:
+        def progress(chunks, seconds, reasoning=False):
+            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds,
+                      "reasoning": bool(reasoning)})
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
-        msg = _ask_ollama_stream(messages, on_text, stop_event, allow_search=allow_search)
+        kwargs = {"allow_search": allow_search}
+        if progress is not None:
+            kwargs["on_progress"] = progress
+        msg = _ask_ollama_stream(messages, on_text, stop_event, **kwargs)
         if msg.get("stopped"):
             return "(stopped)"
+        stats = msg.pop("_stats", None)
+        if on_event and stats:
+            on_event({"kind": "stats", **stats})
         messages.append(msg)
         calls = msg.get("tool_calls")
         if not calls:
@@ -894,8 +1026,12 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
             else:
                 result = f"(unknown tool {fn['name']})"
             if on_event and not denied:
-                on_event({"kind": "tool_finished", "name": fn.get("name", "unknown"),
-                          "result": result})
+                finished = {"kind": "tool_finished", "name": fn.get("name", "unknown"),
+                            "result": result}
+                if fn["name"] == "web_search":
+                    finished.update(results=_last_search.get("results", 0),
+                                    domains=list(_last_search.get("domains", [])))
+                on_event(finished)
             messages.append({"role": "tool", "tool_name": fn["name"], "content": result})
     return "(gave up after 6 tool rounds)"
 
@@ -1382,7 +1518,7 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable=None):
+def agent_argv(model=None, task=None, executable=None, stream=False):
     """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
     This used to be `ollama launch dsh -- --profile headless <task>`. The
@@ -1400,6 +1536,12 @@ def agent_argv(model=None, task=None, executable=None):
     argv = list(executable) if executable else qwen_launcher()
     if model:
         argv += ["--model", model]
+    if stream:
+        # The desktop's structured mode: qwen reads the task and the person's
+        # approvals as JSON lines on stdin and reports every step as JSON on
+        # stdout, so a protected action can wait for an answer instead of
+        # stopping. Same process, same environment, same funnel.
+        return argv + ["--input-format", "stream-json", "--output-format", "stream-json"]
     if task:                                     # no task = interactive session
         argv += ["-p", task]
     return argv
@@ -1434,12 +1576,16 @@ def agent_env(env=None):
     return _contain_env(env)
 
 
-def run_agent(task=None, model=None, yolo=False, workdir=None):
+def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
+              extra_deny=(), no_network=False):
     """Run the coding agent over Tor and return its exit code.
 
     qwen_setup() writes the settings the agent reads (deny list, approval mode,
     proxy) and agent_env() re-verifies Tor and applies the containment, so both
     halves of the boundary are composed before the process starts.
+
+    stream=True is the desktop's structured mode (see agent_argv): the task
+    and approvals arrive on stdin, so the task argument is not used.
     """
     import subprocess
 
@@ -1450,7 +1596,8 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     if model:
         MODEL = model
     workdir = os.path.abspath(workdir or os.getcwd())
-    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo)  # SystemExit if no Tor
+    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo, extra_deny=extra_deny,
+                                          no_network=no_network)  # SystemExit if no Tor
     print("[onionmind] agent web: Tor only. Its search goes over Tor, everything it")
     print("[onionmind]      runs inherits the proxy, and its python and node may only")
     print("[onionmind]      open loopback sockets. Refuses to start when Tor is down.")
@@ -1461,13 +1608,16 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     else:
         print("[onionmind] approvals: on. Protected actions wait to be approved, and")
         print("[onionmind]      stop safely where there is nobody to ask.")
+    if no_network:
+        print("[onionmind] no network: this project's rules close the Tor bridge too.")
     print(f"[onionmind]      Everything it sends out is logged to {NET_LOG}")
     print(CONTAINMENT_CEILING)
     print()
     # Piped stdout is block-buffered, so without this the desktop's process
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
-    return subprocess.call(agent_argv(model, task), env=env, cwd=workdir)
+    return subprocess.call(agent_argv(model, None if stream else task, stream=stream),
+                           env=env, cwd=workdir)
 
 
 def spawn_code(workdir, model=None):
@@ -1501,12 +1651,24 @@ def qwen_launcher():
             if qwen.lower().endswith((".cmd", ".bat")) else [qwen])
 
 
-def qwen_setup(workdir, ctx=None, yolo=False):
+# A project's Agent rules may only ADD denials, and only of reading or editing
+# paths - nothing that arrives this way can widen what the agent may do.
+_EXTRA_DENY = re.compile(r"^(read_file|edit)\([^()\s][^()]*\)$")
+# Where a no-network project points every proxy variable: a loopback port
+# nothing listens on, so a connection attempt is refused instead of leaving.
+CLOSED_PROXY = "http://127.0.0.1:9"
+
+
+def qwen_setup(workdir, ctx=None, yolo=False, extra_deny=(), no_network=False):
     """Write Qwen Code's settings and build its environment.
 
     The one place the agent's boundary is composed, shared by the terminal
     session (run_code) and Agent mode (run_agent), so a change to the deny list
     or the proxy cannot reach one and miss the other.
+
+    extra_deny and no_network come from a project's Agent rules and only ever
+    narrow the boundary: more denied paths, or no way out at all - the Tor
+    bridge closed and Onionmind's own search tools denied.
     """
     ctx = ctx or code_ctx()
     detect_backend()
@@ -1538,7 +1700,10 @@ def qwen_setup(workdir, ctx=None, yolo=False):
         # commands cannot be pointed at a proxy at all. Both are hard denials -
         # the tool call is refused, not queued for approval.
         "permissions": {"deny": ["web_search", "web_fetch"] +
-                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS]},
+                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS] +
+                        [rule for rule in extra_deny if _EXTRA_DENY.match(str(rule))] +
+                        (["mcp__onionmind__web_search", "mcp__onionmind__web_fetch"]
+                         if no_network else [])},
         # YOLO stops qwen asking before it edits a file or runs a command. It
         # does NOT reach the deny list above: those stay hard denials whichever
         # mode is set (checked against qwen-code - a denied tool is still
@@ -1569,6 +1734,11 @@ def qwen_setup(workdir, ctx=None, yolo=False):
     conf = _read_settings(user)
     conf.setdefault("mcpServers", {}).update(mcp)   # keep the user's own servers
     _write_settings(user, conf)
+
+    if no_network:
+        proxy = CLOSED_PROXY
+        settings["proxy"] = proxy
+        env.update(_proxy_env(proxy))
 
     path = _settings_path(workdir)
     merged = _read_settings(path)                # keep whatever the project already set
@@ -2001,7 +2171,13 @@ if __name__ == "__main__":
         run_code(os.path.abspath(rest[0] if rest else os.getcwd()), yolo=yolo)
         raise SystemExit
     if "--agent" in sys.argv:
-        args = [a for a in sys.argv[1:] if a not in ("--agent", "--yolo")]
+        flags = ("--agent", "--yolo", "--stream-json", "--no-network")
+        args = [a for a in sys.argv[1:] if a not in flags]
+        deny = []
+        while "--deny" in args[:-1]:             # --deny RULE, repeatable
+            i = args.index("--deny")
+            deny.append(args.pop(i + 1))
+            args.pop(i)
         model = None
         workdir = None
         if len(args) >= 2 and args[0] == "--model":
@@ -2010,7 +2186,10 @@ if __name__ == "__main__":
             workdir, args = args[1], args[2:]
         try:
             raise SystemExit(run_agent(" ".join(args).strip() or None, model,
-                                       yolo=yolo, workdir=workdir))
+                                       yolo=yolo, workdir=workdir,
+                                       stream="--stream-json" in sys.argv,
+                                       extra_deny=deny,
+                                       no_network="--no-network" in sys.argv))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:

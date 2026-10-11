@@ -444,5 +444,89 @@ class HarnessAgentTests(unittest.TestCase):
         self.assertNotIn("headless", argv)
 
 
+def setup_into(root, **kwargs):
+    """qwen_setup() with Tor and the backend stubbed; returns (project settings, env)."""
+    home = os.path.join(root, "home")
+    work = os.path.join(root, "work")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(work, exist_ok=True)
+    with mock.patch.object(onionmind, "tor_check"), \
+         mock.patch.object(onionmind, "start_tor_hidden"), \
+         mock.patch.object(onionmind, "detect_backend"), \
+         mock.patch.object(onionmind, "start_tor_bridge", return_value=9999), \
+         mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind, "_code_model", lambda ctx: onionmind.MODEL), \
+         mock.patch.object(onionmind, "code_ctx", return_value=onionmind.CODE_CTX), \
+         mock.patch("os.path.expanduser", return_value=home), \
+         mock.patch.object(onionmind, "NET_LOG", os.path.join(home, "agent-net.log")):
+        env, _model, _ctx, proxy = onionmind.qwen_setup(work, **kwargs)
+    with open(os.path.join(work, ".qwen", "settings.json"), encoding="utf-8") as fh:
+        return json.load(fh), env, proxy
+
+
+class StreamModeAndRulesTests(unittest.TestCase):
+    """The desktop's structured Agent mode and per-project rules only ever
+    narrow the boundary; the funnel and its Tor check stay where they are."""
+
+    def test_stream_mode_reads_the_task_from_stdin_not_argv(self):
+        argv = onionmind.agent_argv("m", "secret task text", executable=["qwen"], stream=True)
+        self.assertEqual(argv, ["qwen", "--model", "m", "--input-format", "stream-json",
+                                "--output-format", "stream-json"])
+        self.assertNotIn("secret task text", argv)
+        self.assertNotIn("-p", argv)
+
+    def test_project_denials_are_path_rules_only_and_yolo_never_reaches_them(self):
+        with tempfile.TemporaryDirectory() as root:
+            project, env, proxy = setup_into(root, yolo=True, extra_deny=[
+                "read_file(/.env)", "edit(/**/.env)", "run_shell_command(curl)",
+                "web_fetch", "edit()", "read_file(/a) or anything"])
+        deny = project["permissions"]["deny"]
+        self.assertIn("read_file(/.env)", deny)
+        self.assertIn("edit(/**/.env)", deny)
+        self.assertNotIn("edit()", deny)
+        self.assertNotIn("run_shell_command(curl)", deny)   # not a path rule: dropped
+        self.assertNotIn("read_file(/a) or anything", deny)
+        self.assertIn("web_search", deny)          # the fixed denials are all still there
+        self.assertEqual(project["tools"]["approvalMode"], "yolo")
+        self.assertEqual(proxy, "http://127.0.0.1:9999")
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9999")
+
+    def test_no_network_closes_the_bridge_and_denies_the_search_tools(self):
+        with tempfile.TemporaryDirectory() as root:
+            project, env, proxy = setup_into(root, no_network=True)
+        self.assertEqual(proxy, onionmind.CLOSED_PROXY)
+        self.assertEqual(project["proxy"], onionmind.CLOSED_PROXY)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            self.assertEqual(env[name], onionmind.CLOSED_PROXY, name)
+        self.assertEqual(env["NO_PROXY"], "")
+        self.assertIn("mcp__onionmind__web_search", project["permissions"]["deny"])
+        self.assertIn("mcp__onionmind__web_fetch", project["permissions"]["deny"])
+        self.assertIn("--require", env["NODE_OPTIONS"])   # the socket shims stay on
+
+    def test_stream_agent_still_fails_closed_without_tor(self):
+        with mock.patch.object(onionmind, "start_tor_hidden"), \
+             mock.patch.object(onionmind, "detect_backend"), \
+             mock.patch.object(onionmind, "tor_check", side_effect=SystemExit("No Tor proxy")), \
+             mock.patch("subprocess.call") as call:
+            with self.assertRaises(SystemExit):
+                onionmind.run_agent("t", stream=True, no_network=True)
+        call.assert_not_called()
+
+    def test_stream_agent_launches_the_stream_argv_through_the_funnel(self):
+        seen = {}
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(onionmind, "qwen_setup",
+                                   side_effect=lambda w, **kw: seen.update(kw) or ({}, "m", 1, "p")), \
+                 mock.patch.object(onionmind, "agent_argv",
+                                   side_effect=lambda m, t, stream=False: seen.update(task=t, stream=stream) or ["qwen"]), \
+                 mock.patch("subprocess.call", return_value=0), MUTE:
+                onionmind.run_agent("the task", "m", workdir=root, stream=True,
+                                    extra_deny=["edit(/x)"], no_network=True)
+        self.assertEqual(seen["extra_deny"], ["edit(/x)"])
+        self.assertTrue(seen["no_network"])
+        self.assertTrue(seen["stream"])
+        self.assertIsNone(seen["task"])
+
+
 if __name__ == "__main__":
     unittest.main()

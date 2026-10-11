@@ -339,6 +339,8 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
+OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
+OLLAMA_GENERATE = "http://127.0.0.1:11434/api/generate"
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
 MODEL  = "inferno"
@@ -682,9 +684,16 @@ def parse_results(page, n=5):
     return out
 
 
+# What the last search returned, for a client that shows where a reply came
+# from: the result count and the result sites' domains, never the query.
+_last_search = {"results": 0, "domains": []}
+
+
 def web_search(query, n=5):
     """One attempt = one fresh Tor circuit. A 200 with zero results is a failure too."""
+    global _last_search
     err = None
+    _last_search = {"results": 0, "domains": []}
     for _ in range(2):                           # each attempt gets a fresh circuit
         try:
             resp = requests.post(ENDPOINT, data={"q": query}, headers={"User-Agent": UA},
@@ -696,6 +705,13 @@ def web_search(query, n=5):
         hits = parse_results(resp.text, n)
         if hits:                                 # empty 200 == rate-limited or reshaped
             print(f"[tor] searched {query!r} -> {len(hits)} results", file=sys.stderr)
+            domains = []
+            for _t, _s, u in hits:
+                host = urllib.parse.urlparse(u).hostname or ""
+                host = host[4:] if host.startswith("www.") else host
+                if host and host not in domains:
+                    domains.append(host)
+            _last_search = {"results": len(hits), "domains": domains}
             return "\n".join(f"- {t}\n  {s}\n  {u}" for t, s, u in hits)
         err = "empty result page"
     print(f"[tor] search failed for {query!r}: {err}", file=sys.stderr)
@@ -821,9 +837,31 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
     return message
 
 
+def _reasoning_seconds(timeline, content, think_span):
+    """How long the model spent reasoning: the span of its thinking chunks, or
+    for models that inline <think> in the content, first chunk to the chunk
+    that closed the last reasoning block. None when it did not reason (or the
+    block never closed). Only a duration - the reasoning itself is dropped."""
+    if think_span[0] is not None:
+        return max(0.0, think_span[1] - think_span[0])
+    closing = [tag for tag in _THINK_TAG.finditer(content or "") if tag.group(1)]
+    if not closing or not timeline:
+        return None
+    end = closing[-1].end()
+    finished = next((stamp for length, stamp in timeline if length >= end), timeline[-1][1])
+    return max(0.0, finished - timeline[0][1])
+
+
 def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDICT,
-                       think=None, allow_search=False):
-    """Stream one Ollama response while retaining tool-call compatibility."""
+                       think=None, allow_search=False, on_progress=None):
+    """Stream one Ollama response while retaining tool-call compatibility.
+
+    The finished message carries Ollama's own counters in "_stats" (prompt and
+    generated tokens, generation time, measured reasoning time); on_progress,
+    when given, gets (chunks, seconds, reasoning) about twice a second while
+    text arrives. Ollama streams one token per chunk, so that is a live tok/s
+    reading; reasoning says whether the model is inside its private reasoning
+    right now (thinking chunks, or an open inline <think> block)."""
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
@@ -840,6 +878,9 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
     if not r.ok:
         sys.exit(f"Ollama returned {r.status_code}: {r.text[:200]}")
     message = {"role": "assistant", "content": ""}
+    started = time.monotonic()
+    timeline, think_span, chunks, reported = [], [None, None], 0, started
+    inline_depth = 0
     try:
         for raw in r.iter_lines(decode_unicode=True):
             if stop_event is not None and stop_event.is_set():
@@ -850,19 +891,46 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
                 event = json.loads(raw)
             except ValueError:
                 continue          # a partial or non-JSON line must not kill the stream
+            now = time.monotonic()
             chunk = event.get("message") or {}
             content = chunk.get("content") or ""
             if content:
+                before = len(message["content"])
                 message["content"] += content
+                timeline.append((len(message["content"]), now))
+                # Count only tags that END in this chunk; the 12-character
+                # overlap catches a tag split across two chunks exactly once.
+                window_start = max(0, before - 12)
+                for tag in _THINK_TAG.finditer(message["content"], window_start):
+                    if tag.end() > before:
+                        inline_depth = max(0, inline_depth + (-1 if tag.group(1) else 1))
                 on_text(content)
             thinking = chunk.get("thinking") or ""
             if thinking:
                 message["thinking"] = message.get("thinking", "") + thinking
+                think_span[0] = think_span[0] if think_span[0] is not None else now
+                think_span[1] = now
+            if content or thinking:
+                chunks += 1
+                if on_progress is not None and now - reported >= 0.5:
+                    reported = now
+                    on_progress(chunks, now - started, bool(thinking) or inline_depth > 0)
             if chunk.get("tool_calls"):
                 message.setdefault("tool_calls", []).extend(chunk["tool_calls"])
             if event.get("done"):
                 if event.get("done_reason"):
                     message["_done_reason"] = event["done_reason"]
+                stats = {key: event[key] for key in (
+                    "eval_count", "eval_duration", "prompt_eval_count",
+                    "prompt_eval_duration", "load_duration", "total_duration")
+                    if isinstance(event.get(key), (int, float))}
+                if stats.get("eval_count") and stats.get("eval_duration"):
+                    stats["tokens_per_second"] = stats["eval_count"] / (stats["eval_duration"] / 1e9)
+                reasoning = _reasoning_seconds(timeline, message["content"], think_span)
+                if reasoning is not None:
+                    stats["reasoning_seconds"] = reasoning
+                stats["num_ctx"] = NUM_CTX
+                message["_stats"] = stats
                 break
     finally:
         r.close()
@@ -922,6 +990,59 @@ def installed_models():
         return [m["name"] for m in r.json().get("models", []) if m.get("name")]
     except (requests.RequestException, ValueError, TypeError, KeyError):
         return []
+
+
+def installed_model_details():
+    """Installed models with their real on-disk size: [{"name", "size"}].
+
+    The size is what Ollama loads, so it is the honest number to compare with
+    this machine's memory. Empty when the model service does not answer."""
+    try:
+        r = requests.get(OLLAMA_TAGS, proxies=NOPROXY, timeout=3)
+        if not r.ok:
+            return []
+        return [{"name": m["name"], "size": int(m.get("size") or 0)}
+                for m in r.json().get("models", []) if m.get("name")]
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        return []
+
+
+def loaded_models():
+    """What the model service holds in memory right now: [{"name", "size",
+    "size_vram"}] from /api/ps. Empty on llama-server, which has no such call."""
+    if BACKEND == "llama-server":
+        return []
+    try:
+        r = requests.get(OLLAMA_PS, proxies=NOPROXY, timeout=3)
+        if not r.ok:
+            return []
+        return [{"name": m.get("name") or m.get("model", ""), "size": int(m.get("size") or 0),
+                 "size_vram": int(m.get("size_vram") or 0)}
+                for m in r.json().get("models", []) if m.get("name") or m.get("model")]
+    except (requests.RequestException, ValueError, TypeError):
+        return []
+
+
+def unload_model(name):
+    """Ask the local model service to drop a model from memory now."""
+    r = requests.post(OLLAMA_GENERATE, proxies=NOPROXY, timeout=60,
+                      json={"model": name, "keep_alive": 0})
+    if not r.ok:
+        raise RuntimeError(r.text[:200] or f"unload failed ({r.status_code})")
+    return True
+
+
+def load_model(name, keep_alive="30m"):
+    """Load a model into memory without generating anything (an empty
+    request is Ollama's documented preload). Blocks until it is loaded."""
+    r = requests.post(OLLAMA_GENERATE, proxies=NOPROXY, timeout=600,
+                      json={"model": name, "keep_alive": keep_alive,
+                            "options": {"num_ctx": NUM_CTX}})
+    if r.status_code == 404:
+        raise RuntimeError(f"Model {name!r} is not installed.")
+    if not r.ok:
+        raise RuntimeError(r.text[:200] or f"load failed ({r.status_code})")
+    return True
 
 
 def pull_model(name, on_progress=None, stop_event=None):
@@ -1129,12 +1250,23 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
     """
     if BACKEND != "ollama":
         return turn(messages, stop_event, allow_search=allow_search)
+    progress = None
+    if on_event:
+        def progress(chunks, seconds, reasoning=False):
+            on_event({"kind": "generating", "chunks": chunks, "seconds": seconds,
+                      "reasoning": bool(reasoning)})
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
-        msg = _ask_ollama_stream(messages, on_text, stop_event, allow_search=allow_search)
+        kwargs = {"allow_search": allow_search}
+        if progress is not None:
+            kwargs["on_progress"] = progress
+        msg = _ask_ollama_stream(messages, on_text, stop_event, **kwargs)
         if msg.get("stopped"):
             return "(stopped)"
+        stats = msg.pop("_stats", None)
+        if on_event and stats:
+            on_event({"kind": "stats", **stats})
         messages.append(msg)
         calls = msg.get("tool_calls")
         if not calls:
@@ -1166,8 +1298,12 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
             else:
                 result = f"(unknown tool {fn['name']})"
             if on_event and not denied:
-                on_event({"kind": "tool_finished", "name": fn.get("name", "unknown"),
-                          "result": result})
+                finished = {"kind": "tool_finished", "name": fn.get("name", "unknown"),
+                            "result": result}
+                if fn["name"] == "web_search":
+                    finished.update(results=_last_search.get("results", 0),
+                                    domains=list(_last_search.get("domains", [])))
+                on_event(finished)
             messages.append({"role": "tool", "tool_name": fn["name"], "content": result})
     return "(gave up after 6 tool rounds)"
 
@@ -1654,7 +1790,7 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable=None):
+def agent_argv(model=None, task=None, executable=None, stream=False):
     """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
     This used to be `ollama launch dsh -- --profile headless <task>`. The
@@ -1672,6 +1808,12 @@ def agent_argv(model=None, task=None, executable=None):
     argv = list(executable) if executable else qwen_launcher()
     if model:
         argv += ["--model", model]
+    if stream:
+        # The desktop's structured mode: qwen reads the task and the person's
+        # approvals as JSON lines on stdin and reports every step as JSON on
+        # stdout, so a protected action can wait for an answer instead of
+        # stopping. Same process, same environment, same funnel.
+        return argv + ["--input-format", "stream-json", "--output-format", "stream-json"]
     if task:                                     # no task = interactive session
         argv += ["-p", task]
     return argv
@@ -1706,12 +1848,16 @@ def agent_env(env=None):
     return _contain_env(env)
 
 
-def run_agent(task=None, model=None, yolo=False, workdir=None):
+def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
+              extra_deny=(), no_network=False):
     """Run the coding agent over Tor and return its exit code.
 
     qwen_setup() writes the settings the agent reads (deny list, approval mode,
     proxy) and agent_env() re-verifies Tor and applies the containment, so both
     halves of the boundary are composed before the process starts.
+
+    stream=True is the desktop's structured mode (see agent_argv): the task
+    and approvals arrive on stdin, so the task argument is not used.
     """
     import subprocess
 
@@ -1722,7 +1868,8 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     if model:
         MODEL = model
     workdir = os.path.abspath(workdir or os.getcwd())
-    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo)  # SystemExit if no Tor
+    env, model, _ctx, _proxy = qwen_setup(workdir, yolo=yolo, extra_deny=extra_deny,
+                                          no_network=no_network)  # SystemExit if no Tor
     print("[onionmind] agent web: Tor only. Its search goes over Tor, everything it")
     print("[onionmind]      runs inherits the proxy, and its python and node may only")
     print("[onionmind]      open loopback sockets. Refuses to start when Tor is down.")
@@ -1733,13 +1880,16 @@ def run_agent(task=None, model=None, yolo=False, workdir=None):
     else:
         print("[onionmind] approvals: on. Protected actions wait to be approved, and")
         print("[onionmind]      stop safely where there is nobody to ask.")
+    if no_network:
+        print("[onionmind] no network: this project's rules close the Tor bridge too.")
     print(f"[onionmind]      Everything it sends out is logged to {NET_LOG}")
     print(CONTAINMENT_CEILING)
     print()
     # Piped stdout is block-buffered, so without this the desktop's process
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
-    return subprocess.call(agent_argv(model, task), env=env, cwd=workdir)
+    return subprocess.call(agent_argv(model, None if stream else task, stream=stream),
+                           env=env, cwd=workdir)
 
 
 def spawn_code(workdir, model=None):
@@ -1773,12 +1923,24 @@ def qwen_launcher():
             if qwen.lower().endswith((".cmd", ".bat")) else [qwen])
 
 
-def qwen_setup(workdir, ctx=None, yolo=False):
+# A project's Agent rules may only ADD denials, and only of reading or editing
+# paths - nothing that arrives this way can widen what the agent may do.
+_EXTRA_DENY = re.compile(r"^(read_file|edit)\([^()\s][^()]*\)$")
+# Where a no-network project points every proxy variable: a loopback port
+# nothing listens on, so a connection attempt is refused instead of leaving.
+CLOSED_PROXY = "http://127.0.0.1:9"
+
+
+def qwen_setup(workdir, ctx=None, yolo=False, extra_deny=(), no_network=False):
     """Write Qwen Code's settings and build its environment.
 
     The one place the agent's boundary is composed, shared by the terminal
     session (run_code) and Agent mode (run_agent), so a change to the deny list
     or the proxy cannot reach one and miss the other.
+
+    extra_deny and no_network come from a project's Agent rules and only ever
+    narrow the boundary: more denied paths, or no way out at all - the Tor
+    bridge closed and Onionmind's own search tools denied.
     """
     ctx = ctx or code_ctx()
     detect_backend()
@@ -1810,7 +1972,10 @@ def qwen_setup(workdir, ctx=None, yolo=False):
         # commands cannot be pointed at a proxy at all. Both are hard denials -
         # the tool call is refused, not queued for approval.
         "permissions": {"deny": ["web_search", "web_fetch"] +
-                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS]},
+                        [f"run_shell_command({name})" for name in NO_PROXY_COMMANDS] +
+                        [rule for rule in extra_deny if _EXTRA_DENY.match(str(rule))] +
+                        (["mcp__onionmind__web_search", "mcp__onionmind__web_fetch"]
+                         if no_network else [])},
         # YOLO stops qwen asking before it edits a file or runs a command. It
         # does NOT reach the deny list above: those stay hard denials whichever
         # mode is set (checked against qwen-code - a denied tool is still
@@ -1841,6 +2006,11 @@ def qwen_setup(workdir, ctx=None, yolo=False):
     conf = _read_settings(user)
     conf.setdefault("mcpServers", {}).update(mcp)   # keep the user's own servers
     _write_settings(user, conf)
+
+    if no_network:
+        proxy = CLOSED_PROXY
+        settings["proxy"] = proxy
+        env.update(_proxy_env(proxy))
 
     path = _settings_path(workdir)
     merged = _read_settings(path)                # keep whatever the project already set
@@ -2273,7 +2443,13 @@ if __name__ == "__main__":
         run_code(os.path.abspath(rest[0] if rest else os.getcwd()), yolo=yolo)
         raise SystemExit
     if "--agent" in sys.argv:
-        args = [a for a in sys.argv[1:] if a not in ("--agent", "--yolo")]
+        flags = ("--agent", "--yolo", "--stream-json", "--no-network")
+        args = [a for a in sys.argv[1:] if a not in flags]
+        deny = []
+        while "--deny" in args[:-1]:             # --deny RULE, repeatable
+            i = args.index("--deny")
+            deny.append(args.pop(i + 1))
+            args.pop(i)
         model = None
         workdir = None
         if len(args) >= 2 and args[0] == "--model":
@@ -2282,7 +2458,10 @@ if __name__ == "__main__":
             workdir, args = args[1], args[2:]
         try:
             raise SystemExit(run_agent(" ".join(args).strip() or None, model,
-                                       yolo=yolo, workdir=workdir))
+                                       yolo=yolo, workdir=workdir,
+                                       stream="--stream-json" in sys.argv,
+                                       extra_deny=deny,
+                                       no_network="--no-network" in sys.argv))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:
@@ -2420,6 +2599,48 @@ __all__ = [
     "BundleUpdater",
     "pending_staging_dir",
     "prune_update_workdir",
+    "FEATURE_FLAGS",
+    "FEATURE_DEFAULTS",
+    "load_features",
+    "needs_web",
+    "web_query",
+    "PRESET_DEFAULTS",
+    "load_presets",
+    "active_preset",
+    "with_system_prompt",
+    "RULE_FLAGS",
+    "RULE_DEFAULTS",
+    "load_rules",
+    "store_rules",
+    "rule_decision",
+    "agent_rule_denials",
+    "parse_agent_line",
+    "agent_initialize_message",
+    "agent_task_message",
+    "agent_permission_response",
+    "agent_interrupt_message",
+    "describe_tool_request",
+    "edit_size",
+    "estimate_tokens",
+    "format_tokens",
+    "classify_error",
+    "search_sessions",
+    "sessions_older_than",
+    "hash_passphrase",
+    "verify_passphrase",
+    "EgressLog",
+    "agent_net_entries",
+    "network_log_csv",
+    "network_log_json",
+    "RevertRecord",
+    "revert_changes",
+    "undo_revert",
+    "change_stats",
+    "gpu_memory_mb",
+    "gpu_name",
+    "model_fit",
+    "node_version",
+    "node_supports_agent",
 ]
 
 
@@ -4654,6 +4875,852 @@ def prune_update_workdir(
                 shutil.rmtree(entry, ignore_errors=True)
         except OSError:
             continue
+
+
+# --- Workbench v2 ------------------------------------------------------
+#
+# The v2 workbench adds 24 features behind one flag dict. Everything below is
+# the Qt-free half: the flag store, the copy the features share, and the pure
+# helpers that turn real local state (sessions on disk, git, Ollama's own
+# numbers, the agent's stream) into what the UI shows. Nothing here opens a
+# network connection; the only processes it starts are git and nvidia-smi.
+
+FEATURE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("palette", "Command palette", "Ctrl+K jumps to projects, sessions, models and commands."),
+    ("boundary", "Boundary map", "A toolbar map of what stays on this machine and what leaves over Tor."),
+    ("provenance", "Where replies came from", "Each reply says it was answered on this machine, and whether a Tor search was used."),
+    ("webAsk", "Ask before searching the web", "When a question needs the web but Tor or Tor search is off, Onionmind asks first instead of guessing."),
+    ("approvals", "Ask before protected actions", "Agent pauses for Allow or Deny when it wants to edit, instead of stopping."),
+    ("runPanel", "Run tab", "The inspector gets a Run tab with the agent’s plan, status and output."),
+    ("timeline", "Agent steps as a timeline", "Tool activity shows as a compact timeline instead of cards."),
+    ("ladder", "Model power details", "The model menu shows what fits this GPU, and switching shows the model loading."),
+    ("thinking", "Thinking details", "Adds the privacy-filter step and a “Thought for Ns” line on replies."),
+    ("zones", "Activity by zone", "The Activity tab sorts events into Machine, Tor and Outside lanes."),
+    ("keyboard", "Keyboard shortcuts page", "Adds a Keyboard tab in Settings. Press ? to open it."),
+    ("setup", "First-launch setup", "A guided setup for model, Tor and project that you can run again."),
+    ("errors", "Error and recovery", "Clear messages with fix-it buttons when the model server stops, the GPU runs out of memory or a Tor circuit fails."),
+    ("msgActions", "Edit, regenerate and branch", "Edit and resend a message, ask again, copy, or start a new session from any reply."),
+    ("sessionSearch", "Search past sessions", "The session filter also searches message text across every project."),
+    ("contextMeter", "Context-window meter", "Shows how much of the model’s context this session uses, and warns before old messages are trimmed."),
+    ("undo", "Undo Agent changes", "Revert one file or all of them from the Changes tab, with Undo."),
+    ("rules", "Per-project Agent rules", "Settings tab for what Agent may do without asking, blocked paths and project instructions."),
+    ("lock", "Auto-delete and app lock", "Delete old conversations automatically and lock the window with a passphrase."),
+    ("netlog", "Network log export", "Export every connection that left this machine as JSON or CSV."),
+    ("modelPlus", "Model per mode and live stats", "Remember a tier for Chat and one for Agent, and show speed and memory in the status bar."),
+    ("presets", "Presets", "Pick a system prompt such as Code reviewer or Concise from the composer, and edit them in Settings."),
+    ("appearance", "Light theme, size and notifications", "Adds a light theme, interface size and notifications to Settings."),
+    ("empty", "Empty and first-use states", "Starter prompts in a new task, guidance when nothing has changed, and a no-model warning."),
+)
+
+# Every flag starts off except the one that makes the app ask before guessing.
+FEATURE_DEFAULTS: dict[str, bool] = {key: key == "webAsk" for key, _name, _desc in FEATURE_FLAGS}
+
+
+def load_features(settings: Mapping[str, Any]) -> dict[str, bool]:
+    """The validated flag view over settings["features"]; junk falls back."""
+    stored = settings.get("features") if isinstance(settings, Mapping) else None
+    features = dict(FEATURE_DEFAULTS)
+    if isinstance(stored, Mapping):
+        for key in FEATURE_DEFAULTS:
+            if isinstance(stored.get(key), bool):
+                features[key] = stored[key]
+    return features
+
+
+# webAsk: the prompt shapes that need the web. A heuristic on the user's own
+# words, run locally - it decides only whether to ASK, never to search.
+WEB_ASK_PATTERN = re.compile(
+    r"\b(latest|newest|newer|current(ly)?|today|this week|news|release[sd]?|version|"
+    r"changelog|look (it )?up|search|online|price|docs? for)\b",
+    re.IGNORECASE,
+)
+_WEB_QUERY_LEAD = re.compile(
+    r"^(is there|are there|can you|could you|please|what('s| is)|do you know)\s+",
+    re.IGNORECASE,
+)
+
+
+def needs_web(text: str) -> bool:
+    return bool(WEB_ASK_PATTERN.search(_as_text_core(text)))
+
+
+def web_query(text: str) -> str:
+    """The one query the webAsk card shows: the prompt minus its framing."""
+    query = re.sub(r"[?.!]+$", "", _as_text_core(text).strip())
+    return _WEB_QUERY_LEAD.sub("", query)[:70]
+
+
+# presets: the system prompt sent before the user's message. The default text
+# is only sent while the presets feature is on; with it off the request is the
+# same message list the workbench always sent.
+PRESET_DEFAULTS: tuple[dict[str, str], ...] = (
+    {"id": "default", "name": "Default", "short": "Balanced answers for everyday questions",
+     "text": "You are Onionmind, a private assistant running on this machine. Answer clearly and say when you are unsure."},
+    {"id": "review", "name": "Code reviewer", "short": "Looks for bugs, risks and missing tests",
+     "text": "Review code like a careful senior engineer. Point out bugs, security risks and missing tests first, then style. Quote the lines you mean."},
+    {"id": "concise", "name": "Concise", "short": "Short answers, no extra explanation",
+     "text": "Answer in as few words as possible. Use a list only when there are several steps."},
+    {"id": "teach", "name": "Explain step by step", "short": "Walks through the reasoning",
+     "text": "Explain step by step as if to a developer new to this codebase. Define terms the first time you use them."},
+)
+
+
+def load_presets(settings: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The four presets with any edited text applied; ids and names are fixed."""
+    edited = settings.get("preset_texts") if isinstance(settings, Mapping) else None
+    edited = edited if isinstance(edited, Mapping) else {}
+    presets = []
+    for preset in PRESET_DEFAULTS:
+        item = dict(preset)
+        text = edited.get(preset["id"])
+        if isinstance(text, str) and text.strip():
+            item["text"] = text
+        presets.append(item)
+    return presets
+
+
+def active_preset(settings: Mapping[str, Any]) -> dict[str, str]:
+    presets = load_presets(settings)
+    wanted = settings.get("preset") if isinstance(settings, Mapping) else None
+    return next((p for p in presets if p["id"] == wanted), presets[0])
+
+
+def with_system_prompt(messages: Iterable[Mapping[str, Any]], text: str) -> list[dict[str, Any]]:
+    """Messages with one leading system message; an existing one is replaced."""
+    items = [dict(m) for m in messages if m.get("role") != "system"]
+    return ([{"role": "system", "content": text}] if text.strip() else []) + items
+
+
+# rules: per-project Agent policy. Stored under settings["agent_rules"] keyed by
+# the project's normalized path, so two spellings of one folder share rules.
+RULE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("editTests", "Edit files in tests/ without asking", "Other edits still need your approval."),
+    ("runTests", "Run the test suite without asking", "Commands such as pytest, npm test or bundle exec rake test."),
+    ("readOnly", "Read-only: never edit files in this project", "Agent can read and run commands, but every edit is refused."),
+    ("noNetwork", "No network for Agent in this project", "Even the Tor-only bridge stays closed."),
+)
+RULE_DEFAULTS: dict[str, Any] = {
+    "editTests": False,
+    "runTests": True,
+    "readOnly": False,
+    "noNetwork": False,
+    "blocked": ".env, config/credentials.yml.enc",
+    "notes": "",
+}
+
+
+def _rule_key(workspace: Any) -> str:
+    text = _as_text_core(workspace).strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(text))))
+
+
+def load_rules(settings: Mapping[str, Any], workspace: Any) -> dict[str, Any]:
+    stored = settings.get("agent_rules") if isinstance(settings, Mapping) else None
+    entry = stored.get(_rule_key(workspace)) if isinstance(stored, Mapping) else None
+    rules = dict(RULE_DEFAULTS)
+    if isinstance(entry, Mapping):
+        for key, default in RULE_DEFAULTS.items():
+            value = entry.get(key)
+            if isinstance(default, bool) and isinstance(value, bool):
+                rules[key] = value
+            elif isinstance(default, str) and isinstance(value, str):
+                rules[key] = value
+    return rules
+
+
+def store_rules(settings: dict[str, Any], workspace: Any, rules: Mapping[str, Any]) -> dict[str, Any]:
+    """Write one project's rules into settings (in place) and return settings."""
+    key = _rule_key(workspace)
+    if not key:
+        return settings
+    table = settings.get("agent_rules")
+    table = dict(table) if isinstance(table, Mapping) else {}
+    clean = dict(RULE_DEFAULTS)
+    for name, default in RULE_DEFAULTS.items():
+        value = rules.get(name, default)
+        clean[name] = bool(value) if isinstance(default, bool) else _as_text_core(value)
+    table[key] = clean
+    settings["agent_rules"] = table
+    return settings
+
+
+def blocked_paths(rules: Mapping[str, Any]) -> list[str]:
+    raw = _as_text_core(rules.get("blocked", ""))
+    return [part.strip().replace("\\", "/") for part in raw.split(",") if part.strip()]
+
+
+# The tools qwen-code treats as edits and as shell commands. A permission
+# request names one of these; anything else is not an edit.
+AGENT_EDIT_TOOLS = frozenset({"edit", "write_file", "notebook_edit", "replace"})
+AGENT_SHELL_TOOLS = frozenset({"run_shell_command", "exec", "monitor"})
+_TEST_COMMAND = re.compile(
+    r"(^|[\s;&|/])(pytest|py\.test|unittest|tox|nox|npm (run )?test|yarn test|pnpm test|"
+    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake( test)?|"
+    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (check|test))\b|(^|[\s/])tests?/",
+    re.IGNORECASE,
+)
+
+
+def _request_path(tool_input: Mapping[str, Any]) -> str:
+    for key in ("file_path", "path", "absolute_path", "notebook_path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _relative_to(path: str, workspace: Any) -> str:
+    """path relative to the project when it lies inside it, else as given.
+
+    Compared as normalised strings first, so a forward-slash path from the
+    agent still matches on Windows (where "/work/x" is not "absolute"), and
+    case-insensitively there; then through the resolved filesystem paths."""
+    if not path:
+        return ""
+    root = _as_text_core(workspace)
+    text = path.replace("\\", "/")
+    base = root.replace("\\", "/").rstrip("/")
+    if base:
+        fold = (lambda value: value.casefold()) if os.name == "nt" else (lambda value: value)
+        if fold(text).startswith(fold(base) + "/"):
+            return text[len(base) + 1:]
+        try:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                return candidate.resolve(strict=False).relative_to(
+                    Path(root).resolve(strict=False)).as_posix()
+        except (OSError, ValueError):
+            pass
+    return text
+
+
+def _strip_dot_slash(path: str) -> str:
+    while path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")
+
+
+def _matches_blocked(relative: str, blocked: Iterable[str]) -> Optional[str]:
+    import fnmatch
+
+    relative = _strip_dot_slash(relative)
+    for pattern in blocked:
+        clean = _strip_dot_slash(pattern).rstrip("/")
+        if not clean:
+            continue
+        if (
+            relative == clean
+            or relative.startswith(clean + "/")
+            or fnmatch.fnmatch(relative, clean)
+            or fnmatch.fnmatch(relative.rsplit("/", 1)[-1], clean)
+        ):
+            return pattern
+    return None
+
+
+def rule_decision(
+    rules: Mapping[str, Any],
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    workspace: Any,
+) -> tuple[str, str]:
+    """('allow' | 'deny' | 'ask', reason) for one agent permission request.
+
+    Deny wins over allow: a blocked path or a read-only project refuses even an
+    edit that editTests would otherwise let through. 'ask' means the person
+    decides (or, with approvals off, the run stops safely as it always has).
+    """
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    relative = _relative_to(_request_path(tool_input), workspace)
+    hit = _matches_blocked(relative, blocked_paths(rules)) if relative else None
+    if hit:
+        return "deny", f"{relative} is a blocked path in this project ({hit})"
+    if tool_name in AGENT_SHELL_TOOLS:
+        command = _as_text_core(tool_input.get("command"))
+        for pattern in blocked_paths(rules):
+            if pattern and pattern in command:
+                return "deny", f"the command touches a blocked path ({pattern})"
+        if rules.get("runTests") and _TEST_COMMAND.search(command):
+            return "allow", "project rule: run the test suite without asking"
+        return "ask", ""
+    if tool_name in AGENT_EDIT_TOOLS:
+        if rules.get("readOnly"):
+            return "deny", "this project is read-only for Agent"
+        parts = relative.split("/")
+        if rules.get("editTests") and parts and parts[0] in ("tests", "test"):
+            return "allow", "project rule: edits in tests/ allowed without asking"
+        return "ask", ""
+    return "ask", ""
+
+
+def agent_rule_denials(rules: Mapping[str, Any]) -> list[str]:
+    """qwen-code permission deny rules for a project's blocked paths.
+
+    Read rules cover every read tool and edit rules every edit tool, so a
+    blocked path is refused by the agent itself - even under YOLO, which never
+    reaches the deny list. Patterns are anchored at the project root ("/x"),
+    and a bare name also matches at any depth.
+    """
+    denials: list[str] = []
+    for pattern in blocked_paths(rules):
+        clean = _strip_dot_slash(pattern).rstrip("/")
+        if not clean or any(ch in clean for ch in "()"):
+            continue
+        anchored = [f"/{clean}"] + ([f"/**/{clean}"] if "/" not in clean else [])
+        for spec in anchored:
+            denials += [f"read_file({spec})", f"edit({spec})"]
+    return denials
+
+
+# Agent stream: qwen-code's stream-json protocol, read line by line from the
+# process the desktop already owns. Non-JSON lines (Onionmind's own banner,
+# stderr) come back as text; nothing here trusts the agent's prose as proof.
+
+def parse_agent_line(line: str) -> dict[str, Any]:
+    """One stdout line as a typed event: {"kind": ..., ...}."""
+    text = _as_text_core(line).strip()
+    if not text:
+        return {"kind": "blank"}
+    if not text.startswith("{"):
+        return {"kind": "text", "text": text}
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return {"kind": "text", "text": text}
+    if not isinstance(message, dict):
+        return {"kind": "text", "text": text}
+    kind = message.get("type")
+    if kind == "control_request":
+        request = message.get("request") or {}
+        if request.get("subtype") == "can_use_tool":
+            return {
+                "kind": "permission",
+                "request_id": _as_text_core(message.get("request_id")),
+                "tool": _as_text_core(request.get("tool_name")),
+                "tool_use_id": _as_text_core(request.get("tool_use_id")),
+                "input": request.get("input") if isinstance(request.get("input"), dict) else {},
+            }
+        return {"kind": "control", "subtype": _as_text_core(request.get("subtype")),
+                "request_id": _as_text_core(message.get("request_id"))}
+    if kind == "control_response":
+        response = message.get("response") or {}
+        return {"kind": "control_response",
+                "request_id": _as_text_core(response.get("request_id")),
+                "ok": response.get("subtype") == "success"}
+    if kind == "system":
+        return {"kind": "system", "subtype": _as_text_core(message.get("subtype")),
+                "session_id": _as_text_core(message.get("session_id"))}
+    if kind in ("assistant", "user"):
+        content = (message.get("message") or {}).get("content")
+        blocks = content if isinstance(content, list) else [{"type": "text", "text": _as_text_core(content)}]
+        events: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text" and kind == "assistant":
+                visible = strip_thinking(_as_text_core(block.get("text")))
+                if visible:
+                    events.append({"kind": "say", "text": visible})
+            elif block_type == "tool_use":
+                events.append({"kind": "tool_use", "id": _as_text_core(block.get("id")),
+                               "tool": _as_text_core(block.get("name")),
+                               "input": block.get("input") if isinstance(block.get("input"), dict) else {}})
+            elif block_type == "tool_result":
+                result = block.get("content")
+                if isinstance(result, list):
+                    result = " ".join(_as_text_core(item.get("text")) for item in result if isinstance(item, dict))
+                events.append({"kind": "tool_result", "id": _as_text_core(block.get("tool_use_id")),
+                               "error": bool(block.get("is_error")),
+                               "text": _as_text_core(result)[:2000]})
+        return {"kind": "batch", "events": events}
+    if kind == "result":
+        return {"kind": "result", "ok": not message.get("is_error"),
+                "subtype": _as_text_core(message.get("subtype")),
+                "text": strip_thinking(_as_text_core(message.get("result"))),
+                "duration_ms": message.get("duration_ms"),
+                "turns": message.get("num_turns")}
+    return {"kind": "other", "type": _as_text_core(kind)}
+
+
+def agent_initialize_message(request_id: str = "onionmind-init") -> str:
+    """The handshake qwen-code waits for before it reads a task (it hangs without one)."""
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "initialize"}}) + "\n"
+
+
+def agent_task_message(task: str, session_id: str = "onionmind") -> str:
+    return json.dumps({"type": "user", "session_id": session_id, "parent_tool_use_id": None,
+                       "message": {"role": "user", "content": task}}) + "\n"
+
+
+def agent_permission_response(
+    request_id: str, allow: bool, tool_input: Mapping[str, Any] | None = None, message: str = ""
+) -> str:
+    response: dict[str, Any] = {"behavior": "allow" if allow else "deny"}
+    if allow:
+        response["updatedInput"] = dict(tool_input or {})
+    else:
+        response["message"] = message or "Denied by the person running Onionmind."
+    return json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": request_id, "response": response}}) + "\n"
+
+
+def agent_interrupt_message(request_id: str = "onionmind-stop") -> str:
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "interrupt"}}) + "\n"
+
+
+def describe_tool_request(tool: str, tool_input: Mapping[str, Any], workspace: Any = None) -> str:
+    """Plain words for what the agent wants: 'edit src/app.py', 'run pytest -q'."""
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    if tool in AGENT_SHELL_TOOLS:
+        return f"run {_as_text_core(tool_input.get('command')).strip()[:160]}"
+    path = _relative_to(_request_path(tool_input), workspace)
+    if tool in AGENT_EDIT_TOOLS:
+        return f"edit {path}" if path else "edit a file"
+    if path:
+        return f"{tool.replace('_', ' ')} {path}"
+    return tool.replace("_", " ") or "use a tool"
+
+
+def edit_size(tool: str, tool_input: Mapping[str, Any]) -> tuple[int, int]:
+    """(+added, -removed) lines an edit request proposes, from its own input."""
+    tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+    if tool == "write_file":
+        return len(_as_text_core(tool_input.get("content")).splitlines()), 0
+    if tool in ("edit", "replace"):
+        old = _as_text_core(tool_input.get("old_string")).splitlines()
+        new = _as_text_core(tool_input.get("new_string")).splitlines()
+        return len(new), len(old)
+    return 0, 0
+
+
+# contextMeter: an honest estimate before a turn (characters / 4, the usual
+# rule of thumb), replaced by the model's own prompt_eval_count after one.
+
+def _character_count(part: Any) -> int:
+    if isinstance(part, Mapping):
+        return _character_count(part.get("content"))
+    if isinstance(part, (list, tuple)):
+        return sum(_character_count(item) for item in part)
+    return len(_as_text_core(part)) if part else 0
+
+
+def estimate_tokens(*parts: Any) -> int:
+    return (_character_count(parts) + 3) // 4
+
+
+def format_tokens(count: Optional[int]) -> str:
+    """'3.1k', '32k': k is 1024 tokens, the unit context windows are sized in
+    (and the one the workbench's own context slider already shows)."""
+    if count is None:
+        return "?"
+    if count < 1000:
+        return str(int(count))
+    value = count / 1024
+    return f"{value:.1f}k" if value < 10 else f"{value:.0f}k"
+
+
+# errors: classify the real failure text the engine already produces.
+_ERROR_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("oom", re.compile(r"out of memory|cuda error|cudaMalloc|insufficient (video )?memory|"
+                       r"requires more system memory|not enough memory|failed to allocate", re.IGNORECASE)),
+    ("server", re.compile(r"not running on 127\.0\.0\.1|no model server|connection refused|"
+                          r"model service is not running|could not reach the model", re.IGNORECASE)),
+    ("tor", re.compile(r"\btor\b.*(circuit|verif|not reachable|unavailable|failed)|"
+                       r"socks|could not verify", re.IGNORECASE)),
+)
+
+
+def classify_error(text: str) -> Optional[str]:
+    """'server' | 'oom' | 'tor' | None for a chat failure message."""
+    message = _as_text_core(text)
+    for key, pattern in _ERROR_CLASSES:
+        if pattern.search(message):
+            return key
+    return None
+
+
+# sessions: search across every project, age-based deletion, branching.
+
+def _session_value(session: Any, name: str, default: Any = None) -> Any:
+    if isinstance(session, Mapping):
+        return session.get(name, default)
+    return getattr(session, name, default)
+
+
+def search_sessions(
+    sessions: Iterable[Any], query: str, limit: int = 8, before: int = 28, after: int = 40
+) -> list[dict[str, Any]]:
+    """Message hits across every saved session, newest session first.
+
+    Each hit carries the snippet split around the match so the UI can
+    highlight it without re-searching. Reasoning was stripped at save time,
+    so only visible text is searched.
+    """
+    needle = _as_text_core(query).strip()
+    if len(needle) < 2:
+        return []
+    folded = needle.casefold()
+    hits: list[dict[str, Any]] = []
+    for session in sessions:
+        for index, message in enumerate(_session_value(session, "messages", ()) or ()):
+            if not isinstance(message, Mapping) or message.get("role") not in ("user", "assistant"):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            position = content.casefold().find(folded)
+            if position < 0:
+                continue
+            start = max(0, position - before)
+            end = min(len(content), position + len(needle) + after)
+            hits.append({
+                "session_id": _as_text_core(_session_value(session, "id")),
+                "title": _as_text_core(_session_value(session, "title", "Session")),
+                "workspace": _session_value(session, "workspace"),
+                "message_index": index,
+                "before": ("…" if start else "") + content[start:position].replace("\n", " "),
+                "match": content[position:position + len(needle)],
+                "after": content[position + len(needle):end].replace("\n", " ") + ("…" if end < len(content) else ""),
+            })
+            break                                # one hit per session keeps the list scannable
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        stamp = value
+    else:
+        try:
+            stamp = datetime.fromisoformat(_as_text_core(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def sessions_older_than(sessions: Iterable[Any], days: int, now: Optional[datetime] = None) -> list[Any]:
+    """Sessions whose last change is more than `days` days ago."""
+    if not days or days <= 0:
+        return []
+    now = now or datetime.now(timezone.utc)
+    old = []
+    for session in sessions:
+        stamp = _parse_timestamp(_session_value(session, "updated_at"))
+        if stamp is not None and (now - stamp).total_seconds() > days * 86400:
+            old.append(session)
+    return old
+
+
+AUTO_DELETE_CHOICES: tuple[int, ...] = (0, 1, 7, 30)
+LOCK_AFTER_CHOICES: tuple[int, ...] = (0, 5, 15, 60)
+
+
+# lock: a passphrase is stored only as a scrypt hash with its own salt.
+
+def hash_passphrase(passphrase: str, salt: Optional[bytes] = None) -> dict[str, str]:
+    salt = salt if salt is not None else os.urandom(16)
+    digest = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return {"kdf": "scrypt", "salt": salt.hex(), "hash": digest.hex()}
+
+
+def verify_passphrase(passphrase: str, record: Mapping[str, Any]) -> bool:
+    import hmac
+
+    try:
+        salt = bytes.fromhex(_as_text_core(record.get("salt")))
+        expected = bytes.fromhex(_as_text_core(record.get("hash")))
+    except (AttributeError, ValueError):
+        return False
+    if record.get("kdf") != "scrypt" or not salt or not expected:
+        return False
+    digest = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return hmac.compare_digest(digest, expected)
+
+
+# netlog: what left this machine, written by the desktop when it happens.
+# Times and destinations only - a prompt or a search query is never stored.
+
+class EgressLog:
+    ROUTES = ("Tor", "Direct", "Refused")
+
+    def __init__(self, path: PathInput) -> None:
+        self.path = Path(path).expanduser()
+
+    def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
+        """Record one connection. Never raises: logging must not break the action."""
+        entry = {
+            "time": (when or datetime.now().astimezone()).isoformat(timespec="seconds"),
+            "route": route if route in self.ROUTES else "Tor",
+            "what": _as_text_core(what)[:200],
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def entries(self, day: Optional[str] = None) -> list[dict[str, str]]:
+        """Entries for one local day (YYYY-MM-DD), oldest first; all when day is None."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        rows = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
+                continue
+            if day and not entry["time"].startswith(day):
+                continue
+            rows.append({"time": entry["time"], "route": _as_text_core(entry.get("route")),
+                         "what": _as_text_core(entry.get("what"))})
+        return rows
+
+    def counts(self, day: Optional[str] = None) -> dict[str, int]:
+        rows = self.entries(day)
+        return {
+            "search": sum(1 for row in rows if row["route"] == "Tor" and row["what"].startswith("Chat search")),
+            "tor": sum(1 for row in rows if row["route"] == "Tor"),
+            "direct": sum(1 for row in rows if row["route"] == "Direct"),
+        }
+
+
+_AGENT_NET_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
+
+
+def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[str, str]]:
+    """The agent bridge's own log (onionmind.py _net_log) as netlog rows.
+
+    Its lines name the destination and whether it went over Tor or was
+    refused; they never carry request bodies.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        match = _AGENT_NET_LINE.match(line.strip())
+        if not match or (day and match.group(1) != day):
+            continue
+        detail = match.group(3).strip()
+        lowered = detail.casefold()
+        route = "Refused" if "refused" in lowered else ("Tor" if lowered.startswith("tor") else "Local")
+        if route == "Local":
+            continue                              # loopback traffic never left the machine
+        rows.append({"time": f"{match.group(1)}T{match.group(2)}", "route": route,
+                     "what": f"Agent network · {detail}"[:200]})
+    return rows
+
+
+def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["time", "route", "what"])
+    for row in rows:
+        writer.writerow([row.get("time", ""), row.get("route", ""), row.get("what", "")])
+    return buffer.getvalue()
+
+
+def network_log_json(rows: Iterable[Mapping[str, Any]]) -> str:
+    clean = [{"time": row.get("time", ""), "route": row.get("route", ""), "what": row.get("what", "")}
+             for row in rows]
+    return json.dumps(clean, indent=2, ensure_ascii=False) + "\n"
+
+
+# undo: revert files to their last commit with a recoverable backup, so Undo
+# puts back exactly what was on disk - including files git never tracked.
+
+@dataclass(frozen=True)
+class RevertRecord:
+    root: str
+    backup: str
+    paths: tuple[str, ...]
+    untracked: tuple[str, ...]
+
+
+def _safe_relative(root: Path, relative: str) -> Path:
+    candidate = (root / relative).resolve(strict=False)
+    candidate.relative_to(root)                   # ValueError when it escapes
+    return candidate
+
+
+def revert_changes(
+    selected: PathInput, changes: Iterable[Any], backup_root: PathInput
+) -> RevertRecord:
+    """Back up each changed file, then restore it from HEAD (or remove it when untracked).
+
+    `changes` are WorkspaceChange-like (status, path). The backup lives under
+    backup_root, outside the project, until the next revert replaces it.
+    """
+    root = WorkspaceInspector._root(selected)
+    backup = Path(backup_root).expanduser() / uuid4().hex
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for change in changes:
+        status = _as_text_core(_session_value(change, "status", ""))
+        relative = _as_text_core(_session_value(change, "path", ""))
+        if not relative:
+            continue
+        source = _safe_relative(root, relative)
+        (untracked if status == "??" else tracked).append(relative)
+        if source.is_file():
+            target = backup / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    if tracked:
+        result = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--staged", "--worktree", "--", *tracked)
+        if result.returncode != 0:
+            # A file added to the index with no HEAD version cannot be restored
+            # from HEAD; unstage it and treat it as untracked instead.
+            WorkspaceInspector._git(root, "restore", "--staged", "--", *tracked)
+            for relative in list(tracked):
+                if WorkspaceInspector._git(root, "cat-file", "-e", f"HEAD:{relative}").returncode != 0:
+                    tracked.remove(relative)
+                    untracked.append(relative)
+            if tracked:
+                retry = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--worktree", "--", *tracked)
+                if retry.returncode != 0:
+                    raise RuntimeError(retry.stderr.decode("utf-8", "replace").strip() or "git restore failed")
+    for relative in untracked:
+        target = _safe_relative(root, relative)
+        if target.is_file() or target.is_symlink():
+            target.unlink()
+    (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
+    record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
+    (backup / ".onionmind-revert.json").write_text(
+        json.dumps({"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)}),
+        encoding="utf-8",
+    )
+    return record
+
+
+def undo_revert(record: RevertRecord) -> int:
+    """Copy the backed-up files back into the project. Returns files restored."""
+    root = Path(record.root)
+    backup = Path(record.backup)
+    restored = 0
+    for relative in record.paths:
+        source = backup / relative
+        if not source.is_file():
+            continue
+        target = _safe_relative(root, relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        restored += 1
+    return restored
+
+
+def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
+    """{path: (+added, -removed)} from `git diff --numstat HEAD`, empty when unknown."""
+    try:
+        root = WorkspaceInspector._root(selected)
+        result = WorkspaceInspector._git(root, "diff", "--numstat", "--no-ext-diff", "HEAD", "--")
+    except (ValueError, RuntimeError):
+        return {}
+    stats: dict[str, tuple[int, int]] = {}
+    if result.returncode != 0:
+        return stats
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            stats[parts[2]] = (int(parts[0]), int(parts[1]))
+    return stats
+
+
+# ladder / modelPlus: real hardware numbers, or None when the platform won't say.
+
+def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
+    """(used, total) MB of the first NVIDIA GPU, or (None, None) without one.
+
+    ponytail: NVIDIA only, like gpu_vram_mb. AMD (rocm-smi), Intel and Apple
+    unified memory report nothing here; the UI then says "unknown".
+    """
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            used, total = output.stdout.strip().splitlines()[0].split(",")[:2]
+            return int(used.strip()), int(total.strip())
+    except Exception:
+        pass
+    return None, None
+
+
+def gpu_name() -> Optional[str]:
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+        if output.returncode == 0 and output.stdout.strip():
+            return output.stdout.strip().splitlines()[0].strip()
+    except Exception:
+        pass
+    return None
+
+
+def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optional[int]) -> str:
+    """'Fits' / 'Tight' / 'Too big' / '' for an installed model's real file size.
+
+    Compares the on-disk size (what Ollama loads) with headroom for the KV
+    cache against VRAM, else RAM. '' means there is nothing honest to say.
+    """
+    if not size_bytes:
+        return ""
+    need_mb = size_bytes / (1024 * 1024) * 1.2
+    budget = vram_mb or (int(ram_mb * 0.85) if ram_mb else 0)
+    if not budget:
+        return ""
+    if need_mb <= budget:
+        return "Fits"
+    if need_mb <= budget * 1.35:
+        return "Tight"
+    return "Too big"
+
+
+def format_gb(mb: Optional[float]) -> str:
+    if mb is None:
+        return "?"
+    return f"{mb / 1024:.1f}"
+
+
+def node_version() -> Optional[str]:
+    """`node --version` without a console window, or None when Node is missing."""
+    executable = shutil.which("node")
+    if not executable:
+        return None
+    try:
+        output = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                timeout=10, creationflags=_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = output.stdout.strip()
+    return version or None
+
+
+def node_supports_agent(version: Optional[str]) -> bool:
+    """Qwen Code needs Node 22.19+ (or 24+)."""
+    match = re.match(r"v?(\d+)\.(\d+)", _as_text_core(version))
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return major >= 24 or (major == 22 and minor >= 19) or major == 23
 DESKTOPCOREEOF
 cat > "$DIR/onionmind_desktop.py" <<'DESKTOPUIEOF'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
@@ -4752,7 +5819,7 @@ from PySide6.QtWidgets import (
 APP_NAME = "Onionmind"
 APP_ID = "OnionmindDesktop"
 MODULE_DIR = Path(__file__).resolve().parent
-ACCENT = "#8d6aa0"
+ACCENT = "#9184d9"
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_TEXT_FILE_BYTES = 64 * 1024
@@ -4764,141 +5831,262 @@ SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "dist", "bu
 _SCREENSHOT_PATH: Optional[str] = None
 
 
+# Nocturne: the workbench palette (dark first, plus the light ramp the
+# appearance feature switches to). Ramps run 100 = lightest in dark and are
+# reversed in light, so "n400" means the same contrast step in both themes.
+NOCTURNE_DARK: dict[str, str] = {
+    "bg": "#161826", "surface": "#232532", "text": "#e9e9ed", "accent": "#9184d9",
+    "n100": "#f3f5fe", "n200": "#e4e7f5", "n300": "#cfd3e5", "n400": "#b2b6ca", "n500": "#9397ab",
+    "n600": "#75798c", "n700": "#595d6c", "n800": "#3f424d", "n900": "#292b31",
+    "a100": "#f5f4ff", "a200": "#e7e5fe", "a300": "#d2cefd", "a400": "#b5abfc", "a500": "#968ae0",
+    "a600": "#796cbf", "a700": "#5d5294", "a800": "#423a6a", "a900": "#2b2741",
+    # oklch(0.76 0.11 155), oklch(0.80 0.11 80), oklch(0.72 0.13 30) in sRGB
+    "good": "#74c692", "warn": "#e3b667", "bad": "#eb8373",
+}
+NOCTURNE_LIGHT: dict[str, str] = {
+    "bg": "#f2f3f8", "surface": "#fbfbfe", "text": "#1d1f2b", "accent": "#6b5fc0",
+    "n100": "#292b31", "n200": "#3f424d", "n300": "#4a4e5c", "n400": "#5f6373", "n500": "#75798c",
+    "n600": "#9397ab", "n700": "#c4c8d8", "n800": "#dcdfec", "n900": "#e8eaf4",
+    "a100": "#2b2741", "a200": "#423a6a", "a300": "#5d5294", "a400": "#796cbf", "a500": "#968ae0",
+    "a600": "#b5abfc", "a700": "#d2cefd", "a800": "#e1ddfd", "a900": "#ecebfd",
+    "good": "#2f8a55", "warn": "#9a6a12", "bad": "#b8483a",
+}
+_PALETTE: dict[str, str] = dict(NOCTURNE_DARK)
+
+
+def _mix(first: str, second: str, weight: float) -> str:
+    """first blended over second: weight 1.0 is all first. Solid hex, so Qt
+    style sheets get the same colour a CSS color-mix() would paint."""
+    a = QColor(first)
+    b = QColor(second)
+    w = max(0.0, min(1.0, weight))
+    return QColor(
+        round(a.red() * w + b.red() * (1 - w)),
+        round(a.green() * w + b.green() * (1 - w)),
+        round(a.blue() * w + b.blue() * (1 - w)),
+    ).name()
+
+
+def theme_tokens(palette: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Semantic roles over the palette - the only colours the sheet uses."""
+    p = palette or _PALETTE
+    bg, surface, text, accent = p["bg"], p["surface"], p["text"], p["accent"]
+    dark = QColor(bg).lightness() < 128
+    control = _mix(surface, bg, 0.55)
+    return {
+        "bg": bg,
+        "pane": _mix(surface, bg, 0.35),
+        "deep": _mix(bg, "#000000", 0.82) if dark else _mix(bg, "#ffffff", 0.6),
+        "composer": _mix(surface, bg, 0.5),
+        "card": surface,
+        "tool": _mix(surface, bg, 0.6),
+        "field": _mix(surface, bg, 0.7),
+        "line": _mix(text, bg, 0.16),
+        "line_soft": _mix(text, bg, 0.10),
+        "line_strong": _mix(text, bg, 0.30),
+        "text": text,
+        "strong": p["n100"] if dark else text,
+        "muted": p["n400"],
+        "faint": p["n500"],
+        "disabled": p["n600"],
+        "control": control,
+        "control_hover": _mix(text, control, 0.07),
+        "control_pressed": _mix(text, control, 0.14),
+        "accent": accent,
+        "accent_text": p["a300"],
+        "accent_hover": _mix(accent, bg, 0.12),
+        "accent_pressed": _mix(accent, bg, 0.22),
+        "accent_line": _mix(accent, bg, 0.5),
+        "selection": _mix(accent, bg, 0.30),
+        "on_accent": p["a100"] if dark else "#ffffff",
+        "avatar_user": p["a600"] if dark else accent,
+        "scroll": p["n800"],
+        "scroll_hover": p["n700"],
+        "good": p["good"], "warn": p["warn"], "bad": p["bad"],
+        "good_bg": _mix(p["good"], bg, 0.12), "good_line": _mix(p["good"], bg, 0.45),
+        "warn_bg": _mix(p["warn"], bg, 0.12), "warn_line": _mix(p["warn"], bg, 0.45),
+        "bad_bg": _mix(p["bad"], bg, 0.12), "bad_line": _mix(p["bad"], bg, 0.45),
+        "icon": p["n300"] if dark else p["n300"],
+    }
+
+
+def set_theme(name: str) -> None:
+    """Switch the process palette; callers then rebuild the sheet and icons."""
+    _PALETTE.clear()
+    _PALETTE.update(NOCTURNE_LIGHT if name == "light" else NOCTURNE_DARK)
+
+
+def current_theme() -> str:
+    return "light" if _PALETTE.get("bg") == NOCTURNE_LIGHT["bg"] else "dark"
+
+
 _STYLE_TEMPLATE = r"""
 * {
-    color: #eee8df;
+    color: @text@;
 }
-QMainWindow, QDialog { background: #181715; }
-QWidget#windowRoot, QWidget#centerPane, QWidget#transcriptViewport { background: #191816; }
-QWidget#toolbar { background: #1c1b19; border-bottom: 1px solid #37342f; }
-QWidget#leftRail { background: #1d1c1a; border-right: 1px solid #37342f; }
-QWidget#inspector { background: #1c1b19; border-left: 1px solid #37342f; }
-QFrame#terminalPane { background: #171615; border-top: 1px solid #403c36; }
-QFrame#composerFrame { background: #211f1d; border-top: 1px solid #403c36; }
-QFrame#card { background: #23211f; border: 1px solid #403c36; border-radius: 5px; }
-QFrame#toolCard { background: #1e1d1b; border: 1px solid #423e38; border-radius: 5px; }
-QFrame#modeSwitch { background: #191816; border: 1px solid #403c36; border-radius: 4px; }
-QFrame#separator { background: #3b3833; min-width: 1px; max-width: 1px; }
+QMainWindow, QDialog { background: @bg@; }
+QWidget#windowRoot, QWidget#centerPane, QWidget#transcriptViewport { background: @bg@; }
+QWidget#toolbar { background: @pane@; border-bottom: 1px solid @line@; }
+QWidget#leftRail { background: @pane@; border-right: 1px solid @line@; }
+QWidget#inspector { background: @pane@; border-left: 1px solid @line@; }
+QFrame#terminalPane { background: @deep@; border-top: 1px solid @line@; }
+QFrame#composerFrame { background: @composer@; border-top: 1px solid @line@; }
+QFrame#card { background: @card@; border: 1px solid @line@; border-radius: 12px; }
+QFrame#toolCard { background: @tool@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#modeSwitch { background: @bg@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#separator { background: @line@; min-width: 1px; max-width: 1px; }
+QFrame#railDivider { color: @line@; }
+QFrame#statusPill { background: @control@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#amberCard { background: @warn_bg@; border: 1px solid @warn_line@; border-radius: 12px; }
+QFrame#errorCard { background: @bad_bg@; border: 1px solid @bad_line@; border-radius: 12px; }
+QFrame#popover { background: @card@; border: 1px solid @line_strong@; border-radius: 12px; }
+QFrame#banner { background: @card@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#chip { background: transparent; border: 1px solid @line@; border-radius: 8px; }
+QFrame#boundaryPanel { background: @pane@; border-bottom: 1px solid @line@; }
+QFrame#zoneMachine { background: @card@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#zoneOutside { background: transparent; border: 1px solid @line@; border-radius: 8px; }
+QWidget#overlay { background: @bg@; }
+QWidget#faultHost { background: transparent; }
 QScrollArea#settingsPage { background: transparent; border: none; }
 QScrollArea#settingsPage > QWidget > QWidget { background: transparent; }
 QLabel { background: transparent; }
-QLabel#brand { color: #f5efe7; font-size: @BRAND_PT@; font-weight: 650; }
-QLabel#sectionTitle { color: #aaa39a; font-size: @LABEL_PT@; font-weight: 650; }
-QLabel#muted, QLabel#meta, QLabel#disclosure { color: #aaa39a; }
-QLabel#title { color: #f2ece4; font-weight: 650; }
-QLabel#avatarUser { background: #74579a; color: #f9f5ef; border-radius: 16px; font-weight: 650; }
-QLabel#avatarAssistant { background: #282327; color: #b791c9; border: 1px solid #624c6c; border-radius: 16px; font-weight: 700; }
-QLabel#attachmentLabel { color: #cdbbd5; background: #2c252e; border: 1px solid #493d4e; border-radius: 3px; padding: 3px 7px; }
-QLabel#success { color: #84c08f; }
-QLabel#danger { color: #d88675; }
-QLabel#accent { color: #c3a1d3; }
-QLabel#thinkingLabel { color: #c9c1b7; }
+QLabel#brand { color: @strong@; font-size: @BRAND_PT@; font-weight: 500; }
+QLabel#sectionTitle { color: @faint@; font-size: @LABEL_PT@; font-weight: 500; }
+QLabel#muted, QLabel#meta, QLabel#disclosure { color: @muted@; }
+QLabel#title { color: @strong@; font-weight: 500; }
+QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 600; }
+QLabel#avatarAssistant { background: @card@; color: @accent_text@; border: 1px solid @accent_line@; border-radius: 16px; font-weight: 700; }
+QLabel#attachmentLabel { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 3px 7px; }
+QLabel#success { color: @good@; }
+QLabel#danger { color: @bad@; }
+QLabel#warning { color: @warn@; }
+QLabel#accent { color: @accent_text@; }
+QLabel#thinkingLabel { color: @muted@; }
+QLabel#chipLabel { color: @muted@; }
+QLabel#kbd { color: @muted@; background: @control@; border: 1px solid @line@; border-radius: 4px; padding: 1px 6px; }
 QPushButton, QToolButton, QComboBox, QLineEdit {
-    background: #24221f;
-    border: 1px solid #45413b;
-    border-radius: 4px;
+    background: @control@;
+    border: 1px solid @line@;
+    border-radius: 8px;
     padding: 5px 9px;
     min-height: 18px;
 }
-QPushButton:hover, QToolButton:hover, QComboBox:hover { background: #2c2926; border-color: #5a554d; }
-QPushButton:pressed, QToolButton:pressed { background: #191816; }
-QPushButton:disabled, QToolButton:disabled { color: #6f6961; background: #211f1d; border-color: #37342f; }
+QPushButton:hover, QToolButton:hover, QComboBox:hover { background: @control_hover@; border-color: @line_strong@; }
+QPushButton:pressed, QToolButton:pressed { background: @control_pressed@; }
+QPushButton:disabled, QToolButton:disabled { color: @disabled@; background: @control@; border-color: @line_soft@; }
 QPushButton:focus, QToolButton:focus, QComboBox:focus, QLineEdit:focus,
 QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTreeWidget:focus, QTabWidget:focus {
-    border: 1px solid #a481b4;
+    border: 2px solid @accent@;
 }
-QPushButton#primaryButton { background: #5c4566; border-color: #765984; color: #faf6f0; font-weight: 600; padding-left: 17px; padding-right: 17px; }
-QPushButton#primaryButton:hover { background: #684e73; border-color: #8a6b98; }
-QPushButton#primaryButton:disabled { background: #2b2729; border-color: #403a3f; color: #777078; }
-QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: #b8b1a8; }
-QPushButton#modeButton:checked { background: #47364f; color: #f5edf8; border: 1px solid #684f73; }
+QPushButton#primaryButton { background: transparent; border: 1px solid @accent@; color: @accent@; font-weight: 500; padding-left: 17px; padding-right: 17px; }
+QPushButton#primaryButton:hover { background: @accent_hover@; }
+QPushButton#primaryButton:pressed { background: @accent_pressed@; }
+QPushButton#primaryButton:focus { border: 2px solid @accent@; }
+QPushButton#primaryButton:disabled { background: transparent; border-color: @line@; color: @disabled@; }
+QPushButton#dangerButton { background: transparent; border: 1px solid @bad@; color: @bad@; }
+QPushButton#dangerButton:hover { background: @bad_bg@; }
+QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: @muted@; }
+QPushButton#modeButton:checked { background: @accent_pressed@; color: @strong@; border: 1px solid @accent_line@; }
 QPushButton#railAction { text-align: left; background: transparent; border-color: transparent; padding: 7px 9px; }
-QPushButton#railAction:hover { background: #292724; border-color: #3f3b36; }
+QPushButton#railAction:hover { background: @control_hover@; border-color: @line@; }
+QPushButton#linkButton { background: transparent; border-color: transparent; color: @accent@; padding: 2px 6px; }
+QPushButton#linkButton:hover { background: @accent_hover@; }
+QPushButton#chipButton { background: transparent; border: 1px solid @line@; border-radius: 8px; color: @muted@; padding: 2px 9px; }
+QPushButton#chipButton:hover { background: @control_hover@; color: @text@; }
+QPushButton#paletteRow { text-align: left; background: transparent; border-color: transparent; padding: 7px 10px; }
+QPushButton#paletteRow:hover, QPushButton#paletteRow[current="true"] { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton { background: transparent; border-color: transparent; padding: 4px; }
-QToolButton#bareButton:hover { background: #2a2825; border-color: #403c37; }
-QToolButton#bareButton:checked { background: #3a3040; border-color: #684f73; }
+QToolButton#bareButton:hover { background: @control_hover@; border-color: @line@; }
+QToolButton#bareButton:checked { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton:disabled { background: transparent; border-color: transparent; }
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #262421; border: 1px solid #4a453f; selection-background-color: #46384b; selection-color: #f5efe7; outline: 0; }
-QMenu { background: #24221f; border: 1px solid #4a453f; padding: 4px; }
-QMenu::item { border-radius: 3px; padding: 6px 26px 6px 9px; }
-QMenu::item:selected { background: #3a3040; color: #f5edf8; }
-QMenu::item:disabled { color: #746e67; }
-QMenu::separator { height: 1px; background: #403c36; margin: 4px 7px; }
-QListWidget, QTreeWidget {
+QComboBox QAbstractItemView { background: @card@; border: 1px solid @line_strong@; selection-background-color: @selection@; selection-color: @strong@; outline: 0; }
+QMenu { background: @card@; border: 1px solid @line_strong@; padding: 4px; }
+QMenu::item { border-radius: 6px; padding: 6px 26px 6px 9px; }
+QMenu::item:selected { background: @accent_hover@; color: @strong@; }
+QMenu::item:disabled { color: @disabled@; }
+QMenu::separator { height: 1px; background: @line@; margin: 4px 7px; }
+QListWidget, QTreeWidget, QTableWidget {
     background: transparent;
     border: none;
     outline: 0;
-    alternate-background-color: #211f1d;
+    alternate-background-color: @field@;
 }
-QListWidget::item, QTreeWidget::item { border-radius: 3px; padding: 5px; }
-QListWidget::item:hover, QTreeWidget::item:hover { background: #292724; }
-QListWidget::item:selected, QTreeWidget::item:selected { background: #3a3040; color: #f5edf8; }
+QListWidget::item, QTreeWidget::item { border-radius: 6px; padding: 5px; }
+QListWidget::item:hover, QTreeWidget::item:hover { background: @control_hover@; }
+QListWidget::item:selected, QTreeWidget::item:selected { background: @accent_hover@; color: @strong@; }
+QHeaderView::section { background: @pane@; color: @faint@; border: none; border-bottom: 1px solid @line@; padding: 5px 7px; }
+QTableWidget { gridline-color: @line_soft@; }
 QTreeWidget::branch { background: transparent; }
-QTreeView::indicator { width: 13px; height: 13px; border: 1px solid #625b53; border-radius: 2px; background: #1a1917; }
-QTreeView::indicator:hover { border-color: #a98abb; }
-QTreeView::indicator:checked { border-color: #a98abb; background: #7b5b8a; }
+QTreeView::indicator { width: 13px; height: 13px; border: 1px solid @line_strong@; border-radius: 3px; background: @field@; }
+QTreeView::indicator:hover { border-color: @accent@; }
+QTreeView::indicator:checked { border-color: @accent@; background: @accent@; }
 QTextEdit, QPlainTextEdit {
-    background: #191816;
-    border: 1px solid #403c36;
-    border-radius: 4px;
-    selection-background-color: #624d6d;
-    selection-color: #fffaf5;
+    background: @field@;
+    border: 1px solid @line@;
+    border-radius: 8px;
+    selection-background-color: @selection@;
+    selection-color: @strong@;
     padding: 7px;
 }
-QTextEdit#composer { background: #24211f; border: 1px solid #4a453e; padding: 10px; }
-QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView {
+QTextEdit#composer { background: @field@; border: 1px solid @line@; padding: 10px; }
+QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView, QPlainTextEdit#runOutput {
     font-family: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: @MONO_PT@;
-    background: #171615;
+    background: @deep@;
     border: none;
     border-radius: 0;
     padding: 7px 10px;
 }
-QLineEdit#terminalInput { font-family: "Cascadia Mono", "Consolas", monospace; background: #1b1a18; border-color: #3f3b36; }
-QTabWidget::pane { border: none; border-top: 1px solid #38352f; top: -1px; }
-QTabBar::tab { background: transparent; color: #b7b0a7; padding: 12px 16px 10px 16px; border-bottom: 2px solid transparent; }
-QTabBar::tab:hover { color: #eee8df; }
-QTabBar::tab:selected { color: #f5efe8; border-bottom-color: #9570a7; }
-QCheckBox { spacing: 7px; color: #c8c0b7; }
-QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #5b554e; background: #1a1917; border-radius: 3px; }
-QCheckBox::indicator:checked { background: #86659a; border-color: #a17bb6; }
-QProgressBar { background: #191816; border: 1px solid #403c36; border-radius: 3px; text-align: center; min-height: 18px; }
-QProgressBar::chunk { background: #80608f; }
-QSplitter::handle { background: #37342f; }
-QSplitter::handle:hover { background: #71557c; }
-QStatusBar { background: #151412; border-top: 1px solid #35322d; color: #9f988f; }
+QLineEdit#terminalInput { font-family: "Cascadia Mono", "Consolas", monospace; background: @deep@; border-color: @line@; }
+QTabWidget::pane { border: none; border-top: 1px solid @line@; top: -1px; }
+QTabBar::tab { background: transparent; color: @muted@; padding: 12px 16px 10px 16px; border-bottom: 2px solid transparent; }
+QTabBar::tab:hover { color: @text@; }
+QTabBar::tab:selected { color: @strong@; border-bottom-color: @accent@; }
+QCheckBox { spacing: 7px; color: @text@; }
+QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid @line_strong@; background: @field@; border-radius: 4px; }
+QCheckBox::indicator:checked { background: @accent@; border-color: @accent@; }
+QCheckBox:focus { color: @strong@; }
+QRadioButton { spacing: 7px; color: @text@; }
+QProgressBar { background: @field@; border: 1px solid @line@; border-radius: 6px; text-align: center; min-height: 18px; }
+QProgressBar::chunk { background: @accent@; border-radius: 5px; }
+QProgressBar#meter { background: @line@; border: none; border-radius: 2px; min-height: 4px; max-height: 4px; }
+QProgressBar#meter::chunk { background: @accent@; border-radius: 2px; }
+QProgressBar#meter[level="warn"]::chunk { background: @warn@; }
+QSplitter::handle { background: @line@; }
+QSplitter::handle:hover { background: @accent_line@; }
+QStatusBar { background: @pane@; border-top: 1px solid @line@; color: @faint@; }
 QStatusBar::item { border: none; }
-QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #b7b0a7; padding: 2px 8px; }
-QPushButton#updateStatus:hover { background: #1d1b19; border-color: #4a453e; color: #f5efe8; }
-QPushButton#updateStatus[attention="true"] { background: #71557c; border: 1px solid #a17bb6; border-radius: 4px; color: #faf6fd; font-weight: 600; padding: 2px 12px; }
-QPushButton#updateStatus[attention="true"]:hover { background: #86659a; }
+QPushButton#updateStatus { background: transparent; border: 1px solid transparent; border-radius: 8px; color: @muted@; padding: 2px 8px; }
+QPushButton#updateStatus:hover { background: @control_hover@; border-color: @line@; color: @strong@; }
+QPushButton#updateStatus[attention="true"] { background: @accent_pressed@; border: 1px solid @accent@; border-radius: 8px; color: @strong@; font-weight: 600; padding: 2px 12px; }
+QPushButton#updateStatus[attention="true"]:hover { background: @accent_hover@; }
 QPushButton#torStatusAction {
-    background: #211f1c;
-    border: 1px solid #514b44;
-    border-radius: 7px;
-    color: #c8c0b7;
-    font-weight: 600;
+    background: @control@;
+    border: 1px solid @line_strong@;
+    border-radius: 12px;
+    color: @text@;
+    font-weight: 500;
     min-width: 116px;
     min-height: 36px;
     padding: 2px 10px 2px 3px;
     text-align: left;
 }
-QPushButton#torStatusAction[torState="ready"] { background: #1d2720; border-color: #527c5c; color: #a9d4b2; }
-QPushButton#torStatusAction[torState="checking"] { background: #292318; border-color: #806a40; color: #dfbf7d; }
-QPushButton#torStatusAction[torState="error"] { background: #2b1f1c; border-color: #8d574d; color: #e49a89; }
-QPushButton#torStatusAction:hover { background: #2e2b27; border-color: #81786e; }
-QPushButton#torStatusAction:focus { background: #24221f; border-color: #a481b4; }
-QPushButton#torStatusAction:pressed { background: #191816; border-color: #b793c6; }
-QPushButton#torStatusAction:disabled { background: #1c1a18; border-color: #3d3934; color: #817982; }
-QScrollBar:vertical { background: #191816; width: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #49443e; min-height: 30px; border-radius: 4px; margin: 2px; }
-QScrollBar::handle:vertical:hover { background: #5b554e; }
+QPushButton#torStatusAction[torState="ready"] { background: @good_bg@; border-color: @good_line@; color: @good@; }
+QPushButton#torStatusAction[torState="checking"] { background: @warn_bg@; border-color: @warn_line@; color: @warn@; }
+QPushButton#torStatusAction[torState="error"] { background: @bad_bg@; border-color: @bad_line@; color: @bad@; }
+QPushButton#torStatusAction:hover { background: @control_hover@; border-color: @line_strong@; }
+QPushButton#torStatusAction:focus { border: 2px solid @accent@; }
+QPushButton#torStatusAction:pressed { background: @control_pressed@; border-color: @accent@; }
+QPushButton#torStatusAction:disabled { background: @control@; border-color: @line_soft@; color: @disabled@; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+QScrollBar::handle:vertical { background: @scroll@; min-height: 30px; border-radius: 4px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: @scroll_hover@; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar:horizontal { background: #191816; height: 10px; }
-QScrollBar::handle:horizontal { background: #49443e; min-width: 30px; border-radius: 4px; margin: 2px; }
-QToolTip { background: #2a2825; color: #f2ece4; border: 1px solid #514c45; padding: 5px; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:horizontal { background: @scroll@; min-width: 30px; border-radius: 4px; margin: 2px; }
+QToolTip { background: @card@; color: @strong@; border: 1px solid @line_strong@; padding: 5px; }
 """
 
 
@@ -4907,14 +6095,18 @@ def build_style_sheet(scale: float = 1.0) -> str:
 
     Every other rule inherits the application font, which apply_text_scale
     scales from the captured platform base - so one knob moves all text
-    without a second size system.
+    without a second size system. Colours come from the current palette's
+    semantic roles (theme_tokens), so a theme switch is one rebuild.
     """
     scale = max(0.75, min(1.5, float(scale)))
-    return (
+    sheet = (
         _STYLE_TEMPLATE.replace("@BRAND_PT@", f"{11 * scale:g}pt")
         .replace("@LABEL_PT@", f"{8.5 * scale:g}pt")
         .replace("@MONO_PT@", f"{9 * scale:g}pt")
     )
+    for name, value in sorted(theme_tokens().items(), key=lambda item: -len(item[0])):
+        sheet = sheet.replace(f"@{name}@", value)
+    return sheet
 
 
 STYLE_SHEET = build_style_sheet(1.0)
@@ -5190,8 +6382,9 @@ def _friendly_error(core: Any, exc: BaseException) -> str:
     return _brand_runtime_text(text)
 
 
-def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
+def _icon(name: str, size: int = 18, color: Optional[str] = None) -> QIcon:
     """Render Onionmind's compact, platform-neutral monochrome icon language."""
+    color = color or theme_tokens()["icon"]
     canvas = QPixmap(size, size)
     canvas.fill(Qt.GlobalColor.transparent)
     painter = QPainter(canvas)
@@ -5300,6 +6493,76 @@ def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
             line(5, 7, 7.2, 9)
             line(7.2, 9, 5, 11)
             line(9.2, 11, 12.5, 11)
+    elif name == "sparkle":
+        for x1, y1, x2, y2 in ((9, 2.5, 9, 6), (9, 12, 9, 15.5), (2.5, 9, 6, 9), (12, 9, 15.5, 9)):
+            line(x1, y1, x2, y2)
+        line(6, 6, 7.4, 7.4)
+        line(12, 12, 10.6, 10.6)
+        line(12, 6, 10.6, 7.4)
+        line(6, 12, 7.4, 10.6)
+    elif name == "lock":
+        box(4, 8, 10, 7.5, 1.4)
+        painter.drawArc(QRectF(5.8, 3, 6.4, 8), 0, 180 * 16)
+        line(9, 10.8, 9, 12.6)
+    elif name == "search":
+        painter.drawEllipse(QRectF(3, 3, 9, 9))
+        line(10.8, 10.8, 15, 15)
+    elif name == "cpu":
+        box(5, 5, 8, 8, 1)
+        for offset in (7, 9, 11):
+            line(offset, 2.5, offset, 5)
+            line(offset, 13, offset, 15.5)
+            line(2.5, offset, 5, offset)
+            line(13, offset, 15.5, offset)
+    elif name == "shield":
+        path = QPainterPath(QPointF(9, 2.5))
+        path.lineTo(14.5, 4.5)
+        path.cubicTo(14.5, 10, 12.5, 13.5, 9, 15.5)
+        path.cubicTo(5.5, 13.5, 3.5, 10, 3.5, 4.5)
+        path.closeSubpath()
+        painter.drawPath(path)
+    elif name == "globe":
+        painter.drawEllipse(QRectF(2.5, 2.5, 13, 13))
+        painter.drawEllipse(QRectF(6, 2.5, 6, 13))
+        line(2.8, 9, 15.2, 9)
+    elif name == "copy":
+        box(6, 6, 9, 9.5, 1.2)
+        line(3.5, 12, 3.5, 3.5)
+        line(3.5, 3.5, 11, 3.5)
+    elif name == "regenerate":
+        painter.drawArc(QRectF(3, 3, 12, 12), 60 * 16, 300 * 16)
+        line(12.6, 2.6, 12.2, 5.6)
+        line(12.2, 5.6, 15.1, 6)
+    elif name == "branch":
+        painter.drawEllipse(QRectF(3.5, 2.5, 3.5, 3.5))
+        painter.drawEllipse(QRectF(3.5, 12, 3.5, 3.5))
+        painter.drawEllipse(QRectF(11, 5, 3.5, 3.5))
+        line(5.25, 6, 5.25, 12)
+        painter.drawArc(QRectF(5.25, 4, 7.5, 7.5), 180 * 16, 90 * 16)
+    elif name == "revert":
+        line(3.5, 7, 7, 3.5)
+        line(3.5, 7, 7, 10.5)
+        path = QPainterPath(QPointF(3.8, 7))
+        path.lineTo(11, 7)
+        path.cubicTo(15.5, 7, 15.5, 14.5, 11, 14.5)
+        path.lineTo(7, 14.5)
+        painter.drawPath(path)
+    elif name == "keyboard":
+        box(2, 5, 14, 9, 1.4)
+        for x in (5, 8, 11):
+            line(x, 8, x + 0.4, 8)
+        line(5.5, 11, 12.5, 11)
+    elif name == "warning":
+        path = QPainterPath(QPointF(9, 2.5))
+        path.lineTo(16, 15)
+        path.lineTo(2, 15)
+        path.closeSubpath()
+        painter.drawPath(path)
+        line(9, 7, 9, 10.5)
+        line(9, 12.6, 9, 12.8)
+    elif name == "check":
+        line(3.5, 9.5, 7.5, 13.5)
+        line(7.5, 13.5, 14.5, 4.5)
     elif name == "attach":
         path = QPainterPath(QPointF(6.2, 8.2))
         path.cubicTo(6.2, 4.2, 11.8, 4.2, 11.8, 8.2)
@@ -5316,13 +6579,57 @@ def _icon(name: str, size: int = 18, color: str = "#c9c1b7") -> QIcon:
     return QIcon(canvas)
 
 
+_ICON_ROLE = int(Qt.ItemDataRole.UserRole) + 7
+
+
+def _themed_icon(target: Any, name: str, size: int = 18) -> Any:
+    """Set an authored icon and remember which, so a theme switch can redraw it.
+
+    Widgets and actions keep the name as a property; list items (not
+    QObjects) keep it in a data role."""
+    spec = f"{name}:{size}"
+    if hasattr(target, "setProperty"):
+        target.setProperty("omIcon", spec)
+    elif hasattr(target, "setData"):
+        target.setData(_ICON_ROLE, spec)
+    target.setIcon(_icon(name, size))
+    return target
+
+
+def _retheme_icons(root: QWidget) -> None:
+    from PySide6.QtCore import QObject as _QObject
+
+    def redraw(holder: Any, spec: Any) -> None:
+        if spec:
+            name, _, size = _as_text(spec).partition(":")
+            holder.setIcon(_icon(name, int(size or 18)))
+
+    for child in root.findChildren(_QObject):
+        if hasattr(child, "setIcon") and hasattr(child, "property"):
+            redraw(child, child.property("omIcon"))
+        if isinstance(child, QListWidget):
+            for row in range(child.count()):
+                item = child.item(row)
+                redraw(item, item.data(_ICON_ROLE))
+        if isinstance(child, QTreeWidget):
+            pending = [child.topLevelItem(i) for i in range(child.topLevelItemCount())]
+            while pending:
+                node = pending.pop()
+                spec = node.data(0, _ICON_ROLE)
+                if spec:
+                    name, _, size = _as_text(spec).partition(":")
+                    node.setIcon(0, _icon(name, int(size or 18)))
+                pending.extend(node.child(i) for i in range(node.childCount()))
+
+
 def _tor_control_icon(state: str, angle: int = 0, size: int = 36) -> QIcon:
     """Render one clean 1B-style power target or one verification spinner."""
+    tokens = theme_tokens()
     colors = {
-        "off": ("#3a3733", "#ddd5cc"),
-        "ready": ("#4f7c5a", "#ffffff"),
-        "checking": ("#453b2b", "#f0c97e"),
-        "error": ("#633a33", "#ffd2c8"),
+        "off": (tokens["line_strong"], tokens["strong"]),
+        "ready": (_mix(tokens["good"], "#000000", 0.62), "#ffffff"),
+        "checking": (tokens["warn_line"], tokens["warn"]),
+        "error": (tokens["bad_line"], "#ffffff"),
     }
     fill, ink = colors.get(state, colors["off"])
     canvas = QPixmap(size, size)
@@ -5383,6 +6690,10 @@ def _register_system_fonts(app: QApplication) -> None:
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
     ]
     ui_family = ""
+    # Nocturne's face is Inter at weight 500 for headings. It is not bundled,
+    # so it wins only where the system already has it.
+    if "Inter" in QFontDatabase.families():
+        ui_family = "Inter"
     for path in candidates:
         if not path.is_file():
             continue
@@ -5458,9 +6769,9 @@ class SafeWorker:
 
 
 class StatusDot(QWidget):
-    def __init__(self, color: str = "#a39b91", parent: Optional[QWidget] = None) -> None:
+    def __init__(self, color: Optional[str] = None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._color = QColor(color)
+        self._color = QColor(color or theme_tokens()["faint"])
         self.setFixedSize(10, 10)
         self.setAccessibleName("Status indicator")
 
@@ -5477,22 +6788,29 @@ class StatusDot(QWidget):
         painter.drawEllipse(2, 2, 6, 6)
 
 
+class _StateColors:
+    """StatusPill.COLORS, read from the live palette so a theme switch repaints."""
+
+    _ROLES = {"good": "good", "warn": "warn", "bad": "bad", "idle": "faint", "busy": "accent"}
+
+    def get(self, state: str, default: Any = None) -> Any:
+        role = self._ROLES.get(state)
+        return theme_tokens()[role] if role else default
+
+    def __getitem__(self, state: str) -> str:
+        return theme_tokens()[self._ROLES[state]]
+
+
 class StatusPill(QFrame):
     clicked = Signal()
 
-    COLORS = {
-        "good": "#78b889",
-        "warn": "#c9a36b",
-        "bad": "#d47d6b",
-        "idle": "#8e8880",
-        "busy": "#a98abb",
-    }
+    COLORS = _StateColors()
 
     def __init__(self, prefix: str, text: str, state: str = "idle", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.prefix = prefix
         self.setObjectName("statusPill")
-        self.setStyleSheet("QFrame#statusPill { background:#211f1d; border:1px solid #403c36; border-radius:4px; }")
+        self._state = state
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(5)
@@ -5506,9 +6824,13 @@ class StatusPill(QFrame):
         self.setAccessibleName(f"{prefix} status: {text}")
 
     def set_status(self, text: str, state: str = "idle") -> None:
+        self._state = state
         self.label.setText(text)
         self.dot.set_color(self.COLORS.get(state, self.COLORS["idle"]))
         self.setAccessibleName(f"{self.prefix} status: {text}")
+
+    def refresh_theme(self) -> None:
+        self.dot.set_color(self.COLORS.get(self._state, self.COLORS["idle"]))
 
     def make_clickable(self) -> None:
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5626,6 +6948,13 @@ class StatusActionButton(QPushButton):
         super().hideEvent(event)
 
 
+def _v2(host: Any, name: str, *args: Any, default: Any = None) -> Any:
+    """Call a v2 hook when the host has it. Core paths (chat, Tor) are also
+    driven on minimal hosts by the original tests; v2 must not be required."""
+    hook = getattr(host, name, None)
+    return hook(*args) if callable(hook) else default
+
+
 def _tor_is_enabled(core: Any) -> bool:
     getter = getattr(core, "tor_enabled", None)
     if not callable(getter):
@@ -5681,6 +7010,31 @@ def set_motion_override(reduce_motion: str) -> None:
         _MOTION_OVERRIDE = None
 
 
+# v2 keyboard: also follow the reduced-motion setting of GNOME and macOS,
+# which the original only read on Windows. None = not probed yet.
+_SYSTEM_MOTION_PROBE = False
+_SYSTEM_REDUCES_MOTION: Optional[bool] = None
+
+
+def set_system_motion_probe(on: bool) -> None:
+    global _SYSTEM_MOTION_PROBE
+    _SYSTEM_MOTION_PROBE = bool(on)
+
+
+def _system_reduces_motion() -> bool:
+    """GNOME's enable-animations / macOS reduceMotion, read once."""
+    global _SYSTEM_REDUCES_MOTION
+    if _SYSTEM_REDUCES_MOTION is None:
+        command = (["defaults", "read", "com.apple.universalaccess", "reduceMotion"] if sys.platform == "darwin"
+                   else ["gsettings", "get", "org.gnome.desktop.interface", "enable-animations"])
+        try:
+            output = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout.strip().lower()
+        except (OSError, subprocess.SubprocessError):
+            output = ""
+        _SYSTEM_REDUCES_MOTION = output == "1" if sys.platform == "darwin" else output == "false"
+    return _SYSTEM_REDUCES_MOTION
+
+
 def _ui_animations_enabled() -> bool:
     if _MOTION_OVERRIDE is not None:
         return _MOTION_OVERRIDE
@@ -5688,7 +7042,7 @@ def _ui_animations_enabled() -> bool:
     if override in {"1", "true", "yes", "on"}:
         return False
     if os.name != "nt":
-        return True
+        return not (_SYSTEM_MOTION_PROBE and _system_reduces_motion())
     try:
         import ctypes
 
@@ -5748,7 +7102,8 @@ class ThinkingDots(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         for index, x in enumerate((6, 17, 28)):
             active = index == self._frame
-            painter.setBrush(QColor("#b791c9" if active else "#625b63"))
+            tokens = theme_tokens()
+            painter.setBrush(QColor(tokens["accent"] if active else tokens["line_strong"]))
             radius = 3.0 if active else 2.5
             painter.drawEllipse(QPointF(float(x), 8.0), radius, radius)
 
@@ -5913,7 +7268,36 @@ class MessageBlock(QWidget):
         self.thinking = ThinkingIndicator(self)
         column.addWidget(self.thinking)
         column.addWidget(self.body)
+        # v2 msgActions: built on demand, shown only while the feature is on.
+        self.message_index: Optional[int] = None
+        self.actions_row: Optional[QWidget] = None
+        self._column = column
         outer.addLayout(column, 1)
+
+    def set_actions(self, actions: list[tuple[str, str, Callable[[], None]]]) -> None:
+        """(label, icon, callback) buttons under the message; [] hides them."""
+        if self.actions_row is not None:
+            self._column.removeWidget(self.actions_row)
+            self.actions_row.deleteLater()
+            self.actions_row = None
+        if not actions:
+            self._sync_body_height()
+            return
+        row = QWidget(self)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        for label, icon, callback in actions:
+            button = QPushButton(label)
+            button.setObjectName("chipButton")
+            button.setIcon(_icon(icon, 14))
+            button.setAccessibleName(f"{label} this message")
+            button.clicked.connect(lambda _checked=False, run=callback: run())
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self._column.addWidget(row)
+        self.actions_row = row
+        self.updateGeometry()
 
     @property
     def text(self) -> str:
@@ -6042,6 +7426,52 @@ class TranscriptView(QScrollArea):
         self._scroll_later()
         return block
 
+    def remove_message(self, block: Optional["MessageBlock"]) -> None:
+        if block is None:
+            return
+        if block in self._message_blocks:
+            self._message_blocks.remove(block)
+        self.layout.removeWidget(block)
+        block.hide()
+        block.deleteLater()
+
+    def add_widget(self, widget: QWidget, indent: int = 44) -> QWidget:
+        """A v2 card (webAsk, approval, provenance) aligned with message copy."""
+        holder = QWidget()
+        holder_layout = QHBoxLayout(holder)
+        holder_layout.setContentsMargins(indent, 0, 0, 12)
+        holder_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignLeft)
+        holder_layout.addStretch(1)
+        widget.setMaximumWidth(max(320, self.viewport().width() - indent - 96))
+        self.layout.addWidget(holder)
+        self._scroll_later()
+        return holder
+
+    def remove_widget(self, holder: Optional[QWidget]) -> None:
+        if holder is None:
+            return
+        self.layout.removeWidget(holder)
+        holder.hide()
+        holder.deleteLater()
+
+    def add_timeline_step(self, title: str, detail: str, state: str) -> "TimelineStep":
+        """Append one step to the timeline that follows the latest message."""
+        last = self.layout.itemAt(self.layout.count() - 1) if self.layout.count() else None
+        holder = last.widget() if last is not None else None
+        timeline = getattr(holder, "timeline", None)
+        if not isinstance(timeline, TimelineView):
+            timeline = TimelineView()
+            holder = QWidget()
+            holder.timeline = timeline
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(44, 0, 0, 12)
+            holder_layout.addWidget(timeline, 0, Qt.AlignmentFlag.AlignLeft)
+            holder_layout.addStretch(1)
+            self.layout.addWidget(holder)
+        step = timeline.add_step(title, detail, state)
+        self._scroll_later()
+        return step
+
     def add_tool_card(self, title: str, rows: list[tuple[str, str]]) -> ToolActivityCard:
         holder = QWidget()
         holder_layout = QHBoxLayout(holder)
@@ -6069,6 +7499,1155 @@ class TranscriptView(QScrollArea):
 
     def _scroll_later(self) -> None:
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+
+
+class TimelineStep(QWidget):
+    """One step: a 9px node on the 1px line, a title and a detail.
+
+    While a step runs its node is an arc spinner (still when motion is
+    reduced); finished steps are filled, failed or refused ones hollow red.
+    """
+
+    def __init__(self, title: str, detail: str, state: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._state = state
+        self._angle = 0
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(22, 3, 0, 3)
+        layout.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("title")
+        self.detail_label = QLabel(detail)
+        self.detail_label.setObjectName("meta")
+        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.detail_label, 1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(90)
+        self.timer.timeout.connect(self._spin)
+        self.set_state(state, detail)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str, detail: Optional[str] = None) -> None:
+        self._state = state
+        if detail is not None:
+            self.detail_label.setText(detail)
+        self.setAccessibleName(f"{self.title_label.text()}: {self.detail_label.text()} ({state})")
+        if state == "running" and _ui_animations_enabled():
+            self.timer.start()
+        else:
+            self.timer.stop()
+        self.update()
+
+    def _spin(self) -> None:
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        tokens = theme_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(tokens["line_strong"]), 1))
+        painter.drawLine(QPointF(8.5, 0), QPointF(8.5, self.height()))
+        centre = QPointF(8.5, self.height() / 2)
+        rect = QRectF(centre.x() - 4.5, centre.y() - 4.5, 9, 9)
+        colour = {"done": tokens["accent"], "error": tokens["bad"], "denied": tokens["bad"],
+                  "waiting": tokens["warn"]}.get(self._state, tokens["faint"])
+        if self._state == "running":
+            painter.setBrush(QColor(tokens["bg"]))
+            painter.setPen(QPen(QColor(tokens["line_strong"]), 1.4))
+            painter.drawEllipse(rect)
+            pen = QPen(QColor(tokens["accent"]), 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawArc(rect, (90 - self._angle) * 16, 120 * 16)
+        elif self._state in ("error", "denied", "waiting"):
+            painter.setBrush(QColor(tokens["bg"]))
+            painter.setPen(QPen(QColor(colour), 1.6))
+            painter.drawEllipse(rect)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colour))
+            painter.drawEllipse(rect)
+        painter.end()
+
+
+class TimelineView(QWidget):
+    """Agent and tool steps as a compact vertical timeline instead of cards."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("timeline")
+        self.setAccessibleName("Steps")
+        self.layout_ = QVBoxLayout(self)
+        self.layout_.setContentsMargins(0, 0, 0, 0)
+        self.layout_.setSpacing(0)
+        self.steps: list[TimelineStep] = []
+        self.setMinimumWidth(420)
+
+    def add_step(self, title: str, detail: str, state: str) -> TimelineStep:
+        step = TimelineStep(title, detail, state, self)
+        self.steps.append(step)
+        self.layout_.addWidget(step)
+        return step
+
+
+class NoticeCard(QFrame):
+    """A titled card with copy and action buttons: amber for questions
+    (webAsk, approvals), red for errors. Buttons are real QPushButtons, so
+    every action is reachable from the keyboard."""
+
+    def __init__(self, kind: str, title: str, body: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("errorCard" if kind == "error" else "amberCard")
+        self.setAccessibleName(title)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(7)
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(_icon("warning", 16, theme_tokens()["bad" if kind == "error" else "warn"]).pixmap(16, 16))
+        head.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("title")
+        self.title_label.setWordWrap(True)
+        head.addWidget(self.title_label, 1)
+        layout.addLayout(head)
+        self.rows = QVBoxLayout()
+        self.rows.setSpacing(4)
+        layout.addLayout(self.rows)
+        self.body_label = QLabel(body)
+        self.body_label.setObjectName("meta")
+        self.body_label.setWordWrap(True)
+        self.body_label.setVisible(bool(body))
+        layout.addWidget(self.body_label)
+        self.buttons = QHBoxLayout()
+        self.buttons.setSpacing(7)
+        self.buttons.addStretch(1)
+        layout.addLayout(self.buttons)
+        self.spinner_label = QLabel()
+        self.spinner_label.setObjectName("meta")
+        self.spinner_label.hide()
+        layout.addWidget(self.spinner_label)
+
+    def add_row(self, label: str, value: str) -> QLabel:
+        row = QHBoxLayout()
+        name = QLabel(label)
+        name.setObjectName("meta")
+        name.setFixedWidth(60)
+        text = QLabel(value)
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.TextFormat.PlainText)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        row.addWidget(name, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(text, 1)
+        self.rows.addLayout(row)
+        return text
+
+    def add_button(self, text: str, callback: Callable[[], None], primary: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        if primary:
+            button.setObjectName("primaryButton")
+        button.setAccessibleName(text)
+        button.clicked.connect(callback)
+        self.buttons.addWidget(button)
+        return button
+
+    def set_busy(self, text: str) -> None:
+        for index in range(self.buttons.count()):
+            widget = self.buttons.itemAt(index).widget()
+            if widget is not None:
+                widget.setEnabled(False)
+        self.spinner_label.setText(text)
+        self.spinner_label.show()
+
+
+class ThoughtLine(QWidget):
+    """'Thought for Ns' under a reply; it expands to say why that is all you see."""
+
+    EXPLAIN = (
+        "The model’s reasoning stays private. Onionmind removes it before the reply is shown, "
+        "so only how long it took is kept."
+    )
+
+    def __init__(self, seconds: float, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        whole = max(1, round(seconds))
+        self.toggle = QPushButton(f"Thought for {whole}s")
+        self.toggle.setObjectName("chipButton")
+        self.toggle.setCheckable(True)
+        self.toggle.setAccessibleName(f"Thought for {whole} seconds. Show what this means")
+        self.detail = QLabel(self.EXPLAIN)
+        self.detail.setObjectName("meta")
+        self.detail.setWordWrap(True)
+        self.detail.hide()
+        self.toggle.toggled.connect(self.detail.setVisible)
+        layout.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.detail)
+
+
+class RunPanel(QWidget):
+    """The inspector's Run tab: one Agent run's status, plan, approval and output.
+
+    Every row comes from the agent's own stream - its todo list when it keeps
+    one, otherwise the tools it actually called - never from a script.
+    """
+
+    STATES = {
+        "pending": "Pending", "running": "Working…", "waiting": "Waiting for you",
+        "done": "Done", "stopped": "Stopped by you", "denied": "Denied · nothing written",
+        "error": "Failed",
+    }
+    EMPTY = (
+        "No agent run yet. Switch the composer to Agent to start one. Its plan, "
+        "approvals and output show up here."
+    )
+
+    stopRequested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 10, 2, 3)
+        layout.setSpacing(8)
+        head = QHBoxLayout()
+        self.status_label = QLabel("No run")
+        self.status_label.setObjectName("title")
+        self.elapsed_label = QLabel("")
+        self.elapsed_label.setObjectName("meta")
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setAccessibleName("Stop the Agent run")
+        self.stop_button.clicked.connect(self.stopRequested)
+        self.stop_button.setEnabled(False)
+        head.addWidget(self.status_label)
+        head.addWidget(self.elapsed_label)
+        head.addStretch(1)
+        head.addWidget(self.stop_button)
+        layout.addLayout(head)
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("meta")
+        self.meta_label.setWordWrap(True)
+        layout.addWidget(self.meta_label)
+        self.empty_label = QLabel(self.EMPTY)
+        self.empty_label.setObjectName("meta")
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
+        plan_title = QLabel("PLAN")
+        plan_title.setObjectName("sectionTitle")
+        layout.addWidget(plan_title)
+        self.plan = QListWidget()
+        self.plan.setAccessibleName("Agent plan")
+        self.plan.setMaximumHeight(190)
+        layout.addWidget(self.plan)
+        self.approval_holder = QVBoxLayout()
+        layout.addLayout(self.approval_holder)
+        output_title = QLabel("OUTPUT")
+        output_title.setObjectName("sectionTitle")
+        layout.addWidget(output_title)
+        self.output = QPlainTextEdit()
+        self.output.setObjectName("runOutput")
+        self.output.setReadOnly(True)
+        self.output.setAccessibleName("Agent output")
+        self.output.document().setMaximumBlockCount(4000)
+        layout.addWidget(self.output, 1)
+        self._started: Optional[float] = None
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+        self._rows: dict[str, QListWidgetItem] = {}
+        self._todo_mode = False
+
+    def start(self, meta: str) -> None:
+        self.plan.clear()
+        self._rows.clear()
+        self._todo_mode = False
+        self.output.clear()
+        self.clear_approval()
+        self.meta_label.setText(meta)
+        self.empty_label.hide()
+        self.status_label.setText("Running")
+        self.stop_button.setEnabled(True)
+        self._started = time.monotonic()
+        self._tick()
+        self.timer.start()
+
+    def finish(self, status: str) -> None:
+        self.status_label.setText(status)
+        self.stop_button.setEnabled(False)
+        self.timer.stop()
+        self._tick()
+        for key, item in self._rows.items():
+            state = item.data(Qt.ItemDataRole.UserRole)
+            if state in ("running", "waiting", "pending") and not self._todo_mode:
+                self.set_step(key, "stopped", None)
+
+    def set_status(self, status: str) -> None:
+        self.status_label.setText(status)
+
+    def _tick(self) -> None:
+        if self._started is None:
+            self.elapsed_label.setText("")
+            return
+        seconds = int(time.monotonic() - self._started)
+        self.elapsed_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
+
+    def set_step(self, key: str, state: str, title: Optional[str], detail: str = "") -> None:
+        if self._todo_mode and not key.startswith("todo:"):
+            self.append_output(f"{title or key} · {self.STATES.get(state, state)}")
+            return
+        item = self._rows.get(key)
+        if item is None:
+            item = QListWidgetItem()
+            self._rows[key] = item
+            self.plan.addItem(item)
+        if title is not None:
+            item.setData(Qt.ItemDataRole.UserRole + 1, title)
+        name = item.data(Qt.ItemDataRole.UserRole + 1) or key
+        item.setData(Qt.ItemDataRole.UserRole, state)
+        mark = {"done": "✓", "denied": "✕", "error": "✕", "stopped": "■", "waiting": "!",
+                "running": "›", "pending": "·"}.get(state, "·")
+        label = detail or self.STATES.get(state, state)
+        item.setText(f"{mark}  {name}\n    {label}")
+        item.setToolTip(f"{name}: {label}")
+
+    def set_todos(self, todos: Iterable[Any]) -> None:
+        """The agent's own todo list (its todo_write tool) becomes the plan."""
+        self._todo_mode = True
+        for key in [k for k in self._rows if k.startswith("todo:")]:
+            item = self._rows.pop(key)
+            self.plan.takeItem(self.plan.row(item))
+        for index, todo in enumerate(todos):
+            if not isinstance(todo, dict):
+                continue
+            status = {"completed": "done", "in_progress": "running"}.get(_as_text(todo.get("status")), "pending")
+            self.set_step(f"todo:{index}", status, _as_text(todo.get("content"))[:120] or f"Step {index + 1}")
+
+    def append_output(self, text: str) -> None:
+        if text:
+            self.output.appendPlainText(text.rstrip("\n"))
+
+    def show_approval(self, card: QWidget) -> None:
+        self.clear_approval()
+        self.approval_holder.addWidget(card)
+
+    def clear_approval(self) -> None:
+        while self.approval_holder.count():
+            widget = self.approval_holder.takeAt(0).widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+
+
+class _PaletteSearch(QLineEdit):
+    """The palette's field keeps arrows, Enter and Esc for itself, ahead of
+    the window's application shortcuts (Esc there means 'stop the run')."""
+
+    moved = Signal(int)
+    chosen = Signal()
+    dismissed = Signal()
+
+    def event(self, event: Any) -> bool:
+        if event.type() == event.Type.ShortcutOverride and event.key() in (
+            Qt.Key.Key_Escape, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter
+        ):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key = event.key()
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            self.moved.emit(1 if key == Qt.Key.Key_Down else -1)
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.chosen.emit()
+        elif key == Qt.Key.Key_Escape:
+            self.dismissed.emit()
+        else:
+            super().keyPressEvent(event)
+
+
+class CommandPalette(QDialog):
+    """Ctrl+K: jump to a project, session, model or command.
+
+    Every row is something real - a remembered project, a saved session, an
+    installed model, an action the window can take now. Focus goes back to
+    where it was when the palette closes.
+    """
+
+    GROUPS = ("Projects", "Sessions", "Model power", "Commands")
+
+    def __init__(self, parent: QWidget, rows: list[tuple[str, str, str, Callable[[], None]]]) -> None:
+        super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setObjectName("popover")
+        self.setModal(True)
+        self.setAccessibleName("Command palette")
+        self.rows = rows
+        self._return_focus = QApplication.focusWidget()
+        frame = QFrame(self)
+        frame.setObjectName("popover")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 10, 8)
+        layout.setSpacing(6)
+        self.search = _PaletteSearch()
+        self.search.setPlaceholderText("Jump to a project, session, model or command")
+        self.search.setAccessibleName("Search projects, sessions, models and commands")
+        self.search.textChanged.connect(self._filter)
+        self.search.moved.connect(self._move)
+        self.search.chosen.connect(self._choose)
+        self.search.dismissed.connect(self.reject)
+        layout.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.setAccessibleName("Matches")
+        self.list.itemActivated.connect(lambda item: self._choose())
+        self.list.itemClicked.connect(lambda item: self._choose())
+        layout.addWidget(self.list, 1)
+        self.empty = QLabel("Nothing matches that.")
+        self.empty.setObjectName("meta")
+        self.empty.hide()
+        layout.addWidget(self.empty)
+        footer = QHBoxLayout()
+        hint = QLabel("↑↓ to move · Enter to open")
+        hint.setObjectName("meta")
+        esc = QLabel("esc")
+        esc.setObjectName("kbd")
+        footer.addWidget(hint)
+        footer.addStretch(1)
+        footer.addWidget(esc)
+        layout.addLayout(footer)
+        self.resize(600, 420)
+        self._filter("")
+
+    def place(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        top_left = parent.mapToGlobal(parent.rect().topLeft())
+        width = min(600, max(360, parent.width() - 40))
+        self.resize(width, min(440, max(260, parent.height() - 120)))
+        self.move(top_left.x() + (parent.width() - width) // 2, top_left.y() + 72)
+
+    def _filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        self.list.clear()
+        shown = 0
+        for group in self.GROUPS:
+            matches = [row for row in self.rows if row[0] == group and (
+                not needle or needle in row[1].casefold() or needle in row[2].casefold())]
+            if not matches:
+                continue
+            header = QListWidgetItem(group.upper())
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.list.addItem(header)
+            for row in matches:
+                item = QListWidgetItem(f"{row[1]}    {row[2]}".rstrip())
+                item.setData(Qt.ItemDataRole.UserRole, self.rows.index(row))
+                item.setToolTip(row[2])
+                self.list.addItem(item)
+                shown += 1
+        self.empty.setVisible(shown == 0)
+        self._move(0)
+
+    def _selectable(self) -> list[int]:
+        return [i for i in range(self.list.count()) if self.list.item(i).flags() & Qt.ItemFlag.ItemIsEnabled]
+
+    def _move(self, step: int) -> None:
+        rows = self._selectable()
+        if not rows:
+            return
+        current = self.list.currentRow()
+        if current not in rows or step == 0:
+            target = rows[0]
+        else:
+            position = rows.index(current) + step
+            target = rows[max(0, min(len(rows) - 1, position))]
+        self.list.setCurrentRow(target)
+
+    def _choose(self) -> None:
+        item = self.list.currentItem()
+        if item is None or not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return
+        action = self.rows[int(item.data(Qt.ItemDataRole.UserRole))][3]
+        self.accept()
+        QTimer.singleShot(0, action)
+
+    def done(self, result: int) -> None:
+        super().done(result)
+        target = self._return_focus
+        if target is not None:
+            try:
+                owner = target.window()
+                owner.activateWindow()
+                target.setFocus(Qt.FocusReason.PopupFocusReason)
+            except RuntimeError:
+                pass
+
+
+class BoundaryButton(QPushButton):
+    """cpu - line - shield - line - globe, then 'N searches today'.
+
+    The lines take the accent while a Tor path is open; a dot travels along
+    them while a search is actually running (still when motion is reduced).
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("boundaryButton")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCheckable(True)
+        self._open = False
+        self._searching = False
+        self._phase = 0.0
+        self._label = "Nothing left today"
+        self._show_label = True
+        self.timer = QTimer(self)
+        self.timer.setInterval(40)
+        self.timer.timeout.connect(self._advance)
+        self.setMinimumHeight(34)
+        self._sync()
+
+    def set_state(self, open_path: bool, searching: bool, label: str) -> None:
+        self._open, self._searching, self._label = open_path, searching, label
+        if searching and _ui_animations_enabled():
+            self.timer.start()
+        else:
+            self.timer.stop()
+        self._sync()
+
+    def set_label_visible(self, visible: bool) -> None:
+        self._show_label = visible
+        self._sync()
+
+    def _sync(self) -> None:
+        text = self._label if self._show_label else ""
+        self.setFixedWidth(118 + (self.fontMetrics().horizontalAdvance(text) + 30 if text else 0))
+        path = "open over Tor" if self._open else "closed: nothing can leave over Tor"
+        self.setAccessibleName(f"Boundary map. The path out is {path}. {self._label}")
+        self.setToolTip("Boundary map (Ctrl+B): what stays on this machine and what leaves")
+        self.update()
+
+    def _advance(self) -> None:
+        self._phase = (self._phase + 0.04) % 1.0
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        tokens = theme_tokens()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = self.height() / 2
+        icons = ((10, "cpu"), (52, "shield"), (94, "globe"))
+        for x, name in icons:
+            painter.drawPixmap(int(x), int(y - 8), _icon(name, 16).pixmap(16, 16))
+        colour = QColor(tokens["accent"] if self._open else tokens["line_strong"])
+        painter.setPen(QPen(colour, 1.4))
+        for start in (30, 72):
+            painter.drawLine(QPointF(start, y), QPointF(start + 18, y))
+        if self._searching:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(tokens["accent"]))
+            for start in (30, 72):
+                painter.drawEllipse(QPointF(start + 18 * self._phase, y), 2.5, 2.5)
+        if self._show_label:
+            painter.setPen(QColor(tokens["muted"]))
+            painter.drawText(QRectF(118, 0, self.width() - 122, self.height()),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._label)
+        painter.end()
+
+
+class BoundaryPanel(QFrame):
+    """Ctrl+B: what stays on this machine, the Tor node, and what leaves it."""
+
+    FOOTNOTE = (
+        "Commands that ignore proxy settings, such as ping or nslookup, can still reach the network "
+        "directly. For a fully closed machine, use Matchstick, a container or an OS egress rule."
+    )
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("boundaryPanel")
+        self.setAccessibleName("Boundary map")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 12, 22, 12)
+        outer.setSpacing(10)
+        head = QHBoxLayout()
+        title = QLabel("Boundary map")
+        title.setObjectName("title")
+        self.receipt = QLabel("")
+        self.receipt.setObjectName("meta")
+        self.close_button = QToolButton()
+        self.close_button.setObjectName("bareButton")
+        _themed_icon(self.close_button, "close")
+        self.close_button.setAccessibleName("Close the boundary map")
+        head.addWidget(title)
+        head.addWidget(self.receipt, 1)
+        head.addWidget(self.close_button)
+        outer.addLayout(head)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.machine = QFrame()
+        self.machine.setObjectName("zoneMachine")
+        self.machine_rows = self._column(self.machine, "STAYS ON THIS MACHINE",
+                                         ("Model", "Project", "Disk", "Sessions"))
+        self.outside = QFrame()
+        self.outside.setObjectName("zoneOutside")
+        self.outside_rows = self._column(self.outside, "LEAVES THIS MACHINE",
+                                         ("Chat search", "Agent network", "Downloads", "Updates"))
+        node = QVBoxLayout()
+        node.setSpacing(4)
+        logo = QLabel()
+        icon_path = MODULE_DIR / "onionmind.ico"
+        if icon_path.exists():
+            logo.setPixmap(QPixmap(str(icon_path)).scaled(44, 44, Qt.AspectRatioMode.KeepAspectRatio,
+                                                          Qt.TransformationMode.SmoothTransformation))
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_title = QLabel("Tor")
+        self.node_title.setObjectName("title")
+        self.node_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_state = QLabel("")
+        self.node_state.setObjectName("meta")
+        self.node_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.node_state.setWordWrap(True)
+        node.addStretch(1)
+        node.addWidget(logo)
+        node.addWidget(self.node_title)
+        node.addWidget(self.node_state)
+        node.addStretch(1)
+        node_holder = QWidget()
+        node_holder.setLayout(node)
+        node_holder.setFixedWidth(170)
+        row.addWidget(self.machine, 1)
+        row.addWidget(node_holder)
+        row.addWidget(self.outside, 1)
+        outer.addLayout(row)
+        foot = QLabel(self.FOOTNOTE)
+        foot.setObjectName("meta")
+        foot.setWordWrap(True)
+        outer.addWidget(foot)
+        self.hide()
+
+    @staticmethod
+    def _column(frame: QFrame, title: str, names: Iterable[str]) -> dict[str, QLabel]:
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(6)
+        heading = QLabel(title)
+        heading.setObjectName("sectionTitle")
+        layout.addWidget(heading)
+        values: dict[str, QLabel] = {}
+        for name in names:
+            line = QHBoxLayout()
+            label = QLabel(name)
+            label.setObjectName("meta")
+            label.setFixedWidth(100)
+            value = QLabel("")
+            value.setWordWrap(True)
+            line.addWidget(label, 0, Qt.AlignmentFlag.AlignTop)
+            line.addWidget(value, 1)
+            layout.addLayout(line)
+            values[name] = value
+        return values
+
+
+class NetworkLogDialog(QDialog):
+    """Every connection Onionmind made from this machine today, with exports.
+
+    Rows are times, routes and destinations only - the log never held a
+    prompt or a query, so an export cannot leak one.
+    """
+
+    INTRO = (
+        "Every connection Onionmind made from this machine today. Inference is not listed because "
+        "it never leaves the computer. The exported file contains times and destinations only, "
+        "not your prompts."
+    )
+
+    def __init__(self, rows: list[dict[str, str]], desktop_core: Any, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+
+        self.rows = rows
+        self.desktop_core = desktop_core
+        self.saved_path: Optional[str] = None
+        self.setWindowTitle("Network log")
+        self.resize(640, 460)
+        layout = QVBoxLayout(self)
+        heading = QLabel("Network log")
+        heading.setObjectName("brand")
+        intro = QLabel(self.INTRO)
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(intro)
+        self.table = QTableWidget(len(rows), 3)
+        self.table.setHorizontalHeaderLabels(["Time", "Route", "What"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setAccessibleName("Connections that left this machine today")
+        for index, row in enumerate(rows):
+            stamp = _as_text(row.get("time"))
+            shown = stamp[11:19] if len(stamp) >= 19 else stamp
+            for column, value in enumerate((shown, row.get("route", ""), row.get("what", ""))):
+                self.table.setItem(index, column, QTableWidgetItem(_as_text(value)))
+        layout.addWidget(self.table, 1)
+        self.empty = QLabel("No connections left this machine today.")
+        self.empty.setObjectName("meta")
+        self.empty.setVisible(not rows)
+        layout.addWidget(self.empty)
+        self.feedback = QLabel("")
+        self.feedback.setObjectName("meta")
+        layout.addWidget(self.feedback)
+        buttons = QHBoxLayout()
+        self.json_button = QPushButton("Save as JSON")
+        self.csv_button = QPushButton("Save as CSV")
+        close = QPushButton("Close")
+        self.json_button.clicked.connect(lambda: self.save("json"))
+        self.csv_button.clicked.connect(lambda: self.save("csv"))
+        close.clicked.connect(self.accept)
+        buttons.addWidget(self.json_button)
+        buttons.addWidget(self.csv_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def default_path(self, kind: str) -> str:
+        documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        folder = Path(documents or Path.home()) / "Onionmind"
+        return str(folder / f"network-log-{datetime.now().strftime('%Y-%m-%d')}.{kind}")
+
+    def save(self, kind: str, path: Optional[str] = None) -> Optional[str]:
+        if path is None:
+            default = self.default_path(kind)
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save network log", default,
+                "JSON (*.json)" if kind == "json" else "CSV (*.csv)")
+            if not path:
+                return None
+        writer = getattr(self.desktop_core, "network_log_json" if kind == "json" else "network_log_csv", None)
+        if not callable(writer):
+            self.feedback.setText("This build cannot export the network log.")
+            return None
+        target = Path(path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(writer(self.rows), encoding="utf-8")
+        except OSError as exc:
+            self.feedback.setText(f"Could not save the network log: {exc}")
+            return None
+        self.saved_path = str(target)
+        self.feedback.setText(f"Saved {target} · {len(self.rows)} entries")
+        return self.saved_path
+
+
+class ProvenanceChips(QWidget):
+    """Where a reply came from: always this machine, plus any Tor search."""
+
+    def __init__(self, chips: list[tuple[str, str]], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        for text, tooltip in chips:
+            chip = QLabel(text)
+            chip.setObjectName("kbd")
+            chip.setToolTip(tooltip)
+            chip.setAccessibleName(text)
+            layout.addWidget(chip)
+        layout.addStretch(1)
+
+
+class _Overlay(QWidget):
+    """A full-window layer over the workbench (setup, lock)."""
+
+    def __init__(self, window: QWidget) -> None:
+        super().__init__(window)
+        self.setObjectName("overlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+    def cover(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.raise_()
+        self.show()
+
+
+class LockOverlay(_Overlay):
+    """'Onionmind is locked': the workbench stays hidden until the passphrase."""
+
+    unlocked = Signal()
+
+    def __init__(self, window: QWidget, verify: Callable[[str], bool]) -> None:
+        super().__init__(window)
+        self.verify = verify
+        outer = QVBoxLayout(self)
+        outer.addStretch(1)
+        box = QFrame()
+        box.setObjectName("card")
+        box.setFixedWidth(380)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+        title = QLabel("Onionmind is locked")
+        title.setObjectName("brand")
+        copy_label = QLabel("Conversations and projects are hidden until you unlock. "
+                            "Runs that were in progress keep going.")
+        copy_label.setObjectName("meta")
+        copy_label.setWordWrap(True)
+        self.passphrase = QLineEdit()
+        self.passphrase.setEchoMode(QLineEdit.EchoMode.Password)
+        self.passphrase.setPlaceholderText("Passphrase")
+        self.passphrase.setAccessibleName("Passphrase")
+        self.passphrase.returnPressed.connect(self.try_unlock)
+        self.error = QLabel("")
+        self.error.setObjectName("danger")
+        self.error.hide()
+        self.unlock_button = QPushButton("Unlock")
+        self.unlock_button.setObjectName("primaryButton")
+        self.unlock_button.clicked.connect(self.try_unlock)
+        for widget in (title, copy_label, self.passphrase, self.error, self.unlock_button):
+            layout.addWidget(widget)
+        outer.addWidget(box, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(2)
+
+    def lock(self) -> None:
+        self.passphrase.clear()
+        self.error.hide()
+        self.cover()
+        self.passphrase.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def try_unlock(self) -> None:
+        text = self.passphrase.text()
+        if not text:
+            self.error.setText("Enter your passphrase to unlock.")
+            self.error.show()
+            return
+        if not self.verify(text):
+            self.error.setText("That passphrase is not right.")
+            self.error.show()
+            self.passphrase.selectAll()
+            return
+        self.passphrase.clear()
+        self.hide()
+        self.unlocked.emit()
+
+
+class SetupOverlay(_Overlay):
+    """First-launch setup: Welcome, Check this machine, Choose a model, Tor,
+    Open a project. Every check and action is the real one the app uses."""
+
+    STEPS = ("Welcome", "Check this machine", "Choose a model", "Tor", "Open a project")
+
+    def __init__(self, window: "OnionmindWindow") -> None:
+        super().__init__(window)
+        self.window_ = window
+        self.step = 0
+        self.checks: dict[str, tuple[str, str]] = {}
+        self.project: Optional[str] = None
+        self.chosen_model: Optional[str] = None
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addStretch(1)
+        box = QFrame()
+        box.setObjectName("card")
+        box.setFixedWidth(560)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(26, 22, 26, 20)
+        layout.setSpacing(12)
+        self.progress_label = QLabel("")
+        self.progress_label.setObjectName("meta")
+        self.title = QLabel("")
+        self.title.setObjectName("brand")
+        self.body = QLabel("")
+        self.body.setObjectName("meta")
+        self.body.setWordWrap(True)
+        layout.addWidget(self.progress_label)
+        layout.addWidget(self.title)
+        layout.addWidget(self.body)
+        self.content = QVBoxLayout()
+        self.content.setSpacing(6)
+        layout.addLayout(self.content)
+        nav = QHBoxLayout()
+        self.skip_button = QPushButton("Skip setup")
+        self.skip_button.clicked.connect(self.finish)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(lambda: self.go(self.step - 1))
+        self.next_button = QPushButton("Get started")
+        self.next_button.setObjectName("primaryButton")
+        self.next_button.clicked.connect(self.next_step)
+        nav.addWidget(self.skip_button)
+        nav.addStretch(1)
+        nav.addWidget(self.back_button)
+        nav.addWidget(self.next_button)
+        layout.addLayout(nav)
+        outer.addWidget(box, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(2)
+        self.tor_timer = QTimer(self)
+        self.tor_timer.setInterval(400)
+        self.tor_timer.timeout.connect(self._sync_tor)
+
+    def open(self) -> None:
+        self.go(0)
+        self.cover()
+        self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _clear(self) -> None:
+        while self.content.count():
+            item = self.content.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+
+    def go(self, step: int) -> None:
+        self.step = max(0, min(len(self.STEPS) - 1, step))
+        self._clear()
+        self.tor_timer.stop()
+        self.progress_label.setText(f"Step {self.step + 1} of {len(self.STEPS)} · {self.STEPS[self.step]}")
+        self.back_button.setVisible(self.step > 0)
+        getattr(self, f"_step_{self.step}")()
+
+    def next_step(self) -> None:
+        if self.step == len(self.STEPS) - 1:
+            if self.project:
+                self.window_.select_workspace(self.project)
+            self.finish()
+            return
+        self.go(self.step + 1)
+
+    def finish(self) -> None:
+        self.tor_timer.stop()
+        self.hide()
+        self.window_.settings_data["setup_done"] = True
+        if not self.window_.demo:
+            self.window_.settings_bridge.save(self.window_.settings_data)
+        self.window_.set_status("Setup finished. Onionmind is ready.")
+
+    def _step_0(self) -> None:
+        self.title.setText("Welcome to Onionmind")
+        self.body.setText("A private workbench: the model runs on this machine, and anything that has to leave "
+                          "it goes over Tor. Setup checks this machine, picks a model, turns on Tor if you want "
+                          "it, and opens a project. You can skip any step and run setup again from Settings.")
+        self.next_button.setText("Get started")
+
+    def _step_1(self) -> None:
+        self.title.setText("Check this machine")
+        self.body.setText("Checking what is already here…")
+        self.next_button.setText("Continue")
+        self.check_rows: dict[str, QLabel] = {}
+        for name in ("Local model server", "Graphics memory", "Agent runtime", "Tor"):
+            row = QLabel(f"{name}    checking…")
+            row.setAccessibleName(f"{name}: checking")
+            self.content.addWidget(row)
+            self.check_rows[name] = row
+        window = self.window_
+        core, desktop_core = window.core, window.desktop_core
+
+        def job(signals: WorkerSignals) -> dict[str, tuple[str, str]]:
+            results: dict[str, tuple[str, str]] = {}
+            try:
+                detector = getattr(core, "detect_backend", None)
+                if callable(detector):
+                    detector()
+                results["Local model server"] = ("ok", "Found · ready")
+            except BaseException:
+                results["Local model server"] = ("warn", "Not running. Start it, then check again.")
+            signals.event.emit(dict(results))
+            memory = getattr(desktop_core, "gpu_memory_mb", None)
+            name = getattr(desktop_core, "gpu_name", None)
+            ram = getattr(desktop_core, "machine_memory_mb", None)
+            _used, total = memory() if callable(memory) else (None, None)
+            if total:
+                gpu = name() if callable(name) else None
+                results["Graphics memory"] = ("ok", f"{total / 1024:.0f} GB GPU" + (f" · {gpu}" if gpu else ""))
+            else:
+                ram_mb = ram() if callable(ram) else None
+                results["Graphics memory"] = ("info", "No GPU reported" + (f" · {ram_mb / 1024:.0f} GB RAM" if ram_mb else ""))
+            signals.event.emit(dict(results))
+            version_of = getattr(desktop_core, "node_version", None)
+            supported = getattr(desktop_core, "node_supports_agent", None)
+            version = version_of() if callable(version_of) else None
+            if version and callable(supported) and supported(version):
+                results["Agent runtime"] = ("ok", f"Node.js {version.lstrip('v')} found")
+            elif version:
+                results["Agent runtime"] = ("warn", f"Node.js {version.lstrip('v')} is too old. Agent needs 22.19 or newer.")
+            else:
+                results["Agent runtime"] = ("warn", "Node.js not found. Agent stays off until it’s installed.")
+            signals.event.emit(dict(results))
+            probe = getattr(core, "tor_proxy_port", None)
+            port = probe() if callable(probe) else None
+            results["Tor"] = ("ok", "Running") if port else ("info", "Not running yet. That’s fine.")
+            return results
+
+        def show(results: dict[str, tuple[str, str]]) -> None:
+            if self.step != 1:
+                return
+            self.checks.update(results)
+            mark = {"ok": "✓", "warn": "!", "info": "·"}
+            for key, (state, text) in results.items():
+                row = self.check_rows.get(key)
+                if row is not None:
+                    row.setText(f"{mark.get(state, '·')}  {key}    {text}")
+                    row.setAccessibleName(f"{key}: {text}")
+            if len(results) == 4:
+                agent_ok = results["Agent runtime"][0] == "ok"
+                server_ok = results["Local model server"][0] == "ok"
+                self.body.setText("Everything Onionmind needs is on this machine." if agent_ok and server_ok else
+                                  "Chat works now. Install Node.js 22.19 or newer to turn on Agent." if server_ok else
+                                  "Start the local model server, then come back to this step.")
+
+        worker = window._start_worker(job)
+        worker.signals.event.connect(show)
+        worker.signals.result.connect(show)
+
+    def _step_2(self) -> None:
+        window = self.window_
+        self.title.setText("Choose a model")
+        models = [m for m in window.installed_model_ids if m]
+        self.next_button.setText("Continue")
+        self.model_group = QButtonGroup(self)
+        fit = getattr(window.desktop_core, "model_fit", None)
+        power = window._model_power
+        recommended = None
+        sizes = power.get("sizes") or {}
+        if callable(fit):
+            fitting = [m for m in models if fit(sizes.get(m), power.get("vram_total"), power.get("ram")) == "Fits"]
+            recommended = max(fitting, key=lambda m: sizes.get(m) or 0) if fitting else None
+        if models:
+            self.body.setText("These models are already on this machine. Pick the one Onionmind should use.")
+            for model in models:
+                label = f"{window._tier_name(model)} · {window._describe_model(model)}"
+                if model == recommended:
+                    label += "  · Recommended"
+                button = QCheckBox(label)
+                button.setAutoExclusive(True)
+                button.setChecked(model == (recommended or window.current_model_id()))
+                button.toggled.connect(lambda on, m=model: on and self._pick_model(m))
+                self.model_group.addButton(button)
+                self.content.addWidget(button)
+        else:
+            self.body.setText("No model is installed yet. Name one to download; the download goes directly to "
+                              "its registry, not over Tor, and starts only after you confirm.")
+        row = QHBoxLayout()
+        self.model_name = QLineEdit()
+        self.model_name.setPlaceholderText("BLAZE, llama3.2:3b, or a huggingface.co link")
+        self.model_name.setAccessibleName("Model to download")
+        self.download_button = QPushButton("Download")
+        self.download_button.clicked.connect(self._download)
+        holder = QWidget()
+        holder_layout = QHBoxLayout(holder)
+        holder_layout.setContentsMargins(0, 6, 0, 0)
+        holder_layout.addWidget(self.model_name, 1)
+        holder_layout.addWidget(self.download_button)
+        self.content.addWidget(holder)
+        self.download_progress = QProgressBar()
+        self.download_progress.setRange(0, 100)
+        self.download_progress.hide()
+        self.content.addWidget(self.download_progress)
+
+    def _pick_model(self, model: str) -> None:
+        self.chosen_model = model
+        index = self.window_.model_combo.findData(model)
+        if index >= 0:
+            self.window_.model_combo.setCurrentIndex(index)
+
+    def _download(self) -> None:
+        raw = self.model_name.text().strip()
+        if not raw:
+            return
+        normalize = getattr(self.window_.desktop_core, "normalize_model_reference", None)
+        name = normalize(raw) if callable(normalize) else raw
+        answer = QMessageBox.warning(
+            self, "Direct model download",
+            "The local model service will download this model directly from its configured registry. "
+            "This is not Tor-routed and exposes this machine's network address. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.download_button.setEnabled(False)
+        self.download_progress.setValue(0)
+        self.download_progress.show()
+        self.window_.pull_model(name, self)
+
+    # The ModelManagerDialog interface pull_model reports into.
+    def set_progress(self, fraction: float, status: str) -> None:
+        self.download_progress.setValue(max(0, min(100, round(fraction * 100))))
+        self.download_progress.setFormat(f"{_brand_runtime_text(status)} · %p%")
+
+    def set_error(self, message: str) -> None:
+        self.download_button.setEnabled(True)
+        self.download_progress.setFormat(_brand_runtime_text(message)[:80])
+
+    def set_complete(self) -> None:
+        self.download_button.setEnabled(True)
+        self.download_progress.setValue(100)
+        self.download_progress.setFormat("Installed locally")
+
+    def set_models(self, models: list[str], current: str = "") -> None:
+        del models, current
+
+    def _step_3(self) -> None:
+        self.title.setText("Tor")
+        self.body.setText("Tor is what lets a search or the agent reach the web without exposing this machine. "
+                          "Chat works without it. Turning it on starts Onionmind’s own background Tor - no "
+                          "browser window opens.")
+        self.tor_state = QLabel("")
+        self.tor_button = QPushButton("Turn on Tor")
+        self.tor_button.clicked.connect(self.window_._start_tor_from_toolbar)
+        self.content.addWidget(self.tor_state)
+        self.content.addWidget(self.tor_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self._sync_tor()
+        self.tor_timer.start()
+
+    def _sync_tor(self) -> None:
+        if self.step != 3:
+            return
+        phase = self.window_.tor_phase
+        on = phase == "running"
+        self.tor_state.setText({"running": "Tor is on · circuit verified", "starting": "Starting Tor and verifying a circuit…",
+                                "probing": "Checking Tor…", "error": "Tor did not start. You can try again or continue without it."}
+                               .get(phase, "Tor is off."))
+        self.tor_button.setVisible(not on and phase not in ("starting", "probing"))
+        self.next_button.setText("Continue" if on else "Continue without Tor")
+
+    def _step_4(self) -> None:
+        window = self.window_
+        self.title.setText("Open a project")
+        self.body.setText("Agent works inside one folder at a time. Pick one now, or later with Ctrl+O.")
+        self.project_label = QLabel(window.workspace or "No folder chosen")
+        self.project_label.setWordWrap(True)
+        choose = QPushButton("Choose a folder…")
+        choose.clicked.connect(self._choose_folder)
+        self.content.addWidget(self.project_label)
+        self.content.addWidget(choose, 0, Qt.AlignmentFlag.AlignLeft)
+        self.project = window.workspace
+        self._sync_finish()
+
+    def _choose_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Open project folder", self.project or str(Path.home()))
+        if path:
+            self.set_project(path)
+
+    def set_project(self, path: str) -> None:
+        self.project = path
+        self.project_label.setText(path)
+        self._sync_finish()
+
+    def _sync_finish(self) -> None:
+        self.next_button.setText(f"Open {Path(self.project).name}" if self.project else "Finish")
 
 
 class SessionBridge:
@@ -6413,7 +8992,8 @@ class HarnessBridge:
                 self.spec = None
 
     def _launcher(self, model: str, task: str, cwd: str = "",
-                  yolo: bool = False) -> Optional[list[str]]:
+                  yolo: bool = False, stream: bool = False,
+                  deny: Iterable[str] = (), no_network: bool = False) -> Optional[list[str]]:
         """``onionmind.py --agent``: the one place Tor is verified and enforced.
 
         Launching the agent directly would inherit this window's environment,
@@ -6427,11 +9007,18 @@ class HarnessBridge:
                 "--model", model]
         if yolo:
             argv.append("--yolo")
+        if stream:
+            # v2: the structured mode. The task goes to stdin, not the argv.
+            argv.append("--stream-json")
+        if no_network:
+            argv.append("--no-network")
+        for rule in deny:
+            argv += ["--deny", rule]
         if cwd:
             # The working directory is an argument, not just the process cwd:
             # run_agent writes the project settings there before it starts.
             argv += ["--cwd", cwd]
-        return argv + [task]
+        return argv if stream else argv + [task]
 
     @property
     def limitation(self) -> str:
@@ -6471,8 +9058,9 @@ class HarnessBridge:
         )
 
     def build(self, *, model: str, task: str, cwd: str,
-              yolo: bool = False) -> tuple[list[str], str]:
-        launcher = self._launcher(model, task, cwd, yolo)
+              yolo: bool = False, stream: bool = False,
+              deny: Iterable[str] = (), no_network: bool = False) -> tuple[list[str], str]:
+        launcher = self._launcher(model, task, cwd, yolo, stream, deny, no_network)
         if launcher is None:                     # check() refuses first; belt and braces
             raise RuntimeError(
                 "Onionmind Agent has no Tor-verified launcher, so it will not start."
@@ -6608,13 +9196,13 @@ class LeftRail(QWidget):
         quick = QHBoxLayout()
         new_button = QPushButton("New task")
         new_button.setObjectName("newTaskButton")
-        new_button.setIcon(_icon("new_task"))
+        _themed_icon(new_button, "new_task")
         new_button.setAccessibleName("Create new task")
         new_button.clicked.connect(self.newTaskRequested)
         self.new_button = new_button
         folder_button = QToolButton()
         folder_button.setObjectName("openFolderButton")
-        folder_button.setIcon(_icon("folder_open"))
+        _themed_icon(folder_button, "folder_open")
         folder_button.setToolTip("Open folder (Ctrl+O)")
         folder_button.setAccessibleName("Open project folder")
         folder_button.clicked.connect(self.openFolderRequested)
@@ -6628,14 +9216,14 @@ class LeftRail(QWidget):
         project_label.setObjectName("sectionTitle")
         add_project = QToolButton()
         add_project.setObjectName("bareButton")
-        add_project.setIcon(_icon("folder_plus"))
+        _themed_icon(add_project, "folder_plus")
         add_project.setToolTip("Open another project")
         add_project.setAccessibleName("Open another project")
         add_project.clicked.connect(self.openFolderRequested)
         self.add_project_button = add_project
         remove_project = QToolButton()
         remove_project.setObjectName("bareButton")
-        remove_project.setIcon(_icon("close"))
+        _themed_icon(remove_project, "close")
         remove_project.setToolTip(
             "Remove selected project from this list; its folder stays on this machine"
         )
@@ -6647,7 +9235,7 @@ class LeftRail(QWidget):
         self.remove_project_button = remove_project
         delete_project = QToolButton()
         delete_project.setObjectName("bareButton")
-        delete_project.setIcon(_icon("clear"))
+        _themed_icon(delete_project, "clear")
         delete_project.setToolTip(
             "Permanently delete the selected project folder from this machine"
         )
@@ -6677,26 +9265,20 @@ class LeftRail(QWidget):
         self.projects.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.projects.customContextMenuRequested.connect(self._show_project_menu)
         self.project_menu = QMenu(self)
-        self.project_add_action = self.project_menu.addAction(
-            _icon("folder_plus"), "Add project…"
-        )
+        self.project_add_action = _themed_icon(self.project_menu.addAction("Add project…"), "folder_plus")
         self.project_add_action.triggered.connect(self.openFolderRequested)
         self.project_menu.addSeparator()
-        self.project_remove_action = self.project_menu.addAction(
-            _icon("close"), "Remove from Projects (keep folder)"
-        )
+        self.project_remove_action = _themed_icon(self.project_menu.addAction("Remove from Projects (keep folder)"), "close")
         self.project_remove_action.triggered.connect(self._remove_selected_project)
         self.project_remove_action.setEnabled(False)
-        self.project_delete_action = self.project_menu.addAction(
-            _icon("clear"), "Delete folder from machine…"
-        )
+        self.project_delete_action = _themed_icon(self.project_menu.addAction("Delete folder from machine…"), "clear")
         self.project_delete_action.triggered.connect(self._delete_selected_project)
         self.project_delete_action.setEnabled(False)
         layout.addWidget(self.projects)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet("color:#3a3732;")
+        divider.setObjectName("railDivider")
         layout.addWidget(divider)
         session_header = QHBoxLayout()
         session_label = QLabel("SESSIONS")
@@ -6704,14 +9286,14 @@ class LeftRail(QWidget):
         self.session_label = session_label
         add_session = QToolButton()
         add_session.setObjectName("bareButton")
-        add_session.setIcon(_icon("new_task"))
+        _themed_icon(add_session, "new_task")
         add_session.setToolTip("Add a saved session")
         add_session.setAccessibleName("Add saved session")
         add_session.clicked.connect(self.addSessionRequested)
         self.add_session_button = add_session
         archive = QToolButton()
         archive.setObjectName("bareButton")
-        archive.setIcon(_icon("archive"))
+        _themed_icon(archive, "archive")
         archive.setToolTip(
             "Remove selected session from this list; keep it in local archive storage"
         )
@@ -6723,7 +9305,7 @@ class LeftRail(QWidget):
         self.archive_button = archive
         delete_session = QToolButton()
         delete_session.setObjectName("bareButton")
-        delete_session.setIcon(_icon("clear"))
+        _themed_icon(delete_session, "clear")
         delete_session.setToolTip(
             "Permanently delete the selected session from this machine"
         )
@@ -6757,34 +9339,44 @@ class LeftRail(QWidget):
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
         self.sessions.currentItemChanged.connect(self._session_current_changed)
+        self.no_sessions = QLabel("No conversations yet. Start one with New task.")
+        self.no_sessions.setObjectName("meta")
+        self.no_sessions.setWordWrap(True)
+        self.no_sessions.hide()
+        self.empty_text_enabled = False
         self.sessions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sessions.customContextMenuRequested.connect(self._show_session_menu)
         self.session_menu = QMenu(self)
-        self.session_add_action = self.session_menu.addAction(
-            _icon("new_task"), "Add session"
-        )
+        self.session_add_action = _themed_icon(self.session_menu.addAction("Add session"), "new_task")
         self.session_add_action.triggered.connect(self.addSessionRequested)
         self.session_menu.addSeparator()
-        self.session_rename_action = self.session_menu.addAction(
-            _icon("pencil"), "Rename…"
-        )
+        self.session_rename_action = _themed_icon(self.session_menu.addAction("Rename…"), "pencil")
         self.session_rename_action.triggered.connect(self._rename_selected_session)
         self.session_rename_action.setEnabled(False)
-        self.session_remove_action = self.session_menu.addAction(
-            _icon("archive"), "Remove from Sessions (keep archived copy)"
-        )
+        self.session_remove_action = _themed_icon(self.session_menu.addAction("Remove from Sessions (keep archived copy)"), "archive")
         self.session_remove_action.triggered.connect(self._archive_selected)
         self.session_remove_action.setEnabled(False)
-        self.session_delete_action = self.session_menu.addAction(
-            _icon("clear"), "Delete session from machine…"
-        )
+        self.session_delete_action = _themed_icon(self.session_menu.addAction("Delete session from machine…"), "clear")
         self.session_delete_action.triggered.connect(self._delete_selected_session)
         self.session_delete_action.setEnabled(False)
         layout.addWidget(self.sessions, 1)
+        layout.addWidget(self.no_sessions)
+        # v2 sessionSearch: message hits from every project under the list.
+        self.hits_title = QLabel("IN MESSAGES · ALL PROJECTS")
+        self.hits_title.setObjectName("sectionTitle")
+        self.hits_title.hide()
+        layout.addWidget(self.hits_title)
+        self.message_hits = QListWidget()
+        self.message_hits.setAccessibleName("Message matches in every project")
+        self.message_hits.setWordWrap(True)
+        self.message_hits.hide()
+        self.message_hits.itemActivated.connect(self._hit_chosen)
+        self.message_hits.itemClicked.connect(self._hit_chosen)
+        layout.addWidget(self.message_hits, 1)
 
         export = QPushButton("Export conversation")
         export.setObjectName("railAction")
-        export.setIcon(_icon("export"))
+        _themed_icon(export, "export")
         export.setToolTip("Export this conversation as Markdown (Ctrl+Shift+S)")
         export.setAccessibleName("Export conversation as Markdown")
         export.clicked.connect(self.exportRequested)
@@ -6792,14 +9384,14 @@ class LeftRail(QWidget):
         self.export_button = export
         models = QPushButton("Models")
         models.setObjectName("railAction")
-        models.setIcon(_icon("model"))
+        _themed_icon(models, "model")
         models.setToolTip("Manage local models")
         models.setAccessibleName("Manage local models")
         models.clicked.connect(self.modelsRequested)
         self.models_button = models
         settings = QPushButton("Settings")
         settings.setObjectName("railAction")
-        settings.setIcon(_icon("settings"))
+        _themed_icon(settings, "settings")
         settings.setToolTip("Settings (Ctrl+,)")
         settings.setAccessibleName("Open Onionmind settings")
         settings.clicked.connect(self.settingsRequested)
@@ -6807,6 +9399,45 @@ class LeftRail(QWidget):
         layout.addWidget(export)
         layout.addWidget(models)
         layout.addWidget(settings)
+
+    hitSelected = Signal(str)
+
+    def _hit_chosen(self, item: QListWidgetItem) -> None:
+        session_id = _as_text(item.data(Qt.ItemDataRole.UserRole))
+        if session_id:
+            self.hitSelected.emit(session_id)
+
+    def set_message_hits(self, hits: Optional[list[dict[str, Any]]], project_name: Callable[[Any], str]) -> None:
+        """None hides the section; a list (maybe empty) shows it."""
+        self.message_hits.clear()
+        visible = hits is not None
+        self.hits_title.setVisible(visible)
+        self.message_hits.setVisible(visible)
+        if not visible:
+            return
+        import html as _html
+        if not hits:
+            empty = QListWidgetItem("No messages match.")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.message_hits.addItem(empty)
+            return
+        accent = theme_tokens()["accent_text"]
+        for hit in hits:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, hit["session_id"])
+            plain = f"{project_name(hit.get('workspace'))} · {hit['title']}\n{hit['before']}{hit['match']}{hit['after']}"
+            item.setToolTip(plain)
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, plain)
+            label = QLabel(
+                f"<span>{_html.escape(project_name(hit.get('workspace')))} · {_html.escape(hit['title'])}</span><br>"
+                f"<span style='color:{theme_tokens()['muted']}'>{_html.escape(hit['before'])}"
+                f"<b style='color:{accent}'>{_html.escape(hit['match'])}</b>{_html.escape(hit['after'])}</span>")
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setWordWrap(True)
+            label.setContentsMargins(6, 4, 6, 4)
+            item.setSizeHint(QSize(100, max(46, label.sizeHint().height() + 6)))
+            self.message_hits.addItem(item)
+            self.message_hits.setItemWidget(item, label)
 
     def _archive_selected(self) -> None:
         item = self.sessions.currentItem()
@@ -6900,7 +9531,7 @@ class LeftRail(QWidget):
                 return
         name = Path(path).name or path
         item = QListWidgetItem(f"{name}\n{path}")
-        item.setIcon(_icon("folder"))
+        _themed_icon(item, "folder")
         item.setData(Qt.ItemDataRole.UserRole, path)
         item.setSizeHint(QSize(100, 47))
         self.projects.insertItem(0, item)
@@ -6956,6 +9587,10 @@ class LeftRail(QWidget):
             if session_id == current_id:
                 self.sessions.setCurrentItem(item)
         self._apply_session_filter(self.session_filter.text())
+        self.sync_empty_text()
+
+    def sync_empty_text(self) -> None:
+        self.no_sessions.setVisible(self.empty_text_enabled and self.sessions.count() == 0)
 
 
 class TerminalPane(QFrame):
@@ -6985,7 +9620,7 @@ class TerminalPane(QFrame):
         self.scope_label.setObjectName("meta")
         stop = QToolButton()
         stop.setObjectName("bareButton")
-        stop.setIcon(_icon("stop"))
+        _themed_icon(stop, "stop")
         stop.setToolTip(
             "Stop the shell command; child processes started by it may require manual termination"
         )
@@ -6995,7 +9630,7 @@ class TerminalPane(QFrame):
         self.stop_button = stop
         clear = QToolButton()
         clear.setObjectName("bareButton")
-        clear.setIcon(_icon("clear"))
+        _themed_icon(clear, "clear")
         clear.setToolTip("Clear terminal")
         clear.setAccessibleName("Clear terminal output")
         clear.clicked.connect(lambda: self.output.clear())
@@ -7003,7 +9638,7 @@ class TerminalPane(QFrame):
         self.clear_button = clear
         close = QToolButton()
         close.setObjectName("bareButton")
-        close.setIcon(_icon("close"))
+        _themed_icon(close, "close")
         close.setToolTip("Close terminal drawer (Ctrl+`)")
         close.setAccessibleName("Close terminal drawer")
         close.clicked.connect(self.closeRequested)
@@ -7119,6 +9754,8 @@ class TerminalPane(QFrame):
 
 class InspectorPane(QWidget):
     refreshRequested = Signal()
+    revertRequested = Signal(list)
+    undoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -7193,7 +9830,7 @@ class InspectorPane(QWidget):
         self.change_summary.setObjectName("title")
         refresh = QToolButton()
         refresh.setObjectName("bareButton")
-        refresh.setIcon(_icon("refresh"))
+        _themed_icon(refresh, "refresh")
         refresh.setToolTip("Refresh observed Git changes")
         refresh.setAccessibleName("Refresh Git changes")
         refresh.clicked.connect(self.refreshRequested)
@@ -7207,6 +9844,34 @@ class InspectorPane(QWidget):
         self.change_list.setMaximumHeight(175)
         self.change_list.setAccessibleName("Observed Git changes")
         changes_layout.addWidget(self.change_list)
+        # v2 undo: per-file revert, Revert all, and an Undo bar - git on disk.
+        self.undo_enabled = False
+        self.undo_note = QLabel("Read from git on disk. Reverting restores a file to its last commit.")
+        self.undo_note.setObjectName("meta")
+        self.undo_note.setWordWrap(True)
+        self.undo_note.hide()
+        changes_layout.addWidget(self.undo_note)
+        self.revert_all_button = QPushButton("Revert all changes")
+        self.revert_all_button.setObjectName("dangerButton")
+        self.revert_all_button.setAccessibleName("Revert every changed file to its last commit")
+        self.revert_all_button.clicked.connect(lambda: self.revertRequested.emit(list(self._change_paths)))
+        self.revert_all_button.hide()
+        changes_layout.addWidget(self.revert_all_button)
+        self.undo_bar = QFrame()
+        self.undo_bar.setObjectName("banner")
+        undo_layout = QHBoxLayout(self.undo_bar)
+        undo_layout.setContentsMargins(9, 5, 9, 5)
+        self.undo_label = QLabel("")
+        self.undo_label.setWordWrap(True)
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.setAccessibleName("Undo the revert and put the changes back on disk")
+        self.undo_button.clicked.connect(self.undoRequested)
+        undo_layout.addWidget(self.undo_label, 1)
+        undo_layout.addWidget(self.undo_button)
+        self.undo_bar.hide()
+        changes_layout.addWidget(self.undo_bar)
+        self._change_paths: list[str] = []
+        self.empty_changes_note = ""
         diff_title = QLabel("DIFF")
         diff_title.setObjectName("sectionTitle")
         changes_layout.addWidget(diff_title)
@@ -7227,16 +9892,87 @@ class InspectorPane(QWidget):
         self.activity = QListWidget()
         self.activity.setAccessibleName("Activity history")
         activity_layout.addWidget(self.activity, 1)
+        # v2 zones: the same events in Machine / Tor / Outside lanes.
+        self._activity_entries: list[tuple[str, str, str]] = []
+        self.lanes = QWidget()
+        lanes_layout = QVBoxLayout(self.lanes)
+        lanes_layout.setContentsMargins(0, 0, 0, 0)
+        lanes_layout.setSpacing(4)
+        self.lane_lists: dict[str, QListWidget] = {}
+        self.lane_titles: dict[str, QLabel] = {}
+        for zone, title in (("machine", "MACHINE"), ("tor", "TOR"), ("outside", "OUTSIDE")):
+            heading = QLabel(title)
+            heading.setObjectName("sectionTitle")
+            lane = QListWidget()
+            lane.setAccessibleName(f"{title.title()} activity")
+            lanes_layout.addWidget(heading)
+            lanes_layout.addWidget(lane, 2 if zone == "machine" else 1)
+            self.lane_lists[zone] = lane
+            self.lane_titles[zone] = heading
+        self.lanes.hide()
+        activity_layout.addWidget(self.lanes, 1)
+        # v2 netlog: export what left this machine.
+        self.netlog_button = QPushButton("Export network log")
+        self.netlog_button.setAccessibleName("Export the network log as JSON or CSV")
+        self.netlog_button.hide()
+        activity_layout.addWidget(self.netlog_button)
 
         self.tabs.addTab(self.context_tab, "Context")
         self.tabs.addTab(self.changes_tab, "Changes")
         self.tabs.addTab(self.activity_tab, "Activity")
+        # v2 runPanel: built always, shown as a fourth tab only while the
+        # feature is on.
+        self.run_panel = RunPanel()
 
-    def append_activity(self, text: str) -> None:
+    def set_run_tab(self, visible: bool) -> None:
+        index = self.tabs.indexOf(self.run_panel)
+        if visible and index < 0:
+            self.tabs.addTab(self.run_panel, "Run")
+        elif not visible and index >= 0:
+            self.tabs.removeTab(index)
+        # Four tabs have to fit the 292px inspector; three keep the original spacing.
+        self.tabs.tabBar().setStyleSheet(
+            "QTabBar::tab { padding: 12px 9px 10px 9px; }" if visible else "")
+
+    def show_run_tab(self) -> None:
+        if self.tabs.indexOf(self.run_panel) >= 0:
+            self.tabs.setCurrentWidget(self.run_panel)
+
+    _OUTSIDE = re.compile(r"Tor search|search over Tor|over Tor|DuckDuckGo|direct(ly)? download|"
+                          r"model download|downloaded|update check|model list|query|search allowed", re.IGNORECASE)
+    _TOR = re.compile(r"\bTor\b|circuit|SOCKS|proxy", re.IGNORECASE)
+
+    @classmethod
+    def zone_of(cls, text: str) -> str:
+        """Machine / Tor / Outside for an event that did not name its zone."""
+        if cls._OUTSIDE.search(text):
+            return "outside"
+        if cls._TOR.search(text):
+            return "tor"
+        return "machine"
+
+    def append_activity(self, text: str, zone: Optional[str] = None) -> None:
         stamp = datetime.now().strftime("%H:%M")
-        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {_brand_runtime_text(text)}"))
+        clean = _brand_runtime_text(text)
+        self.activity.insertItem(0, QListWidgetItem(f"{stamp}  {clean}"))
         while self.activity.count() > 150:
             self.activity.takeItem(self.activity.count() - 1)
+        lane = zone if zone in ("machine", "tor", "outside") else self.zone_of(clean)
+        self._activity_entries.insert(0, (stamp, clean, lane))
+        del self._activity_entries[150:]
+        target = self.lane_lists[lane]
+        target.insertItem(0, QListWidgetItem(f"{stamp}  {clean}"))
+        while target.count() > 150:
+            target.takeItem(target.count() - 1)
+        self._sync_lane_titles()
+
+    def _sync_lane_titles(self) -> None:
+        for zone, title in (("machine", "MACHINE"), ("tor", "TOR"), ("outside", "OUTSIDE")):
+            self.lane_titles[zone].setText(f"{title} · {self.lane_lists[zone].count()}")
+
+    def set_zones(self, on: bool) -> None:
+        self.activity.setVisible(not on)
+        self.lanes.setVisible(on)
 
     def update_snapshot(self, snapshot: dict[str, Any]) -> None:
         self.refresh_button.setEnabled(bool(snapshot.get("root")))
@@ -7250,17 +9986,40 @@ class InspectorPane(QWidget):
         self.populate_tree(snapshot.get("file_tree") or [], bool(snapshot.get("tree_truncated")))
         changes = snapshot.get("changes") or []
         self.change_list.clear()
+        self._change_paths = [_as_text(change.get("path", "")) for change in changes]
+        revertable = self.undo_enabled and bool(snapshot.get("is_git"))
         for change in changes:
             status = _as_text(change.get("status", "?"))
             path = _as_text(change.get("path", ""))
             original = change.get("original_path")
             text = f"{status:>2}  {path}" + (f"  from {original}" if original else "")
-            self.change_list.addItem(QListWidgetItem(text))
+            item = QListWidgetItem(text)
+            self.change_list.addItem(item)
+            if revertable:
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(4, 0, 2, 0)
+                label = QLabel(text)
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                revert = QToolButton()
+                revert.setObjectName("bareButton")
+                _themed_icon(revert, "revert", 15)
+                revert.setToolTip(f"Revert {path} to its last commit")
+                revert.setAccessibleName(f"Revert {path}")
+                revert.clicked.connect(lambda _checked=False, p=path: self.revertRequested.emit([p]))
+                row_layout.addWidget(label, 1)
+                row_layout.addWidget(revert)
+                self.change_list.setItemWidget(item, row)
+        self.undo_note.setVisible(revertable)
+        self.revert_all_button.setVisible(revertable and len(changes) > 1)
         if changes:
             self.change_summary.setText(snapshot.get("summary") or f"{len(changes)} observed change(s)")
         else:
             self.change_summary.setText("Working tree clean" if snapshot.get("is_git") else "Not a Git repository")
-        self.diff_view.setPlainText(snapshot.get("diff") or "No diff to display.")
+        diff = snapshot.get("diff") or "No diff to display."
+        if not changes and self.empty_changes_note and snapshot.get("is_git"):
+            diff = self.empty_changes_note
+        self.diff_view.setPlainText(diff)
 
     def populate_tree(self, paths: list[str], truncated: bool = False) -> None:
         self.file_tree.blockSignals(True)
@@ -7285,6 +10044,7 @@ class InspectorPane(QWidget):
                         node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                         node.setCheckState(0, Qt.CheckState.Unchecked)
                     else:
+                        node.setData(0, _ICON_ROLE, "folder:18")
                         node.setIcon(0, _icon("folder"))
                 parent = node
         self.file_tree.blockSignals(False)
@@ -7556,6 +10316,129 @@ class ModelManagerDialog(QDialog):
         self.progress.setFormat("Installed locally")
 
 
+def _feature_catalog(desktop_core: Any) -> tuple[tuple[str, str, str], ...]:
+    """(key, name, description) for every v2 feature, from the core. Without
+    the core there are no v2 features: the workbench is exactly the original."""
+    return tuple(getattr(desktop_core, "FEATURE_FLAGS", ()) or ())
+
+
+class FeatureToggles(QWidget):
+    """The list of v2 features with Turn all on / Turn all off.
+
+    Used twice - in the toolbar sparkle popover and in Settings -> Features -
+    and both drive the same window.features dict, so they never disagree.
+    """
+
+    INTRO = (
+        "Everything from the original workbench stays where it is. These add to it, "
+        "and each one stays hidden until you turn it on."
+    )
+
+    def __init__(self, window: Any, parent: Optional[QWidget] = None, *, compact: bool = False) -> None:
+        super().__init__(parent)
+        self.window = window
+        self.boxes: dict[str, QCheckBox] = {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("New features")
+        title.setObjectName("title")
+        self.count_label = QLabel()
+        self.count_label.setObjectName("meta")
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.count_label)
+        outer.addLayout(header)
+        intro = QLabel(self.INTRO)
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        rows = QWidget()
+        rows_layout = QVBoxLayout(rows)
+        rows_layout.setContentsMargins(0, 4, 0, 4)
+        rows_layout.setSpacing(8 if compact else 10)
+        for key, name, description in _feature_catalog(getattr(window, "desktop_core", None)):
+            box = QCheckBox(name)
+            box.setObjectName(f"feature_{key}")
+            box.setAccessibleName(f"{name}. {description}")
+            box.setToolTip(description)
+            box.setChecked(bool(window.features.get(key)))
+            box.toggled.connect(lambda checked, flag=key: self.window.set_feature(flag, checked))
+            note = QLabel(description)
+            note.setObjectName("meta")
+            note.setWordWrap(True)
+            note.setContentsMargins(24, 0, 0, 0)
+            rows_layout.addWidget(box)
+            rows_layout.addWidget(note)
+            self.boxes[key] = box
+        if compact:
+            scroll = QScrollArea()
+            scroll.setObjectName("settingsPage")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(rows)
+            scroll.setMinimumHeight(260)
+            outer.addWidget(scroll, 1)
+        else:
+            outer.addWidget(rows)
+        footer = QHBoxLayout()
+        self.all_on = QPushButton("Turn all on")
+        self.all_on.setAccessibleName("Turn all new features on")
+        self.all_on.clicked.connect(lambda: self.window.set_all_features(True))
+        self.all_off = QPushButton("Turn all off")
+        self.all_off.setAccessibleName("Turn all new features off")
+        self.all_off.clicked.connect(lambda: self.window.set_all_features(False))
+        self.run_setup = QPushButton("Run setup")
+        self.run_setup.setAccessibleName("Run first-launch setup again")
+        self.run_setup.clicked.connect(lambda: self.window.open_setup())
+        footer.addWidget(self.all_on)
+        footer.addWidget(self.all_off)
+        footer.addStretch(1)
+        footer.addWidget(self.run_setup)
+        outer.addLayout(footer)
+        self.sync()
+
+    def sync(self) -> None:
+        features = self.window.features
+        for key, box in self.boxes.items():
+            if box.isChecked() != bool(features.get(key)):
+                box.blockSignals(True)
+                box.setChecked(bool(features.get(key)))
+                box.blockSignals(False)
+        on = sum(1 for key in self.boxes if features.get(key))
+        self.count_label.setText(f"{on} of {len(self.boxes)} on")
+        self.run_setup.setVisible(bool(features.get("setup")))
+
+
+class FeaturesPopover(QFrame):
+    """The toolbar sparkle popover: the same toggles as Settings -> Features."""
+
+    def __init__(self, window: Any) -> None:
+        super().__init__(window, Qt.WindowType.Popup)
+        self.setObjectName("popover")
+        self.setAccessibleName("New features")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        self.toggles = FeatureToggles(window, self, compact=True)
+        layout.addWidget(self.toggles)
+        self.resize(400, 520)
+
+    def show_below(self, anchor: QWidget) -> None:
+        self.toggles.sync()
+        point = anchor.mapToGlobal(anchor.rect().bottomRight())
+        screen = anchor.screen()
+        height = 520
+        if screen is not None:
+            height = min(520, screen.availableGeometry().bottom() - point.y() - 12)
+        self.resize(400, max(260, height))
+        self.move(point.x() - self.width(), point.y() + 6)
+        self.show()
+        first = next(iter(self.toggles.boxes.values()), None)
+        if first is not None:
+            first.setFocus(Qt.FocusReason.PopupFocusReason)
+
+
 class SettingsDialog(QDialog):
     def __init__(
         self,
@@ -7581,12 +10464,24 @@ class SettingsDialog(QDialog):
             min(660, available.height() - 80) if available else 660,
         )
         preferences = dict(getattr(self._window(), "preferences", {}) or {})
+        self._feature_sections: dict[str, QWidget] = {}
         tabs = QTabWidget(self)
         tabs.setAccessibleName("Onionmind settings sections")
+        self.tabs = tabs
         tabs.addTab(self._page(self._general_page(preferences)), "General")
         tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
         tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
         tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
+        # v2: one tab that lists the features, then the tabs individual
+        # features own, added and removed live as they are switched.
+        self.feature_toggles: Optional[FeatureToggles] = None
+        self._feature_tabs: dict[str, QWidget] = {}
+        window = self._window()
+        if window is not None and _feature_catalog(window.desktop_core):
+            self.feature_toggles = FeatureToggles(window, self)
+            tabs.addTab(self._page(self._padded(self.feature_toggles)), "Features")
+            window.featuresChanged.connect(self._sync_features)
+            self._sync_features()
 
         self.storage_feedback = QLabel()
         self.storage_feedback.setObjectName("meta")
@@ -7607,6 +10502,409 @@ class SettingsDialog(QDialog):
         pending = update_bridge.pending() if update_bridge and update_bridge.available else None
         if pending is not None:
             self._offer_restart(str(pending))
+
+    # Feature-owned tabs, in the order they appear after Features.
+    FEATURE_TABS: tuple[tuple[str, str, str], ...] = (
+        ("keyboard", "Keyboard", "_keyboard_page"),
+        ("rules", "Agent rules", "_rules_page"),
+        ("presets", "Presets", "_presets_page"),
+    )
+
+    def _appearance_section(self) -> QWidget:
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+        heading = QLabel("Appearance")
+        heading.setObjectName("brand")
+        layout.addWidget(heading)
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        window = self._window()
+        values = window._appearance() if window is not None else {"theme": "dark", "ui_scale": 100, "notify": False}
+        self.theme_combo = QComboBox()
+        self.theme_combo.setAccessibleName("Theme")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.setCurrentIndex(self.theme_combo.findData(values["theme"]))
+        form.addRow("Theme", self.theme_combo)
+        self.ui_scale_combo = QComboBox()
+        self.ui_scale_combo.setAccessibleName("Interface size")
+        for size in (90, 100, 110, 125):
+            self.ui_scale_combo.addItem(f"{size}%", size)
+        self.ui_scale_combo.setCurrentIndex(self.ui_scale_combo.findData(values["ui_scale"]))
+        form.addRow("Interface size", self.ui_scale_combo)
+        self.notify_box = QCheckBox("Notify me when a reply or run finishes, or needs my approval")
+        self.notify_box.setChecked(bool(values["notify"]))
+        self.notify_box.setToolTip("Uses the system's own notifications, and only while Onionmind is not in front.")
+        form.addRow("Notifications", self.notify_box)
+        layout.addLayout(form)
+        if window is not None:
+            self.theme_combo.currentIndexChanged.connect(
+                lambda _i: window.set_appearance("theme", self.theme_combo.currentData()))
+            self.ui_scale_combo.currentIndexChanged.connect(
+                lambda _i: window.set_appearance("ui_scale", self.ui_scale_combo.currentData()))
+            self.notify_box.toggled.connect(lambda on: window.set_appearance("notify", on))
+        self._feature_sections["appearance"] = section
+        return section
+
+    def _setup_section(self) -> QWidget:
+        section = QWidget()
+        layout = QHBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+        note = QLabel("Walk through model, Tor and project again.")
+        note.setWordWrap(True)
+        self.setup_again = QPushButton("Run setup again")
+        self.setup_again.setAccessibleName("Run first-launch setup again")
+        self.setup_again.clicked.connect(self._run_setup_again)
+        layout.addWidget(note, 1)
+        layout.addWidget(self.setup_again)
+        self._feature_sections["setup"] = section
+        return section
+
+    def _run_setup_again(self) -> None:
+        window = self._window()
+        self.done(0)
+        if window is not None:
+            window.open_setup()
+
+    def _lock_section(self) -> QWidget:
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+        heading = QLabel("Auto-delete and lock")
+        heading.setObjectName("brand")
+        layout.addWidget(heading)
+        window = self._window()
+        settings = window._lock_settings() if window is not None else {}
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        self.auto_delete_combo = QComboBox()
+        self.auto_delete_combo.setAccessibleName("Delete conversations automatically")
+        for label, days in (("Never", 0), ("Older than 1 day", 1), ("Older than 7 days", 7), ("Older than 30 days", 30)):
+            self.auto_delete_combo.addItem(label, days)
+        self.auto_delete_combo.setCurrentIndex(max(0, self.auto_delete_combo.findData(int(settings.get("auto_delete_days") or 0))))
+        form.addRow("Delete conversations", self.auto_delete_combo)
+        self.auto_delete_note = QLabel("")
+        self.auto_delete_note.setObjectName("meta")
+        self.auto_delete_note.setWordWrap(True)
+        self.delete_now = QPushButton("Delete now")
+        self.delete_now.setObjectName("dangerButton")
+        note_row = QHBoxLayout()
+        note_row.addWidget(self.auto_delete_note, 1)
+        note_row.addWidget(self.delete_now)
+        form.addRow("", note_row)
+        self.lock_after_combo = QComboBox()
+        self.lock_after_combo.setAccessibleName("Lock after idle time")
+        for label, minutes in (("Never", 0), ("After 5 minutes idle", 5), ("After 15 minutes idle", 15), ("After 1 hour idle", 60)):
+            self.lock_after_combo.addItem(label, minutes)
+        self.lock_after_combo.setCurrentIndex(max(0, self.lock_after_combo.findData(int(settings.get("lock_after") or 0))))
+        form.addRow("Lock", self.lock_after_combo)
+        self.passphrase_field = QLineEdit()
+        self.passphrase_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self.passphrase_field.setPlaceholderText("New passphrase")
+        self.passphrase_field.setAccessibleName("New passphrase")
+        self.passphrase_button = QPushButton("Set passphrase")
+        pass_row = QHBoxLayout()
+        pass_row.addWidget(self.passphrase_field, 1)
+        pass_row.addWidget(self.passphrase_button)
+        form.addRow("Passphrase", pass_row)
+        self.lock_now_button = QPushButton("Lock now")
+        form.addRow("", self.lock_now_button)
+        layout.addLayout(form)
+        self.lock_feedback = QLabel("Only a salted scrypt hash of the passphrase is stored.")
+        self.lock_feedback.setObjectName("meta")
+        self.lock_feedback.setWordWrap(True)
+        layout.addWidget(self.lock_feedback)
+        if window is not None:
+            self.auto_delete_combo.currentIndexChanged.connect(self._auto_delete_changed)
+            self.delete_now.clicked.connect(self._delete_old_now)
+            self.lock_after_combo.currentIndexChanged.connect(
+                lambda _i: window.set_lock_setting("lock_after", self.lock_after_combo.currentData()))
+            self.passphrase_button.clicked.connect(self._set_passphrase)
+            self.lock_now_button.clicked.connect(self._lock_now)
+            self._describe_old()
+        self._feature_sections["lock"] = section
+        return section
+
+    def _describe_old(self) -> None:
+        window = self._window()
+        days = int(self.auto_delete_combo.currentData() or 0)
+        old = len(window.old_sessions()) if window is not None and days else 0
+        self.delete_now.setVisible(bool(days))
+        if not days:
+            self.auto_delete_note.setText("Conversations stay until you delete them.")
+            return
+        span = "1 day" if days == 1 else f"{days} days"
+        self.auto_delete_note.setText(
+            f"{old} conversation{'s are' if old != 1 else ' is'} older than {span} and will be deleted.")
+
+    def _auto_delete_changed(self) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_lock_setting("auto_delete_days", int(self.auto_delete_combo.currentData() or 0))
+        self._describe_old()
+
+    def _delete_old_now(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        removed = window._auto_delete_old()
+        self.lock_feedback.setText(f"Deleted {removed} old conversation{'s' if removed != 1 else ''}.")
+        self._describe_old()
+
+    def _set_passphrase(self) -> None:
+        window = self._window()
+        text = self.passphrase_field.text()
+        if window is None or len(text) < 4:
+            self.lock_feedback.setText("Use a passphrase of at least four characters.")
+            return
+        window.set_passphrase(text)
+        self.passphrase_field.clear()
+        self.passphrase_button.setText("Change passphrase")
+        self.lock_feedback.setText("Passphrase set. Only a salted scrypt hash of it is stored.")
+
+    def _lock_now(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if not window.has_passphrase():
+            self.lock_feedback.setText("Set a passphrase first; without one anybody could unlock.")
+            return
+        self.done(0)
+        window.lock_now()
+
+    def _keyboard_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Keyboard")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        window = self._window()
+        features = getattr(window, "features", {}) if window is not None else {}
+        enter_sends = bool(getattr(window, "preferences", {}).get("enter_sends", True)) if window else True
+        native = lambda seq: QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+        rows = [
+            ("Command palette", native("Ctrl+K"), features.get("palette")),
+            ("New task", native("Ctrl+N"), True),
+            ("Open a project folder", native("Ctrl+O"), True),
+            ("Focus the composer", native("Ctrl+L"), True),
+            ("Settings", native("Ctrl+,"), True),
+            ("Terminal", native("Ctrl+`"), True),
+            ("Inspector", native("Ctrl+Shift+I"), True),
+            ("Boundary map", native("Ctrl+B"), features.get("boundary")),
+            ("Export conversation", native("Ctrl+Shift+S"), True),
+            ("Stop a run or close a panel", "Esc", True),
+            ("Send", "Enter" if enter_sends else native("Ctrl+Return"), True),
+            ("New line", "Shift+Enter" if enter_sends else "Enter", True),
+            ("Keyboard shortcuts", "?", True),
+        ]
+        form = QFormLayout()
+        form.setHorizontalSpacing(24)
+        self.keyboard_rows: dict[str, str] = {}
+        for label, keys, shown in rows:
+            if not shown:
+                continue
+            chip = QLabel(keys)
+            chip.setObjectName("kbd")
+            chip.setAccessibleName(f"{label}: {keys}")
+            form.addRow(label, chip)
+            self.keyboard_rows[label] = keys
+        outer.addLayout(form)
+        motion = QLabel(
+            "Animations stop when the system asks for reduced motion (Windows, GNOME or macOS), "
+            "or when Animation is set to Reduced in General.")
+        motion.setObjectName("meta")
+        motion.setWordWrap(True)
+        outer.addWidget(motion)
+        outer.addStretch(1)
+        return page
+
+    def _rules_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        window = self._window()
+        core = getattr(window, "desktop_core", None)
+        workspace = getattr(window, "workspace", None)
+        heading = QLabel(f"Agent rules for {Path(workspace).name}" if workspace else "Agent rules")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        if not workspace or not callable(getattr(core, "load_rules", None)):
+            note = QLabel("Open a project to set its Agent rules.")
+            note.setObjectName("meta")
+            outer.addWidget(note)
+            outer.addStretch(1)
+            return page
+        intro = QLabel("Rules apply only to this project. Anything they don’t allow still asks you first, "
+                       "or stops safely.")
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        rules = core.load_rules(window.settings_data, workspace)
+        self.rule_boxes: dict[str, QCheckBox] = {}
+        for key, name, description in core.RULE_FLAGS:
+            box = QCheckBox(name)
+            box.setChecked(bool(rules.get(key)))
+            box.setAccessibleName(f"{name}. {description}")
+            note = QLabel(description)
+            note.setObjectName("meta")
+            note.setContentsMargins(24, 0, 0, 4)
+            outer.addWidget(box)
+            outer.addWidget(note)
+            self.rule_boxes[key] = box
+        blocked_title = QLabel("Never touch these paths")
+        blocked_title.setObjectName("title")
+        self.rule_blocked = QLineEdit(_as_text(rules.get("blocked")))
+        self.rule_blocked.setAccessibleName("Paths Agent can never read or edit in this project")
+        blocked_help = QLabel("Comma separated. Agent can’t read or edit them, even in YOLO.")
+        blocked_help.setObjectName("meta")
+        notes_title = QLabel("Project instructions")
+        notes_title.setObjectName("title")
+        self.rule_notes = QPlainTextEdit(_as_text(rules.get("notes")))
+        self.rule_notes.setPlaceholderText("Use minitest, not rspec. Keep changes small.")
+        self.rule_notes.setAccessibleName("Project instructions for Agent")
+        self.rule_notes.setMaximumHeight(110)
+        notes_help = QLabel("Sent to the model with every Agent run in this project, alongside AGENTS.md.")
+        notes_help.setObjectName("meta")
+        notes_help.setWordWrap(True)
+        for widget in (blocked_title, self.rule_blocked, blocked_help, notes_title, self.rule_notes, notes_help):
+            outer.addWidget(widget)
+        outer.addStretch(1)
+        self._rules_timer = QTimer(self)
+        self._rules_timer.setSingleShot(True)
+        self._rules_timer.setInterval(350)
+        self._rules_timer.timeout.connect(self._save_rules)
+        for box in self.rule_boxes.values():
+            box.toggled.connect(lambda _on: self._save_rules())
+        self.rule_blocked.editingFinished.connect(self._save_rules)
+        self.rule_notes.textChanged.connect(self._rules_timer.start)
+        return page
+
+    def _save_rules(self) -> None:
+        window = self._window()
+        if window is None or not hasattr(self, "rule_boxes"):
+            return
+        rules = {key: box.isChecked() for key, box in self.rule_boxes.items()}
+        rules["blocked"] = self.rule_blocked.text()
+        rules["notes"] = self.rule_notes.toPlainText()
+        window.save_project_rules(rules)
+
+    def _presets_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Presets")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        intro = QLabel("A preset is the system prompt Onionmind sends before your message. "
+                       "Pick one from the composer.")
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        window = self._window()
+        self.preset_list = QListWidget()
+        self.preset_list.setAccessibleName("Presets")
+        self.preset_list.setMaximumHeight(130)
+        for preset in (window.presets() if window is not None else []):
+            item = QListWidgetItem(f"{preset['name']} · {preset['short']}")
+            item.setData(Qt.ItemDataRole.UserRole, preset["id"])
+            self.preset_list.addItem(item)
+        outer.addWidget(self.preset_list)
+        self.preset_label = QLabel("")
+        self.preset_label.setObjectName("title")
+        outer.addWidget(self.preset_label)
+        self.preset_editor = QPlainTextEdit()
+        self.preset_editor.setAccessibleName("System prompt text")
+        outer.addWidget(self.preset_editor, 1)
+        row = QHBoxLayout()
+        self.preset_use = QPushButton("Use this preset")
+        self.preset_use.setObjectName("primaryButton")
+        self.preset_reset = QPushButton("Reset to default text")
+        row.addWidget(self.preset_use)
+        row.addStretch(1)
+        row.addWidget(self.preset_reset)
+        outer.addLayout(row)
+        self.preset_list.currentRowChanged.connect(lambda _row: self._show_preset())
+        self.preset_editor.textChanged.connect(self._preset_edited)
+        self.preset_use.clicked.connect(
+            lambda: window.set_preset(self._current_preset_id()) if window is not None else None)
+        self.preset_reset.clicked.connect(self._reset_preset)
+        if self.preset_list.count():
+            current = _as_text(getattr(window, "settings_data", {}).get("preset") or "default")
+            ids = [self.preset_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.preset_list.count())]
+            self.preset_list.setCurrentRow(ids.index(current) if current in ids else 0)
+        return page
+
+    def _current_preset_id(self) -> str:
+        item = self.preset_list.currentItem()
+        return _as_text(item.data(Qt.ItemDataRole.UserRole)) if item is not None else "default"
+
+    def _show_preset(self) -> None:
+        window = self._window()
+        preset = next((p for p in window.presets() if p["id"] == self._current_preset_id()), None) if window else None
+        if preset is None:
+            return
+        self.preset_label.setText(f"System prompt for {preset['name']}")
+        self.preset_editor.blockSignals(True)
+        self.preset_editor.setPlainText(preset["text"])
+        self.preset_editor.blockSignals(False)
+
+    def _preset_edited(self) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_preset_text(self._current_preset_id(), self.preset_editor.toPlainText())
+
+    def _reset_preset(self) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_preset_text(self._current_preset_id(), None)
+            self._show_preset()
+
+    @staticmethod
+    def _padded(content: QWidget) -> QWidget:
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.addWidget(content)
+        layout.addStretch(1)
+        return holder
+
+    def _sync_features(self, *_args: Any) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if self.feature_toggles is not None:
+            self.feature_toggles.sync()
+        for key, label, builder_name in self.FEATURE_TABS:
+            on = bool(window.features.get(key))
+            page = self._feature_tabs.get(key)
+            builder = getattr(self, builder_name, None)
+            if on and page is None and callable(builder):
+                page = self._page(builder())
+                self._feature_tabs[key] = page
+                self.tabs.addTab(page, label)
+            elif not on and page is not None:
+                index = self.tabs.indexOf(page)
+                if index >= 0:
+                    self.tabs.removeTab(index)
+                page.deleteLater()
+                self._feature_tabs.pop(key, None)
+        for key, section in getattr(self, "_feature_sections", {}).items():
+            section.setVisible(bool(window.features.get(key)))
+
+    def show_tab(self, label: str) -> bool:
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == label:
+                self.tabs.setCurrentIndex(index)
+                return True
+        return False
+
+    def done(self, result: int) -> None:
+        window = self._window()
+        if window is not None and self.feature_toggles is not None:
+            try:
+                window.featuresChanged.disconnect(self._sync_features)
+            except (RuntimeError, TypeError):
+                pass
+        super().done(result)
 
     @staticmethod
     def _page(content: QWidget) -> QScrollArea:
@@ -7743,6 +11041,8 @@ class SettingsDialog(QDialog):
         if line is not None:
             line.editingFinished.connect(self._commit_context)
 
+        outer.addWidget(self._appearance_section())
+        outer.addWidget(self._setup_section())
         window_heading = QLabel("Window")
         window_heading.setObjectName("brand")
         outer.addWidget(window_heading)
@@ -7809,6 +11109,7 @@ class SettingsDialog(QDialog):
         self.draft_box.toggled.connect(
             lambda checked: self._set_preference("remember_drafts", checked)
         )
+        outer.addWidget(self._lock_section())
         outer.addStretch(1)
         return page
 
@@ -8034,12 +11335,12 @@ class SettingsDialog(QDialog):
         parser = _optional_callable(self.desktop_core(), "parse_context_window")
         tokens = parser(text) if callable(parser) else self._context_tokens(text)
         if tokens is None:
-            self.context_hint.setStyleSheet("color: #d88675;")
+            self.context_hint.setStyleSheet(f"color: {theme_tokens()['bad']};")
             self.context_hint.setText("Enter a token count, for example 24000 or 24k.")
             return
         warner = _optional_callable(self.desktop_core(), "context_window_warning")
         warning = warner(tokens) if callable(warner) else ""
-        self.context_hint.setStyleSheet("color: #d88675;" if warning else "")
+        self.context_hint.setStyleSheet(f"color: {theme_tokens()['bad']};" if warning else "")
         self.context_hint.setText(
             warning or f"{tokens:,} tokens · type any count, or pick a preset from the list"
         )
@@ -8105,6 +11406,7 @@ class SettingsDialog(QDialog):
             return
         self.check_updates_button.setEnabled(False)
         self.update_feedback.setText("Checking for updates through Tor…")
+        window._egress("Tor", "Update check · github.com")
 
         def check_job(signals: WorkerSignals) -> Any:
             del signals
@@ -8250,6 +11552,8 @@ class SettingsDialog(QDialog):
 
 
 class OnionmindWindow(QMainWindow):
+    featuresChanged = Signal(object)
+
     def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
         super().__init__()
         self.core = core
@@ -8265,6 +11569,8 @@ class OnionmindWindow(QMainWindow):
         self.harness_bridge = HarnessBridge(desktop_core, core)
         self.update_bridge = UpdateBridge(core, desktop_core)
         self.settings_data = {} if demo else self.settings_bridge.load()
+        self.features: dict[str, bool] = self._load_features()
+        self._features_popover: Optional[FeaturesPopover] = None
         self.workspace: Optional[str] = None
         self.current_snapshot: dict[str, Any] = {}
         self.current_session: Any = None
@@ -8289,10 +11595,59 @@ class OnionmindWindow(QMainWindow):
         self._inspector_requested = True
         self._model_dialog: Optional[ModelManagerDialog] = None
         self._update_timer: Optional[QTimer] = None
+        # v2 run state: the webAsk question, the structured agent stream, and
+        # open timeline steps. All empty while the features are off.
+        self._web_ask_generation = 0
+        self._web_ask_card: Optional[QWidget] = None
+        self._web_ask_task = ""
+        self._agent_stream = False
+        self._agent_buffer = b""
+        self._agent_rules: Optional[dict[str, Any]] = None
+        self._agent_steps: dict[str, Any] = {}
+        self._agent_permission: Optional[dict[str, Any]] = None
+        self._agent_cards: list[QWidget] = []
+        self._agent_outcome: Optional[str] = None
+        self._run_allow_all = False
+        self._open_steps: dict[str, Any] = {}
+        # v2 model power and live numbers - only ever filled from real probes.
+        self._model_power: dict[str, Any] = {}
+        self._model_loading: Optional[str] = None
+        self._live_tps: Optional[float] = None
+        self._turn_reasoning = 0.0
+        self._last_stats: dict[str, Any] = {}
+        self._context_used_real: Optional[int] = None
+        self.egress_path = self.data_root / "network-log.jsonl"
+        self._egress_counts: Optional[dict[str, int]] = None
+        self._turn_searches: list[dict[str, Any]] = []
+        self._searching = False
+        self._pulling: Optional[str] = None
+        self._edit_from: Optional[int] = None
+        self._revert_record: Any = None
+        self._fault: Optional[str] = None
+        self._fault_card: Optional[NoticeCard] = None
+        self._no_models = False
+        self._starters: Optional[QWidget] = None
+        self._last_agent_task: Optional[str] = None
+        self._last_input = time.monotonic()
+        self._tray: Any = None
+        self.last_notification: Optional[tuple[str, str]] = None
         self._build_window()
         self.preferences = self._load_preferences()
         self._apply_preferences()
         self._install_shortcuts()
+        self.lock_overlay = LockOverlay(self, self._verify_passphrase)
+        self.lock_overlay.unlocked.connect(lambda: self.set_status("Unlocked."))
+        self.setup_overlay = SetupOverlay(self)
+        self.idle_timer = QTimer(self)
+        self.idle_timer.setInterval(15_000)
+        self.idle_timer.timeout.connect(self._check_idle)
+        self.housekeeping_timer = QTimer(self)
+        self.housekeeping_timer.setInterval(3600 * 1000)
+        self.housekeeping_timer.timeout.connect(self._auto_delete_old)
+        self._idle_tracking = False
+        self._apply_features()
+        if not demo and self.feature("setup") and not self.settings_data.get("setup_done"):
+            QTimer.singleShot(0, self.open_setup)
         if demo:
             self._populate_demo()
         else:
@@ -8326,7 +11681,9 @@ class OnionmindWindow(QMainWindow):
         toolbar = QWidget()
         toolbar.setObjectName("toolbar")
         toolbar.setFixedHeight(57)
+        self.toolbar_widget = toolbar
         toolbar_layout = QHBoxLayout(toolbar)
+        self.toolbar_layout = toolbar_layout
         toolbar_layout.setContentsMargins(10, 7, 12, 7)
         toolbar_layout.setSpacing(9)
 
@@ -8357,7 +11714,7 @@ class OnionmindWindow(QMainWindow):
         rail_toggle.setObjectName("bareButton")
         rail_toggle.setCheckable(True)
         rail_toggle.setChecked(True)
-        rail_toggle.setIcon(_icon("rail"))
+        _themed_icon(rail_toggle, "rail")
         rail_toggle.setToolTip("Toggle projects and sessions")
         rail_toggle.setAccessibleName("Toggle projects and sessions rail")
         rail_toggle.clicked.connect(self.toggle_rail)
@@ -8380,6 +11737,10 @@ class OnionmindWindow(QMainWindow):
         self.branch_label.setAccessibleName("Current Git branch")
         toolbar_layout.addWidget(self.branch_label)
         toolbar_layout.addStretch(1)
+        self.boundary_button = BoundaryButton()
+        self.boundary_button.clicked.connect(lambda: self.toggle_boundary())
+        self.boundary_button.hide()
+        toolbar_layout.addWidget(self.boundary_button)
 
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(190)
@@ -8387,6 +11748,7 @@ class OnionmindWindow(QMainWindow):
         self.model_combo.setAccessibleName("Onionmind model")
         self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
+        self.model_combo.activated.connect(lambda _index: self._model_picked())
         toolbar_layout.addWidget(self.model_combo)
         toolbar_layout.addWidget(self._build_context_slider())
         self.model_status = StatusPill("Model", "Checking", "busy")
@@ -8398,11 +11760,37 @@ class OnionmindWindow(QMainWindow):
         self.tor_status.clicked.connect(self._toggle_tor)
         toolbar_layout.addWidget(self.tor_status)
 
+        self.lock_button = QToolButton()
+        self.lock_button.setObjectName("bareButton")
+        _themed_icon(self.lock_button, "lock")
+        self.lock_button.setToolTip("Lock Onionmind")
+        self.lock_button.setAccessibleName("Lock Onionmind")
+        self.lock_button.clicked.connect(lambda: self.lock_now())
+        self.lock_button.hide()
+        toolbar_layout.addWidget(self.lock_button)
+
+        self.palette_button = QPushButton("⌘K" if sys.platform == "darwin" else "Ctrl K")
+        self.palette_button.setObjectName("chipButton")
+        self.palette_button.setToolTip("Command palette (Ctrl+K)")
+        self.palette_button.setAccessibleName("Open the command palette")
+        self.palette_button.clicked.connect(self.open_palette)
+        self.palette_button.hide()
+        toolbar_layout.addWidget(self.palette_button)
+
+        self.features_button = QToolButton()
+        self.features_button.setObjectName("bareButton")
+        _themed_icon(self.features_button, "sparkle")
+        self.features_button.setToolTip("New features. Each stays hidden until you turn it on.")
+        self.features_button.setAccessibleName("New features")
+        self.features_button.clicked.connect(self.open_features_popover)
+        self.features_button.setVisible(bool(_feature_catalog(self.desktop_core)))
+        toolbar_layout.addWidget(self.features_button)
+
         terminal_toggle = QToolButton()
         terminal_toggle.setObjectName("bareButton")
         terminal_toggle.setCheckable(True)
         terminal_toggle.setChecked(True)
-        terminal_toggle.setIcon(_icon("terminal"))
+        _themed_icon(terminal_toggle, "terminal")
         terminal_toggle.setToolTip("Toggle terminal drawer (Ctrl+`)")
         terminal_toggle.setAccessibleName("Toggle terminal drawer")
         terminal_toggle.clicked.connect(self.toggle_terminal)
@@ -8412,13 +11800,16 @@ class OnionmindWindow(QMainWindow):
         inspector_toggle.setObjectName("bareButton")
         inspector_toggle.setCheckable(True)
         inspector_toggle.setChecked(True)
-        inspector_toggle.setIcon(_icon("inspector"))
+        _themed_icon(inspector_toggle, "inspector")
         inspector_toggle.setToolTip("Toggle inspector (Ctrl+Shift+I)")
         inspector_toggle.setAccessibleName("Toggle context, changes, and activity inspector")
         inspector_toggle.clicked.connect(self.toggle_inspector)
         self.inspector_toggle = inspector_toggle
         toolbar_layout.addWidget(inspector_toggle)
         root_layout.addWidget(toolbar)
+        self.boundary_panel = BoundaryPanel()
+        self.boundary_panel.close_button.clicked.connect(lambda: self.toggle_boundary(False))
+        root_layout.addWidget(self.boundary_panel)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -8437,6 +11828,8 @@ class OnionmindWindow(QMainWindow):
         self.left_rail.archiveRequested.connect(self.archive_session)
         self.left_rail.deleteSessionRequested.connect(self.delete_session_from_machine)
         self.left_rail.renameSessionRequested.connect(self.rename_session)
+        self.left_rail.hitSelected.connect(self.load_session)
+        self.left_rail.session_filter.textChanged.connect(self._session_search)
         self.main_splitter.addWidget(self.left_rail)
 
         center = QWidget()
@@ -8451,6 +11844,13 @@ class OnionmindWindow(QMainWindow):
         self.terminal.closeRequested.connect(lambda: self.toggle_terminal(False))
         self.terminal.stateChanged.connect(self.set_status)
         center_layout.addWidget(self.terminal)
+        # v2 errors / empty: a red fault card or the no-model banner sits here.
+        self.fault_host = QWidget()
+        self.fault_host.setObjectName("faultHost")
+        self.fault_layout = QVBoxLayout(self.fault_host)
+        self.fault_layout.setContentsMargins(12, 8, 12, 0)
+        self.fault_host.hide()
+        center_layout.addWidget(self.fault_host)
         self.composer_frame = self._build_composer()
         center_layout.addWidget(self.composer_frame)
         self.retry_button = QPushButton("Retry last turn")
@@ -8463,6 +11863,10 @@ class OnionmindWindow(QMainWindow):
 
         self.inspector = InspectorPane()
         self.inspector.refreshRequested.connect(self.refresh_workspace)
+        self.inspector.run_panel.stopRequested.connect(self.stop_active)
+        self.inspector.netlog_button.clicked.connect(self.open_network_log)
+        self.inspector.revertRequested.connect(self._revert_paths)
+        self.inspector.undoRequested.connect(self._undo_revert)
         self.main_splitter.addWidget(self.inspector)
         self.main_splitter.setSizes([224, 860, 292])
         self.main_splitter.setStretchFactor(0, 0)
@@ -8481,6 +11885,16 @@ class OnionmindWindow(QMainWindow):
         self.update_status.setFlat(True)
         self.update_status.clicked.connect(self.open_settings)
         self._set_update_notice(None)
+        # v2 modelPlus: live speed, graphics memory and context, hidden until on.
+        self.speed_status = QLabel("Idle")
+        self.vram_status = QLabel("")
+        self.ctx_status = QLabel("")
+        for label, name in ((self.speed_status, "Generation speed"), (self.vram_status, "Graphics memory"),
+                            (self.ctx_status, "Context in use")):
+            label.setObjectName("meta")
+            label.setAccessibleName(name)
+            label.hide()
+            self.statusBar().addPermanentWidget(label)
         self.statusBar().addPermanentWidget(self.update_status)
         self.scope_status = QLabel("No project selected")
         self.scope_status.setObjectName("meta")
@@ -8578,6 +11992,20 @@ class OnionmindWindow(QMainWindow):
         self.composer.sendRequested.connect(self.submit)
         self.composer.filesDropped.connect(self.add_attachments)
         self.composer.textChanged.connect(self._sync_action_states)
+        # v2 msgActions: editing an earlier message.
+        self.edit_banner = QFrame()
+        self.edit_banner.setObjectName("banner")
+        edit_layout = QHBoxLayout(self.edit_banner)
+        edit_layout.setContentsMargins(9, 4, 6, 4)
+        edit_text = QLabel("Editing an earlier message. Sending replaces everything after it in this session.")
+        edit_text.setWordWrap(True)
+        edit_cancel = QPushButton("Cancel")
+        edit_cancel.setAccessibleName("Cancel editing the earlier message")
+        edit_cancel.clicked.connect(lambda: self._cancel_edit())
+        edit_layout.addWidget(edit_text, 1)
+        edit_layout.addWidget(edit_cancel)
+        self.edit_banner.hide()
+        outer.addWidget(self.edit_banner)
         outer.addWidget(self.composer, 1)
         self.attachment_row = QWidget()
         attachment_layout = QHBoxLayout(self.attachment_row)
@@ -8586,7 +12014,7 @@ class OnionmindWindow(QMainWindow):
         self.attachment_label.setObjectName("attachmentLabel")
         clear = QToolButton()
         clear.setObjectName("bareButton")
-        clear.setIcon(_icon("close"))
+        _themed_icon(clear, "close")
         clear.setToolTip("Remove all attachments")
         clear.setAccessibleName("Remove all attachments")
         clear.clicked.connect(self.clear_attachments)
@@ -8596,10 +12024,27 @@ class OnionmindWindow(QMainWindow):
         self.attachment_row.hide()
         outer.addWidget(self.attachment_row)
 
+        # v2 contextMeter warning row: hidden until the session nears its limit.
+        self.context_warning = QWidget()
+        warning_layout = QHBoxLayout(self.context_warning)
+        warning_layout.setContentsMargins(0, 0, 0, 0)
+        self.context_warning_label = QLabel()
+        self.context_warning_label.setObjectName("warning")
+        self.context_warning_label.setWordWrap(True)
+        context_new_task = QPushButton("New task")
+        context_new_task.setAccessibleName("Start a new task with an empty context")
+        context_new_task.clicked.connect(lambda: self.new_task())
+        warning_layout.addWidget(self.context_warning_label, 1)
+        warning_layout.addWidget(context_new_task)
+        self.context_warning.hide()
+        outer.addWidget(self.context_warning)
+        self.composer_outer = outer
+
         controls = QHBoxLayout()
         controls.setSpacing(7)
+        self.composer_controls = controls
         attach = QToolButton()
-        attach.setIcon(_icon("attach"))
+        _themed_icon(attach, "attach")
         attach.setToolTip("Attach files or images")
         attach.setAccessibleName("Attach files or images")
         attach.clicked.connect(self.choose_attachments)
@@ -8654,10 +12099,43 @@ class OnionmindWindow(QMainWindow):
         )
         self.search_consent.setAccessibleName("Allow Tor web search for the next Chat turn only")
         controls.addWidget(self.search_consent)
+        # v2 presets: the system prompt chip.
+        self.preset_chip = QPushButton("Default")
+        self.preset_chip.setObjectName("chipButton")
+        self.preset_chip.setToolTip("Preset: changes how Onionmind answers")
+        self.preset_chip.setAccessibleName("Preset")
+        self.preset_menu = QMenu(self)
+        self.preset_chip.setMenu(self.preset_menu)
+        self.preset_chip.hide()
+        controls.addWidget(self.preset_chip)
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
         controls.addWidget(self.disclosure, 1)
+        # v2 ladder: the model is loading; v2 contextMeter: the 44x4 bar.
+        self.model_loading = QProgressBar()
+        self.model_loading.setObjectName("meter")
+        self.model_loading.setRange(0, 0)
+        self.model_loading.setFixedWidth(56)
+        self.model_loading.setAccessibleName("Model loading")
+        self.model_loading.hide()
+        controls.addWidget(self.model_loading)
+        self.context_box = QWidget()
+        context_layout = QHBoxLayout(self.context_box)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(6)
+        self.context_meter = QProgressBar()
+        self.context_meter.setObjectName("meter")
+        self.context_meter.setFixedSize(44, 4)
+        self.context_meter.setTextVisible(False)
+        self.context_meter.setRange(0, 1000)
+        self.context_meter.setAccessibleName("Context window in use")
+        self.context_meter_label = QLabel("")
+        self.context_meter_label.setObjectName("meta")
+        context_layout.addWidget(self.context_meter, 0, Qt.AlignmentFlag.AlignVCenter)
+        context_layout.addWidget(self.context_meter_label)
+        self.context_box.hide()
+        controls.addWidget(self.context_box)
         self.send_button = QPushButton("Send")
         self.send_button.setObjectName("primaryButton")
         self.send_button.setAccessibleName("Send task")
@@ -8678,6 +12156,10 @@ class OnionmindWindow(QMainWindow):
             ("Ctrl+`", lambda: self.toggle_terminal(not self.terminal.isVisible())),
             ("Ctrl+Shift+I", lambda: self.toggle_inspector(not self.inspector.isVisible())),
             ("Escape", self.stop_active),
+            # v2: each acts only while its feature is on.
+            ("Ctrl+K", lambda: self.open_palette() if self.feature("palette") else None),
+            ("Ctrl+B", lambda: self.toggle_boundary() if self.feature("boundary") else None),
+            ("?", self._question_shortcut),
         ]
         self.shortcuts: list[QShortcut] = []
         for sequence, callback in shortcuts:
@@ -8790,6 +12272,10 @@ class OnionmindWindow(QMainWindow):
 
     def _model_probe_complete(self, payload: tuple[str, list[str]]) -> None:
         _backend, models = payload
+        self._no_models = not models
+        self._sync_no_model_banner()
+        if self._fault == "server":
+            self._clear_fault()
         current = self.current_model_id()
         self.set_model_options(models or [current], current)
         self.model_status.set_status("Ready", "good")
@@ -8797,6 +12283,7 @@ class OnionmindWindow(QMainWindow):
         self.inspector.append_activity("Onionmind inference ready")
 
     def _model_probe_failed(self, message: str) -> None:
+        self._report_error(message, "server")
         self.model_status.set_status("Unavailable", "bad")
         self.set_status(message)
         self.inspector.append_activity(f"Onionmind inference unavailable: {message}")
@@ -9076,7 +12563,11 @@ class OnionmindWindow(QMainWindow):
         self.tor_stop_event = None
         self._show_local_tor_state(port)
         if self.tor_phase == "running":
+            _v2(self, "_egress", "Tor", "Tor circuit check · check.torproject.org")
             self.set_status("Tor is ready.")
+            if getattr(self, "_awaiting_tor_fix", False):
+                self._awaiting_tor_fix = False
+                self.set_status(self.FAULTS["tor"]["done"])
         else:
             self.set_status("Tor is unavailable.")
 
@@ -9087,6 +12578,7 @@ class OnionmindWindow(QMainWindow):
         self.tor_phase = "error"
         _set_tor_enabled(self.core, False)
         self.tor_status.set_status("Unavailable", "bad")
+        self._report_error(message, "tor")
         message = _brand_runtime_text(message)
         self.tor_status.setToolTip(message)
         _set_tor_action(
@@ -9168,14 +12660,23 @@ class OnionmindWindow(QMainWindow):
         self.installed_model_ids = values
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        for header in self._model_menu_headers():
+            self.model_combo.addItem(header)
+            item = self.model_combo.model().item(self.model_combo.count() - 1)
+            if item is not None:
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
         counts: dict[str, int] = {}
         for model in values:
             base = self._describe_model(model)
             counts[base] = counts.get(base, 0) + 1
             label = base if counts[base] == 1 else f"{base} {counts[base]}"
-            self.model_combo.addItem(label, model)
+            side = self._model_side_label(model)
+            self.model_combo.addItem(f"{label}  ·  {side}" if side else label, model)
         index = self.model_combo.findData(current)
-        self.model_combo.setCurrentIndex(max(0, index))
+        if index < 0:
+            index = next((i for i in range(self.model_combo.count())
+                          if self.model_combo.itemData(i) is not None), 0)
+        self.model_combo.setCurrentIndex(index)
         self.model_combo.blockSignals(False)
 
     def current_model_id(self) -> str:
@@ -9189,18 +12690,32 @@ class OnionmindWindow(QMainWindow):
         except Exception:
             pass
         self.settings_data["model"] = model
+        if self.feature("modelPlus"):
+            per_mode = dict(self.settings_data.get("model_by_mode") or {})
+            per_mode[getattr(self, "mode", "agent")] = model
+            self.settings_data["model_by_mode"] = per_mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
         self.set_status(f"Model set to {self._describe_model(model)}")
+        self._refresh_model_headers()
+        self._update_context_meter()
+
+    def _approval_text(self, yolo: bool) -> str:
+        if yolo:
+            return "YOLO - no approval prompts"
+        if self.feature("approvals"):
+            return "Asks before protected actions"
+        return "Protected actions stop safely"
 
     def _yolo_toggled(self, on: bool) -> None:
         """The label beside the box states what is actually armed, not a default."""
-        self.approval_state.setText(
-            "YOLO - no approval prompts" if on else "Protected actions stop safely"
-        )
+        self.approval_state.setText(self._approval_text(on))
         self.inspector.append_activity(
             "YOLO armed: edits and commands run unattended; network boundary unchanged"
-            if on else "Approvals on: protected actions stop safely"
+            if on else (
+                "Approvals on: protected actions wait for your answer"
+                if self.feature("approvals") else "Approvals on: protected actions stop safely"
+            )
         )
 
     def set_mode(self, mode: str) -> None:
@@ -9224,6 +12739,17 @@ class OnionmindWindow(QMainWindow):
         self.settings_data["mode"] = mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
+        if hasattr(self, "preset_chip") and getattr(self, "features", None):
+            self.preset_chip.setVisible(self.feature("presets") and mode == "chat")
+        if getattr(self, "features", None) and self.feature("modelPlus"):
+            wanted = _as_text((self.settings_data.get("model_by_mode") or {}).get(mode))
+            if wanted and wanted in self.installed_model_ids and wanted != self.current_model_id():
+                self.model_combo.setCurrentIndex(self.model_combo.findData(wanted))
+                self._switch_loaded_model(wanted)
+                label = "Chat" if mode == "chat" else "Agent"
+                self.set_status(f"{label} uses {self._describe_model(wanted)}")
+        if hasattr(self, "context_box"):
+            self._update_context_meter()
 
     def focus_composer(self) -> None:
         self.composer.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -9232,6 +12758,8 @@ class OnionmindWindow(QMainWindow):
         text = _brand_runtime_text(text)
         self.status_label.setText(text)
         self.status_label.setAccessibleName(f"Application status: {text}")
+        if getattr(self, "features", None) and self.feature("boundary") and hasattr(self, "boundary_panel"):
+            self._refresh_boundary()
 
     def toggle_rail(self, visible: Optional[bool] = None) -> None:
         target = (not self.left_rail.isVisible()) if visible is None else bool(visible)
@@ -9333,7 +12861,7 @@ class OnionmindWindow(QMainWindow):
             if callable(factor)
             else 1.0
         )
-        apply_text_scale(scale)
+        apply_text_scale(scale * self._ui_scale_factor())
         tokens = getattr(self.desktop_core, "context_window_tokens", None)
         if callable(tokens) and hasattr(self.core, "NUM_CTX"):
             # The adapters read NUM_CTX per request, so this lands on the next
@@ -9442,19 +12970,27 @@ class OnionmindWindow(QMainWindow):
 
     def _sync_action_states(self) -> None:
         has_draft = bool(self.composer.toPlainText().strip() or self.attachments)
-        self.send_button.setEnabled(bool(self.active_kind) or has_draft)
+        loading = bool(getattr(self, "_model_loading", None))
+        self.send_button.setEnabled(bool(self.active_kind) or (has_draft and not loading))
         self.left_rail.set_conversation_available(bool(self.chat_messages))
+        if hasattr(self, "context_box"):
+            self._update_context_meter()
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
+        for overlay in (getattr(self, "lock_overlay", None), getattr(self, "setup_overlay", None)):
+            if overlay is not None and overlay.isVisible():
+                overlay.setGeometry(self.rect())
         width = self.width()
         compact_toolbar = width < 1100
         self.brand_box.setFixedWidth(165 if width < 900 else 205)
         self.repo_label.setVisible(width >= 900)
         self.branch_label.setVisible(not compact_toolbar)
         self.toolbar_separator.setVisible(not compact_toolbar)
-        self.model_status.setVisible(width >= 1280)
+        self.model_status.setVisible(width >= 1280 or bool(getattr(self, "_model_loading", None)))
         self.tor_status.setVisible(True)
+        if hasattr(self, "palette_button"):
+            self._sync_toolbar_features()
         self.model_combo.setMinimumWidth(145 if compact_toolbar else 190)
         if width < 820:
             self.left_rail.hide()
@@ -9736,6 +13272,8 @@ class OnionmindWindow(QMainWindow):
         self.inspector.append_activity(f"Project refreshed; {count} observed change(s)")
 
     def _workspace_failed(self, message: str) -> None:
+        if not self.workspace:
+            return
         self.branch_label.setText("Inspection failed")
         self.set_status(f"Could not inspect project: {message}")
         self.inspector.append_activity(f"Project inspection failed: {message}")
@@ -9760,6 +13298,8 @@ class OnionmindWindow(QMainWindow):
         self.composer.clear()
         self.clear_attachments()
         self.left_rail.clear_session_selection()
+        self._starters = None
+        self._sync_starters()
         self.set_status("New task ready")
         self.focus_composer()
 
@@ -9838,6 +13378,9 @@ class OnionmindWindow(QMainWindow):
             # completed; only the copy owned by the UI is cleaned here.
             self.chat_messages = _sanitize_assistant_messages(self.chat_messages)
             title = self._session_title()
+            kept = _as_text(_field(self.current_session, "title", "")) if self.current_session is not None else ""
+            if kept.startswith("Branch of "):
+                title = kept                     # a branch keeps the name it was given
             model = self.current_model_id()
             if self._session_is_unchanged(model):
                 return True
@@ -9956,6 +13499,13 @@ class OnionmindWindow(QMainWindow):
         net_log = _as_text(getattr(self.core, "NET_LOG", ""))
         if net_log and callable(shred_file) and Path(net_log).is_file():
             shred_file(net_log)
+        if callable(shred_file) and Path(self.egress_path).is_file():
+            shred_file(self.egress_path)
+            self._egress_counts = None
+        reverts = self.data_root / "reverts"
+        if callable(shred_tree) and reverts.is_dir():
+            shred_tree(reverts)
+            self._revert_record = None
         tor = self.wipe_tor_state()
 
         self.left_rail.clear_projects()
@@ -10196,17 +13746,7 @@ class OnionmindWindow(QMainWindow):
         self.chat_messages = _sanitize_assistant_messages(
             _field(session, "messages", ()) or ()
         )
-        self.transcript.clear()
-        for message in self.chat_messages:
-            role = message.get("role")
-            if role in ("user", "assistant"):
-                content = message.get("content")
-                self.transcript.add_message(role, content if isinstance(content, str) else "[local image attachment]")
-            elif role == "tool":
-                self.transcript.add_tool_card(
-                    _as_text(message.get("tool_name") or "Tool result"),
-                    [("Local tool output", _as_text(message.get("content"))[:80])],
-                )
+        self._render_messages()
         workspace = _as_text(_field(session, "workspace"))
         if workspace and Path(workspace).is_dir() and workspace != self.workspace:
             self.select_workspace(workspace)
@@ -10237,6 +13777,20 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Describe a task or attach a local file first.")
             self.focus_composer()
             return
+        if self._model_loading:
+            self.set_status(f"{self._describe_model(self._model_loading)} is still loading. Sending waits until it is ready.")
+            return
+        if self._fault is not None:
+            self.set_status(self.FAULTS[self._fault]["status"])
+            return
+        if self.feature("empty") and self._no_models:
+            self.set_status("No model is installed yet. Choose one in Models.")
+            return
+        if self._edit_from is not None:
+            # Sending an edit replaces that message and everything after it.
+            self.chat_messages = self.chat_messages[:self._edit_from]
+            self._render_messages()
+            self._cancel_edit()
         if not task:
             task = "Review the attached local files."
         search_allowed = self.mode == "chat" and self.search_consent.isChecked()
@@ -10263,7 +13817,7 @@ class OnionmindWindow(QMainWindow):
         visible_task = task + ("\n\nAttached locally: " + ", ".join(attachment_names) if attachment_names else "")
         message, agent_task = self._build_user_payload(task)
         self.chat_messages.append(message)
-        self.transcript.add_message("user", visible_task)
+        self._index_block(self.transcript.add_message("user", visible_task), len(self.chat_messages) - 1)
         self.composer.clear()
         self._forget_draft()
         self.clear_attachments()
@@ -10276,6 +13830,8 @@ class OnionmindWindow(QMainWindow):
         if self.mode == "chat":
             if search_allowed:
                 self._start_chat(True)
+            elif self._web_ask_wanted(task):
+                self._ask_before_search(task)
             else:
                 self._start_chat()
         else:
@@ -10441,13 +13997,21 @@ class OnionmindWindow(QMainWindow):
         if kind is None and was_running:
             self._alert_if_unfocused()
         self._sync_action_states()
+        if hasattr(self, "speed_status"):
+            self._update_live_status()           # "Idle" again once nothing runs
 
     def _start_chat(self, allow_search: bool = False) -> None:
         self.tor_in_use = allow_search
+        self._turn_reasoning = 0.0
+        self._live_tps = None
+        self._turn_searches = []
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
         history = copy.deepcopy(self.chat_messages)
+        preset = _v2(self, "_preset_text", default="")
+        if preset and callable(getattr(self.desktop_core, "with_system_prompt", None)):
+            history = self.desktop_core.with_system_prompt(history, preset)
         block = self.transcript.add_message("assistant", "")
         block.start_thinking("Starting Tor" if allow_search else "Thinking")
         self.stream_block = block
@@ -10552,6 +14116,9 @@ class OnionmindWindow(QMainWindow):
 
     def _chat_event(self, event: dict[str, Any]) -> None:
         kind = _as_text(event.get("kind"))
+        if kind in ("generating", "stats"):
+            self._generation_event(kind, event)
+            return
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
@@ -10589,22 +14156,34 @@ class OnionmindWindow(QMainWindow):
                 self.stream_block.set_pending_label("Thinking")
             self.set_status(f"Tor ready · thinking with {self._describe_model(self.current_model_id())}…")
             self.inspector.append_activity("Background Tor path verified")
+            self._egress("Tor", "Tor circuit check · check.torproject.org")
         elif kind == "tool_started":
             arguments = event.get("arguments") or {}
             detail = _as_text(arguments.get("query")) if isinstance(arguments, dict) else ""
             state = "Running through Tor · fails closed" if name == "web_search" else "Running locally"
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Searching via Tor" if name == "web_search" else "Using local tool")
-            self.transcript.add_tool_card(display_name, [(detail or "Tool request", state)])
+            self._tool_started(display_name, detail or "Tool request", state)
             activity = "Tor search started" if name == "web_search" else f"Local tool started: {display_name}"
-            self.inspector.append_activity(activity)
+            self.inspector.append_activity(activity, "tor" if name == "web_search" else "machine")
+            if name == "web_search":
+                self._searching = True
+                self._refresh_boundary()
         elif kind == "tool_finished":
             if self.stream_block is not None:
                 self.stream_block.set_pending_label("Thinking")
             state = "Tor result returned" if name == "web_search" else "Finished"
-            self.transcript.add_tool_card(display_name, [("Tool result", state)])
+            if name == "web_search" and event.get("results") is not None and self.feature("timeline"):
+                state = f"{event.get('results')} results over Tor"
+            self._tool_finished(display_name, "Tool result", state)
             activity = "Tor search finished" if name == "web_search" else f"Local tool finished: {display_name}"
-            self.inspector.append_activity(activity)
+            self.inspector.append_activity(activity, "outside" if name == "web_search" else "machine")
+            if name == "web_search":
+                self._searching = False
+                self._turn_searches.append({"results": event.get("results"),
+                                            "domains": list(event.get("domains") or [])})
+                self._egress("Tor", "Chat search · DuckDuckGo onion service")
+                self._refresh_boundary()
         elif kind == "tool_refused":
             self.transcript.add_tool_card(display_name, [("Not run", "No one-turn search permission")])
             self.inspector.append_activity("Tor search request refused; no network request was made")
@@ -10620,15 +14199,19 @@ class OnionmindWindow(QMainWindow):
             answer = "The local model returned no answer."
         if self.stream_block is not None:
             self.stream_block.set_text(answer)
+        _v2(self, "_after_reply", stopped)
         raw_history = payload.get("history") or [
             *self.chat_messages,
             {"role": "assistant", "content": answer},
         ]
+        # A preset's system prompt is sent, never stored with the conversation.
+        raw_history = [m for m in raw_history if m.get("role") != "system"]
         self.chat_messages = _sanitize_assistant_messages(raw_history)
         if self.chat_messages and self.chat_messages[-1].get("role") == "assistant":
             self.chat_messages[-1]["content"] = answer
         if not self.chat_messages or self.chat_messages[-1].get("role") != "assistant":
             self.chat_messages.append({"role": "assistant", "content": answer})
+        _v2(self, "_index_block", self.stream_block, len(self.chat_messages) - 1)
         local_probe = getattr(self.core, "tor_proxy_port", None)
         try:
             port = local_probe() if callable(local_probe) else None
@@ -10643,12 +14226,15 @@ class OnionmindWindow(QMainWindow):
         self.save_current_session()
 
     def _chat_failed(self, message: str) -> None:
+        searched = self.tor_in_use
         self.tor_in_use = False
         self.tor_stop_event = None
+        self._report_error(message, "tor" if searched and "tor" in message.casefold() else None)
         message = _brand_runtime_text(_strip_thinking(message))
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
         self.chat_messages.append({"role": "assistant", "content": f"Local inference failed: {message}"})
+        self._index_block(self.stream_block, len(self.chat_messages) - 1)
         local_probe = getattr(self.core, "tor_proxy_port", None)
         try:
             port = local_probe() if callable(local_probe) else None
@@ -10658,7 +14244,7 @@ class OnionmindWindow(QMainWindow):
         self.set_status(f"Local inference failed: {message}")
         self.inspector.append_activity(f"Chat turn failed: {message}")
         self._set_active(None)
-        self.retry_button.show()
+        self.retry_button.setVisible(self._fault is None)
         self.save_current_session()
 
     def _start_harness(self, task: str) -> None:
@@ -10674,6 +14260,31 @@ class OnionmindWindow(QMainWindow):
         model = self.current_model_id()
         workspace = self.workspace
         yolo = self.yolo_consent.isChecked()
+        # v2: the structured stream when a feature needs it, and this
+        # project's rules - which only ever narrow what the agent may do.
+        stream = self._uses_agent_stream()
+        rules = self._project_rules() if self.feature("rules") else None
+        deny: list[str] = []
+        no_network = False
+        if rules is not None:
+            if rules.get("readOnly"):
+                yolo = False                     # every edit must reach the host to be refused
+            denials = getattr(self.desktop_core, "agent_rule_denials", None)
+            deny = list(denials(rules)) if callable(denials) else []
+            no_network = bool(rules.get("noNetwork"))
+            notes = _as_text(rules.get("notes")).strip()
+            if notes:
+                task += "\n\nProject instructions for this repository:\n" + notes
+        self._agent_stream = stream
+        self._agent_rules = rules
+        self._agent_task_text = task
+        self._agent_steps = {}
+        self._agent_permission = None
+        self._agent_outcome = None
+        self._run_allow_all = False
+        self._agent_buffer = b""
+        self._agent_yolo = yolo
+        self._last_agent_task = task
         self.harness_generation += 1
         generation = self.harness_generation
         self.stream_block = self.transcript.add_message(
@@ -10689,7 +14300,9 @@ class OnionmindWindow(QMainWindow):
             if not available:
                 return {"available": False, "reason": reason}
             argv, cwd = self.harness_bridge.build(model=model, task=task,
-                                                  cwd=workspace, yolo=yolo)
+                                                  cwd=workspace, yolo=yolo,
+                                                  stream=stream, deny=deny,
+                                                  no_network=no_network)
             return {"available": True, "argv": argv, "cwd": cwd}
 
         worker = self._start_worker(prepare)
@@ -10743,16 +14356,37 @@ class OnionmindWindow(QMainWindow):
         process = QProcess(self)
         self.harness_process = process
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        if self._agent_stream:
+            # JSON lines on stdout must not interleave with stderr chatter.
+            process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+            process.readyReadStandardError.connect(self._read_harness_errors)
         process.setWorkingDirectory(cwd)
         process.readyReadStandardOutput.connect(self._read_harness_output)
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
         process.start(argv[0], argv[1:])
+        if self._agent_stream:
+            # The handshake first - qwen never reads the task without it - then
+            # the task itself, on stdin rather than in the process list.
+            self._agent_write(
+                self.desktop_core.agent_initialize_message()
+                + self.desktop_core.agent_task_message(self._agent_task_text)
+            )
+        if self.feature("runPanel"):
+            self.inspector.run_panel.start(self._run_meta())
+            self.toggle_inspector(True)
+            self.inspector.show_run_tab()
         self.set_status("Onionmind Agent is working…")
         self.inspector.append_activity("Agent run started; output is not yet proof of disk changes")
 
     def _read_harness_output(self) -> None:
         if self.harness_process is None:
+            return
+        if self._agent_stream:
+            self._agent_buffer += bytes(self.harness_process.readAllStandardOutput())
+            while b"\n" in self._agent_buffer:
+                line, self._agent_buffer = self._agent_buffer.split(b"\n", 1)
+                self._handle_agent_line(line.decode("utf-8", errors="replace"))
             return
         chunk = bytes(self.harness_process.readAllStandardOutput()).decode("utf-8", errors="replace")
         clean = _brand_runtime_text(ANSI_ESCAPE.sub("", chunk))
@@ -10767,11 +14401,21 @@ class OnionmindWindow(QMainWindow):
             return
         self.tor_in_use = False
         normal = status == QProcess.ExitStatus.NormalExit
+        if not normal and self._agent_outcome != "stopped":
+            self._report_error("Agent runtime crashed", "node")
+        if self._agent_stream:
+            rest = self._agent_buffer.decode("utf-8", errors="replace")
+            self._agent_buffer = b""
+            if rest.strip():
+                self._handle_agent_line(rest)
+            self._clear_agent_cards()
+            self._finish_run_panel(normal and exit_code == 0)
         suffix = f"\n\nAgent {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
         if self.stream_block is not None:
             self.stream_block.append_text(suffix)
         content = (self.stream_block.text if self.stream_block is not None else self.harness_output + suffix)
         self.chat_messages.append({"role": "assistant", "content": content})
+        self._index_block(self.stream_block, len(self.chat_messages) - 1)
         self.terminal.append(suffix + "\n")
         self.set_status(f"Agent exited with code {exit_code}; refreshing observed changes…")
         self.inspector.append_activity(f"Agent exited with code {exit_code}; disk inspection requested")
@@ -10811,6 +14455,9 @@ class OnionmindWindow(QMainWindow):
     def stop_active(self) -> None:
         if not self.active_kind:
             return
+        if self.active_kind == "chat" and self.stop_event is None and self._web_ask_task:
+            self._cancel_web_ask()
+            return
         if self.active_kind == "chat" and self.stop_event is not None:
             self.stop_event.set()
             if self.stream_block is not None:
@@ -10829,6 +14476,9 @@ class OnionmindWindow(QMainWindow):
                 self._set_active(None)
                 self.save_current_session()
             else:
+                if self._agent_outcome is None:
+                    self._agent_outcome = "stopped"
+                self._clear_agent_cards()
                 self.harness_process.terminate()
                 QTimer.singleShot(1500, self._kill_harness_if_running)
                 self.set_status(
@@ -10914,6 +14564,8 @@ class OnionmindWindow(QMainWindow):
             vram = int(vram_probe()) if callable(vram_probe) else None
             return {"entries": fetcher(port_now), "vram": vram, "ram": ram}
 
+        self._egress("Tor", "Model list · huggingface.co")
+
         def done(payload: dict[str, Any]) -> None:
             self._catalog_specs = (payload.get("vram"), payload.get("ram"))
             fit = _optional_callable(self.desktop_core, "catalog_fit")
@@ -10935,6 +14587,10 @@ class OnionmindWindow(QMainWindow):
             dialog.set_error("This Onionmind installation cannot add models yet")
             return
         stop_event = threading.Event()
+        registry = "huggingface.co" if name.lower().startswith(("hf.co/", "huggingface.co/")) else "registry.ollama.ai"
+        self._egress("Direct", f"Model download · {registry}")
+        self._pulling = name
+        self._refresh_boundary()
 
         def pull_job(signals: WorkerSignals) -> bool:
             def progress(fraction: float, status: str) -> None:
@@ -10946,6 +14602,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.progress.connect(dialog.set_progress)
         worker.signals.error.connect(dialog.set_error)
         worker.signals.result.connect(lambda ok: self._model_pull_complete(name, dialog, ok))
+        worker.signals.finished.connect(self._pull_finished)
 
     def _model_pull_complete(self, name: str, dialog: ModelManagerDialog, ok: bool) -> None:
         if not ok:
@@ -11028,6 +14685,7 @@ class OnionmindWindow(QMainWindow):
             except ValueError:
                 pass  # an unreadable timestamp means "check again", not "never check"
         bridge = self.update_bridge
+        self._egress("Tor", "Update check · github.com")
 
         def autocheck_job(signals: WorkerSignals) -> Any:
             del signals
@@ -11084,6 +14742,1613 @@ class OnionmindWindow(QMainWindow):
             return
         self.inspector.append_activity("Restarting Onionmind to apply the staged update")
         QApplication.instance().quit()
+
+    # --- v2: webAsk -------------------------------------------------------
+
+    def _web_ask_wanted(self, task: str) -> bool:
+        matcher = getattr(self.desktop_core, "needs_web", None)
+        return self.feature("webAsk") and callable(matcher) and bool(matcher(task))
+
+    def _ask_before_search(self, task: str) -> None:
+        """Pause a Chat turn that looks like it needs the web, and ask."""
+        self._web_ask_generation += 1
+        generation = self._web_ask_generation
+        self._web_ask_task = task
+        block = self.transcript.add_message("assistant", "")
+        block.start_thinking("Thinking")
+        self.stream_block = block
+        QTimer.singleShot(900, lambda: self._show_web_ask(generation))
+
+    def _show_web_ask(self, generation: int) -> None:
+        if generation != self._web_ask_generation or not self._web_ask_task or self.active_kind != "chat":
+            return
+        self.transcript.remove_message(self.stream_block)
+        self.stream_block = None
+        tor_on = self.tor_phase == "running" and _tor_is_enabled(self.core)
+        why = (
+            "Tor search is off for this turn. If you allow it, this one query goes over Tor to "
+            "DuckDuckGo’s onion service. Your prompt, files and the rest of the conversation stay "
+            "on this machine."
+            if tor_on else
+            "Tor is off, so nothing can go out right now. If you allow it, Onionmind starts Tor, "
+            "sends this one query to DuckDuckGo’s onion service, and leaves Tor on afterwards."
+        )
+        card = NoticeCard("ask", "Onionmind wants to search the web to answer this", why)
+        query = getattr(self.desktop_core, "web_query", lambda text: text[:70])(self._web_ask_task)
+        card.add_row("Query", query)
+        card.add_button("Answer without searching", lambda: self._resolve_web_ask(False))
+        allow = card.add_button(
+            "Search once over Tor" if tor_on else "Turn on Tor and search once",
+            lambda: self._resolve_web_ask(True), primary=True,
+        )
+        self._web_ask_card = self.transcript.add_widget(card)
+        allow.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.set_status("Onionmind wants to search the web. Waiting for your permission.")
+        self.inspector.append_activity("Asked permission to search the web")
+        self._notify("Onionmind needs your approval", "It wants to search the web for this answer.")
+
+    def _resolve_web_ask(self, allow: bool) -> None:
+        if not self._web_ask_task or self.active_kind != "chat":
+            return
+        self.transcript.remove_widget(self._web_ask_card)
+        self._web_ask_card = None
+        self._web_ask_task = ""
+        if allow:
+            starting = self.tor_phase != "running"
+            if not _tor_is_enabled(self.core):
+                _set_tor_enabled(self.core, True)
+            self.inspector.append_activity("Search allowed once over Tor")
+            self._start_chat(True)
+            self.set_status("Starting Tor for this search…" if starting else "Searching over Tor…")
+        else:
+            self.inspector.append_activity("Answered without searching; nothing left this machine")
+            self._start_chat(False)
+            self.set_status("Answering from the model alone, without the web.")
+
+    def _cancel_web_ask(self) -> None:
+        self._web_ask_generation += 1
+        self._web_ask_task = ""
+        self.transcript.remove_widget(self._web_ask_card)
+        self._web_ask_card = None
+        self.transcript.remove_message(self.stream_block)
+        self.stream_block = None
+        self.set_status("Stopped before anything was sent.")
+        self.inspector.append_activity("Run stopped by you before a search was allowed")
+        self._set_active(None)
+        self.save_current_session()
+
+    # --- v2: tool steps (cards, or the timeline) ---------------------------
+
+    def _tool_started(self, title: str, detail: str, state_text: str, key: Optional[str] = None) -> None:
+        if self.feature("timeline"):
+            self._open_steps[key or title] = self.transcript.add_timeline_step(title, detail, "running")
+        else:
+            self.transcript.add_tool_card(title, [(detail, state_text)])
+
+    def _tool_finished(self, title: str, row_label: str, state_text: str,
+                       ok: bool = True, key: Optional[str] = None, state: Optional[str] = None) -> None:
+        step = self._open_steps.pop(key or title, None)
+        final = state or ("done" if ok else "error")
+        if self.feature("timeline"):
+            if step is not None:
+                step.set_state(final, state_text)
+            else:
+                self.transcript.add_timeline_step(title, state_text, final)
+        else:
+            self.transcript.add_tool_card(title, [(row_label, state_text)])
+
+    # --- v2: structured Agent runs (approvals, rules, Run tab, timeline) ---
+
+    AGENT_TOOL_LABELS = {
+        "read_file": "Read file", "read_many_files": "Read files", "list_directory": "List folder",
+        "glob": "Find files", "grep_search": "Search project", "search_file_content": "Search project",
+        "edit": "Edit file", "write_file": "Edit file", "replace": "Edit file",
+        "notebook_edit": "Edit file", "run_shell_command": "Shell command",
+        "web_fetch": "Fetch over Tor", "web_search": "Search over Tor",
+        "mcp__onionmind__web_search": "Search over Tor", "mcp__onionmind__web_fetch": "Fetch over Tor",
+    }
+
+    def _uses_agent_stream(self) -> bool:
+        if not callable(getattr(self.desktop_core, "parse_agent_line", None)):
+            return False
+        return any(self.feature(key) for key in ("approvals", "runPanel", "timeline", "rules"))
+
+    def _project_rules(self) -> Optional[dict[str, Any]]:
+        loader = getattr(self.desktop_core, "load_rules", None)
+        if not callable(loader) or not self.workspace:
+            return None
+        return dict(loader(self.settings_data, self.workspace))
+
+    def _run_meta(self) -> str:
+        display = getattr(self.desktop_core, "describe_model", None)
+        tier = ""
+        if callable(display):
+            try:
+                tier = _as_text(_field(display(self.current_model_id()), "tier", "")) or ""
+            except Exception:
+                tier = ""
+        network = "no network (project rule)" if self._agent_rules and self._agent_rules.get("noNetwork") else "Tor-only network"
+        approvals = (
+            "YOLO" if getattr(self, "_agent_yolo", False)
+            else "asks before edits" if self.feature("approvals")
+            else "protected actions stop safely"
+        )
+        return f"Agent · {tier or self.current_model_id()} · {network} · {approvals}"
+
+    def _agent_write(self, text: str) -> None:
+        process = self.harness_process
+        if process is not None and process.state() != QProcess.ProcessState.NotRunning:
+            process.write(text.encode("utf-8"))
+
+    def _agent_log(self, text: str) -> None:
+        """One readable line to the terminal and the Run tab output."""
+        clean = _brand_runtime_text(ANSI_ESCAPE.sub("", text)).rstrip()
+        if not clean:
+            return
+        self.terminal.append(clean + "\n")
+        self.inspector.run_panel.append_output(clean)
+
+    def _read_harness_errors(self) -> None:
+        if self.harness_process is None:
+            return
+        chunk = bytes(self.harness_process.readAllStandardError()).decode("utf-8", errors="replace")
+        for line in chunk.splitlines():
+            self._agent_log(line)
+
+    def _handle_agent_line(self, line: str) -> None:
+        parse = getattr(self.desktop_core, "parse_agent_line", None)
+        event = parse(line) if callable(parse) else {"kind": "text", "text": line}
+        kind = event.get("kind")
+        if kind == "text":
+            text = _brand_runtime_text(event.get("text", ""))
+            self._agent_log(text)
+            if self.stream_block is not None:
+                self.stream_block.append_text(text + "\n")
+        elif kind == "batch":
+            for item in event.get("events", []):
+                sub = item.get("kind")
+                if sub == "say":
+                    if self.stream_block is not None:
+                        self.stream_block.append_text("\n" + item.get("text", "") + "\n")
+                    self._agent_log(item.get("text", ""))
+                elif sub == "tool_use":
+                    self._agent_tool_use(item)
+                elif sub == "tool_result":
+                    self._agent_tool_result(item)
+        elif kind == "permission":
+            self._agent_permission_requested(event)
+        elif kind == "result":
+            # The turn is over; closing stdin lets qwen exit on its own.
+            if self.harness_process is not None:
+                self.harness_process.closeWriteChannel()
+        self.transcript._scroll_later()
+
+    def _agent_tool_use(self, item: dict[str, Any]) -> None:
+        tool = _as_text(item.get("tool"))
+        tool_input = item.get("input") or {}
+        if tool in ("todo_write", "TodoWrite"):
+            todos = tool_input.get("todos") if isinstance(tool_input, dict) else None
+            if isinstance(todos, list):
+                self.inspector.run_panel.set_todos(todos)
+            return
+        describe = getattr(self.desktop_core, "describe_tool_request", None)
+        detail = describe(tool, tool_input, self.workspace) if callable(describe) else tool
+        label = self.AGENT_TOOL_LABELS.get(tool, tool.replace("_", " ").strip().title() or "Tool")
+        key = _as_text(item.get("id")) or detail
+        self._agent_steps[key] = {"label": label, "detail": detail, "tool": tool}
+        self.inspector.run_panel.set_step(key, "running", detail)
+        self._agent_log(f"› {detail}")
+        if self.feature("timeline"):
+            self._tool_started(label, detail, "Running", key=key)
+
+    def _agent_tool_result(self, item: dict[str, Any]) -> None:
+        key = _as_text(item.get("id"))
+        step = self._agent_steps.get(key, {"label": "Tool", "detail": key})
+        text = _as_text(item.get("text"))
+        lowered = text.casefold()
+        denied = "denied by permission rules" in lowered or "operation cancelled" in lowered
+        state = "denied" if denied else ("error" if item.get("error") else "done")
+        summary = {"denied": "Refused · nothing written", "error": "Failed", "done": "OK"}[state]
+        if state == "done" and step.get("tool") in ("edit", "write_file", "replace"):
+            summary = "Written · check Changes for what is on disk"
+        self.inspector.run_panel.set_step(key, state, None, summary)
+        first = text.strip().splitlines()[0][:160] if text.strip() else summary
+        self._agent_log(f"  {first}")
+        self._tool_finished(step["label"], step["detail"], summary, ok=state == "done", key=key, state=state)
+
+    def _agent_permission_requested(self, event: dict[str, Any]) -> None:
+        core = self.desktop_core
+        tool = _as_text(event.get("tool"))
+        tool_input = event.get("input") or {}
+        request_id = _as_text(event.get("request_id"))
+        describe = getattr(core, "describe_tool_request", None)
+        what = describe(tool, tool_input, self.workspace) if callable(describe) else tool
+        decision, reason = "ask", ""
+        if self._agent_rules is not None and callable(getattr(core, "rule_decision", None)):
+            decision, reason = core.rule_decision(self._agent_rules, tool, tool_input, self.workspace)
+        project = Path(self.workspace).name if self.workspace else "this project"
+        if decision == "allow":
+            self._agent_write(core.agent_permission_response(request_id, True, tool_input))
+            self.inspector.append_activity(f"Project rule: {reason} ({project}) - {what}")
+            return
+        if decision == "deny":
+            self._agent_write(core.agent_permission_response(request_id, False, message=f"Refused: {reason}."))
+            self.inspector.append_activity(f"Refused by a project rule: {reason}")
+            self._agent_log(f"  refused: {reason}")
+            return
+        if self._run_allow_all:
+            self._agent_write(core.agent_permission_response(request_id, True, tool_input))
+            self.inspector.append_activity(f"Allowed for this run: {what}")
+            return
+        key = _as_text(event.get("tool_use_id")) or what
+        if not self.feature("approvals"):
+            # Today's contract: where nobody is asked, a protected action stops
+            # the run safely instead of continuing.
+            self._agent_write(core.agent_permission_response(
+                request_id, False,
+                message="Headless runs can't ask for approval, so Onionmind stopped instead of continuing."))
+            self._agent_write(core.agent_interrupt_message())
+            self._agent_outcome = f"halted:{what}"
+            self.inspector.run_panel.set_step(key, "stopped", None,
+                                              "Stopped before the edit: a headless run has no one to ask")
+            self.inspector.append_activity(f"Stopped before a protected action: {what}")
+            return
+        self._agent_permission = {"request_id": request_id, "input": tool_input, "what": what, "key": key}
+        added, removed = getattr(core, "edit_size", lambda *_a: (0, 0))(tool, tool_input)
+        is_edit = tool in getattr(core, "AGENT_EDIT_TOOLS", ())
+        size = f" · +{added} / −{removed}" if is_edit and (added or removed) else ""
+        title = "Onionmind Agent wants to edit a file" if is_edit else (
+            "Onionmind Agent wants to run a command" if tool in getattr(core, "AGENT_SHELL_TOOLS", ())
+            else "Onionmind Agent wants to use a protected tool")
+        target = what.split(" ", 1)[1] if " " in what else what
+        consequence = "Nothing is written until you allow it." if is_edit else "Nothing runs until you allow it."
+        card = NoticeCard("ask", title, f"{target}{size} · inside {project}. {consequence}")
+        self._approval_buttons(card)
+        self._agent_cards.append(self.transcript.add_widget(card))
+        if self.feature("runPanel"):
+            run_card = NoticeCard("ask", f"{what[0].upper() + what[1:]}?",
+                                  (f"+{added} / −{removed} in one file inside this project. " if is_edit else "")
+                                  + consequence)
+            self._approval_buttons(run_card)
+            self.inspector.run_panel.show_approval(run_card)
+            self.inspector.run_panel.set_status("Waiting for you")
+        self.inspector.run_panel.set_step(key, "waiting", None)
+        if self.stream_block is not None:
+            self.stream_block.set_pending_label("Waiting for your approval")
+        self.set_status(f"Waiting for your approval: {what}")
+        self.inspector.append_activity(f"Waiting for approval: {what}")
+        self._notify("Onionmind needs your approval", f"Agent wants to {what}.")
+
+    def _approval_buttons(self, card: "NoticeCard") -> None:
+        card.add_button("Deny", lambda: self._answer_permission("deny"))
+        card.add_button("Allow for this run", lambda: self._answer_permission("run"))
+        allow = card.add_button("Allow once", lambda: self._answer_permission("once"), primary=True)
+        QTimer.singleShot(0, lambda: allow.setFocus(Qt.FocusReason.OtherFocusReason))
+
+    def _answer_permission(self, answer: str) -> None:
+        pending = self._agent_permission
+        if pending is None:
+            return
+        self._agent_permission = None
+        self._clear_agent_cards()
+        core = self.desktop_core
+        what = pending["what"]
+        if answer == "deny":
+            self._agent_write(core.agent_permission_response(
+                pending["request_id"], False, message="Denied by the person running Onionmind."))
+            # Deny stops the run there: qwen ends the turn without another
+            # model call (checked against qwen-code 0.25.0).
+            self._agent_write(core.agent_interrupt_message())
+            self._agent_outcome = f"denied:{what}"
+            self.inspector.run_panel.set_step(pending["key"], "denied", None)
+            self.inspector.run_panel.set_status("Edit denied")
+            self.set_status("Edit denied. Nothing was written for it.")
+            self.inspector.append_activity(f"Denied: {what}")
+            return
+        self._agent_write(core.agent_permission_response(pending["request_id"], True, pending["input"]))
+        if answer == "run":
+            self._run_allow_all = True
+            self.inspector.append_activity("Edits allowed for the rest of this run")
+        else:
+            self.inspector.append_activity("Edit allowed once")
+        self.inspector.run_panel.set_step(pending["key"], "running", None)
+        self.inspector.run_panel.set_status("Running")
+        self.set_status("Onionmind Agent is working…")
+
+    def _clear_agent_cards(self) -> None:
+        for holder in self._agent_cards:
+            self.transcript.remove_widget(holder)
+        self._agent_cards = []
+        self.inspector.run_panel.clear_approval()
+
+    def _finish_run_panel(self, clean_exit: bool) -> None:
+        outcome = self._agent_outcome or ""
+        what = outcome.split(":", 1)[1] if ":" in outcome else ""
+        if outcome.startswith("denied"):
+            status = "Edit denied"
+            note = f"You denied {what}, so Onionmind stopped there. Nothing was written for it."
+        elif outcome.startswith("halted"):
+            status = "Stopped before an edit"
+            note = (f"Stopped before a protected action: {what}. Headless runs can’t ask for approval, "
+                    "so Onionmind stopped instead of continuing. That action was not run.")
+        elif outcome == "stopped":
+            status, note = "Stopped", "Stopped. Onionmind ended the run and cancelled the process it had started."
+        else:
+            status, note = ("Done" if clean_exit else "Stopped"), ""
+        self.inspector.run_panel.finish(status)
+        if note and self.stream_block is not None:
+            self.stream_block.append_text("\n" + note)
+        if status == "Done":
+            self._notify("Agent run finished", f"{self._session_title()} · {Path(self.workspace or '').name}")
+
+    # --- v2: model power (ladder), model per mode and live stats ----------
+
+    def _model_menu_headers(self) -> list[str]:
+        headers: list[str] = []
+        if self.feature("ladder"):
+            power = self._model_power
+            name, total = power.get("gpu_name"), power.get("vram_total")
+            if total:
+                machine = f"This machine: {total / 1024:.0f} GB GPU" + (f" ({name})" if name else "")
+            elif power.get("ram"):
+                machine = f"This machine: no GPU reported · {power['ram'] / 1024:.0f} GB RAM"
+            else:
+                machine = "This machine: checking memory…" if not power else "This machine: memory unknown"
+            headers.append(f"{machine}. Switching unloads the current tier first.")
+        if self.feature("modelPlus"):
+            per_mode = self.settings_data.get("model_by_mode") or {}
+            chat = per_mode.get("chat") or self.current_model_id()
+            agent = per_mode.get("agent") or self.current_model_id()
+            headers.append(f"Chat uses {self._tier_name(chat)} · Agent uses {self._tier_name(agent)}"
+                           " · picking a tier sets it for the current mode")
+        return headers
+
+    def _refresh_model_headers(self) -> None:
+        """Rewrite the menu's header rows in place (a rebuild would re-enter
+        the combo's own change signal)."""
+        headers = iter(self._model_menu_headers())
+        for index in range(self.model_combo.count()):
+            if self.model_combo.itemData(index) is None:
+                text = next(headers, None)
+                if text is not None:
+                    self.model_combo.setItemText(index, text)
+
+    def _tier_name(self, model: str) -> str:
+        helper = getattr(self.desktop_core, "describe_model", None)
+        if callable(helper):
+            try:
+                tier = _as_text(_field(helper(model), "tier", ""))
+                if tier:
+                    return tier
+            except Exception:
+                pass
+        return model
+
+    def _model_side_label(self, model: str) -> str:
+        if not self.feature("ladder") or not self._model_power:
+            return ""
+        power = self._model_power
+        loaded = power.get("loaded") or []
+        if any(_as_text(item.get("name")).split(":")[0] == model.split(":")[0] or item.get("name") == model
+               for item in loaded):
+            return "In use"
+        sizes = power.get("sizes") or {}
+        size = sizes.get(model) or sizes.get(f"{model}:latest")
+        fit = getattr(self.desktop_core, "model_fit", None)
+        return fit(size, power.get("vram_total"), power.get("ram")) if callable(fit) else ""
+
+    def _probe_model_power(self) -> None:
+        """Real numbers for the ladder and the status bar, read off the UI thread."""
+        core, desktop_core = self.core, self.desktop_core
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            details = getattr(core, "installed_model_details", None)
+            loaded = getattr(core, "loaded_models", None)
+            memory = getattr(desktop_core, "gpu_memory_mb", None)
+            name = getattr(desktop_core, "gpu_name", None)
+            ram = getattr(desktop_core, "machine_memory_mb", None)
+            used, total = memory() if callable(memory) else (None, None)
+            return {
+                "sizes": {item["name"]: item.get("size") for item in (details() if callable(details) else [])},
+                "loaded": list(loaded()) if callable(loaded) else [],
+                "vram_used": used, "vram_total": total,
+                "gpu_name": name() if callable(name) and total else None,
+                "ram": ram() if callable(ram) else None,
+            }
+
+        def done(power: dict[str, Any]) -> None:
+            self._model_power = power
+            if self.feature("ladder") or self.feature("modelPlus"):
+                self.set_model_options(self.installed_model_ids, self.current_model_id())
+            self._update_live_status()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+
+    def _model_picked(self) -> None:
+        """A person chose a tier in the menu: with ladder on, make it the one in memory."""
+        self._switch_loaded_model(self.current_model_id())
+
+    def _switch_loaded_model(self, model: str) -> None:
+        if not self.feature("ladder") or self.active_kind or not model:
+            return
+        load = getattr(self.core, "load_model", None)
+        unload = getattr(self.core, "unload_model", None)
+        loaded_now = getattr(self.core, "loaded_models", None)
+        if not callable(load) or getattr(self.core, "BACKEND", "ollama") not in ("ollama", None):
+            return
+        previous = [item.get("name") for item in (self._model_power.get("loaded") or [])
+                    if item.get("name") and item.get("name") != model]
+        self._model_loading = model
+        label = self._describe_model(model)
+        old = ", ".join(self._tier_name(name) for name in previous)
+        self.set_status(f"Unloading {old} and loading {self._tier_name(model)} into memory…" if old
+                        else f"Loading {self._tier_name(model)} into memory…")
+        self.model_status.set_status(f"Loading {self._tier_name(model)}…", "busy")
+        self.model_status.setVisible(True)
+        self.model_loading.show()
+        self.disclosure.setText(f"Loading {self._tier_name(model)}… sending waits until it is ready")
+        self.model_combo.setEnabled(False)
+        self._sync_action_states()
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            current = list(loaded_now()) if callable(loaded_now) else []
+            for item in current:
+                name = item.get("name")
+                if name and name != model and callable(unload):
+                    unload(name)
+            load(model)
+            return {"loaded": list(loaded_now()) if callable(loaded_now) else []}
+
+        def done(payload: dict[str, Any]) -> None:
+            self._model_loading = None
+            self._model_power["loaded"] = payload.get("loaded") or []
+            self._model_load_finished(True, f"{self._tier_name(model)} · {label} is loaded and ready")
+            self.inspector.append_activity(f"{self._tier_name(model)} loaded into memory")
+
+        def failed(message: str) -> None:
+            self._model_loading = None
+            self._model_load_finished(False, f"Could not load {self._tier_name(model)}: {message}")
+            self._report_error(message)
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(failed)
+
+    def _model_load_finished(self, ok: bool, message: str) -> None:
+        self.model_loading.hide()
+        self.model_combo.setEnabled(not self.active_kind)
+        self.model_status.set_status("Ready" if ok else "Unavailable", "good" if ok else "bad")
+        self.model_status.setVisible(self.width() >= 1280)
+        self.disclosure.setText(
+            "Private local chat · Tor search needs one-turn permission" if self.mode == "chat"
+            else "Early access · Agent network access is separate from Tor search"
+        )
+        self.set_status(message)
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+        self._sync_action_states()
+        self._update_live_status()
+
+    def _report_error(self, message: str, fallback: Optional[str] = None) -> None:
+        """Turn a real failure into a fault card when the errors feature is on."""
+        if not self.feature("errors"):
+            return
+        classify = getattr(self.desktop_core, "classify_error", None)
+        kind = (classify(message) if callable(classify) else None) or fallback
+        if kind in self.FAULTS:
+            self._show_fault(kind, message)
+
+    def _generation_event(self, kind: str, event: dict[str, Any]) -> None:
+        if kind == "generating":
+            seconds = float(event.get("seconds") or 0)
+            if seconds > 0:
+                self._live_tps = float(event.get("chunks") or 0) / seconds
+            if self.feature("thinking") and self.stream_block is not None:
+                self.stream_block.set_pending_label(
+                    "Thinking" if event.get("reasoning") else "Filtering private reasoning")
+        else:
+            self._last_stats = dict(event)
+            if event.get("tokens_per_second"):
+                self._live_tps = float(event["tokens_per_second"])
+            self._turn_reasoning += float(event.get("reasoning_seconds") or 0)
+            prompt = event.get("prompt_eval_count")
+            if isinstance(prompt, (int, float)):
+                self._context_used_real = int(prompt) + int(event.get("eval_count") or 0)
+            self._update_context_meter()
+        self._update_live_status()
+
+    def _update_live_status(self) -> None:
+        if not self.feature("modelPlus"):
+            return
+        running = self.active_kind == "chat"
+        self.speed_status.setText(
+            f"{self._live_tps:.0f} tok/s" if running and self._live_tps else "Idle")
+        used, total = self._model_power.get("vram_used"), self._model_power.get("vram_total")
+        if total:
+            self.vram_status.setText(f"VRAM {used / 1024:.1f} / {total / 1024:.0f} GB")
+        else:
+            in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
+            self.vram_status.setText(f"{in_vram / 1024 ** 3:.1f} GB in VRAM" if in_vram else "VRAM unknown")
+        used_ctx, limit = self._context_numbers()
+        fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))
+        self.ctx_status.setText(f"ctx {fmt(used_ctx)} / {fmt(limit)}")
+
+    def _after_reply(self, stopped: bool) -> None:
+        """What v2 adds under a finished Chat reply."""
+        if self.feature("provenance") and self.stream_block is not None and not stopped:
+            chips = [(f"Answered on this machine · {self._tier_name(self.current_model_id())}",
+                      "Inference ran on this computer; the reply never left it.")]
+            if self._turn_searches:
+                results = sum(int(item.get("results") or 0) for item in self._turn_searches)
+                domains = sorted({d for item in self._turn_searches for d in item.get("domains", [])})
+                count = len(self._turn_searches)
+                chips.append((f"{count} Tor search{'es' if count != 1 else ''} · {results} result{'s' if results != 1 else ''}",
+                              "Results from: " + (", ".join(domains) if domains else "no sites")))
+            self.transcript.add_widget(ProvenanceChips(chips))
+        if self.feature("thinking") and self._turn_reasoning > 0 and self.stream_block is not None:
+            self.transcript.add_widget(ThoughtLine(self._turn_reasoning))
+        self._live_tps = self._live_tps if not stopped else None
+        if self.feature("modelPlus"):
+            self._probe_model_power()
+        self._update_live_status()
+        if not stopped:
+            self._notify("Onionmind replied",
+                         f"{self._session_title()} · {Path(self.workspace).name if self.workspace else 'no project'}")
+
+    # --- v2: context meter -------------------------------------------------
+
+    def _context_numbers(self) -> tuple[int, int]:
+        """(estimated tokens the next turn sends, the window it must fit)."""
+        estimate = getattr(self.desktop_core, "estimate_tokens", None)
+        count = estimate if callable(estimate) else (lambda *parts: sum(len(str(p)) for p in parts) // 4)
+        if getattr(self, "mode", "agent") == "agent":
+            limit = int(self.context_steps[self.context_slider.value()]) if hasattr(self, "context_slider") else 32768
+        else:
+            limit = int(getattr(self.core, "NUM_CTX", 0) or self.preferences.get("context_window", 16384))
+        parts: list[Any] = []
+        if self._context_used_real is not None and self.mode == "chat":
+            used = self._context_used_real
+        else:
+            used = 0
+            parts.append(self.chat_messages if self.mode == "chat" else "")
+        if self.feature("presets") and self.mode == "chat":
+            parts.append(getattr(self, "_preset_text", lambda: "")())
+        if self.mode == "agent":
+            parts.append(self._agents_md_text())
+        parts.append(self.composer.toPlainText())
+        files_chars = 0
+        if self.workspace:
+            root = Path(self.workspace)
+            budget = 256 * 1024                  # the same caps _build_user_payload applies
+            for relative in self.inspector.selected_context_files()[:12]:
+                try:
+                    size = min((root / relative).stat().st_size, MAX_TEXT_FILE_BYTES, budget)
+                except OSError:
+                    continue
+                files_chars += size
+                budget -= size
+        return used + count(*parts) + (files_chars + 3) // 4, max(1, limit)
+
+    def _agents_md_text(self) -> str:
+        agents = (self.current_snapshot or {}).get("agents_files") or []
+        if not agents or not self.workspace:
+            return ""
+        try:
+            return (Path(self.workspace) / agents[0]).read_text(encoding="utf-8", errors="replace")[:65536]
+        except OSError:
+            return ""
+
+    def _update_context_meter(self) -> None:
+        # The composer is built before the inspector and the preferences;
+        # nothing to measure until the whole window exists.
+        if not hasattr(self, "context_box") or not hasattr(self, "inspector") or not hasattr(self, "preferences"):
+            return
+        on = self.feature("contextMeter")
+        self.context_box.setVisible(on)
+        if not on:
+            self.context_warning.hide()
+            return
+        used, limit = self._context_numbers()
+        fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))
+        share = used / limit
+        self.context_meter.setValue(int(min(1.0, share) * 1000))
+        level = "warn" if share > 0.8 else ""
+        if self.context_meter.property("level") != level:
+            self.context_meter.setProperty("level", level)
+            self.context_meter.style().unpolish(self.context_meter)
+            self.context_meter.style().polish(self.context_meter)
+        self.context_meter_label.setText(f"{fmt(used)} / {fmt(limit)}")
+        files = len(self.inspector.selected_context_files())
+        agent_note = " The agent adds its own instructions on top of this." if self.mode == "agent" else ""
+        self.context_box.setToolTip(
+            f"Context: {used:,} of {limit:,} tokens. "
+            + ("System prompt, " if self.feature("presets") and self.mode == "chat" else "")
+            + ("AGENTS.md, " if self.mode == "agent" else "")
+            + f"{files} selected file(s) and this session’s messages."
+            + (" Measured by the model after the last reply." if self._context_used_real and self.mode == "chat"
+               else " Estimated at four characters per token.")
+            + agent_note
+        )
+        if share >= 1.0:
+            self.context_warning_label.setText(
+                "This session is over the model’s context. The oldest messages are left out of the next reply.")
+        elif share > 0.8:
+            self.context_warning_label.setText(
+                f"This session uses {share:.0%} of the context. Older messages will be left out soon. "
+                "Deselect files or start a new task.")
+        self.context_warning.setVisible(share > 0.8)
+
+    def _apply_feature_ladder(self, on: bool) -> None:
+        if on and not self._model_power:
+            self._probe_model_power()
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+
+    def _apply_feature_modelPlus(self, on: bool) -> None:
+        for label in (self.speed_status, self.vram_status, self.ctx_status):
+            label.setVisible(on)
+        if on and not self._model_power:
+            self._probe_model_power()
+        self.set_model_options(self.installed_model_ids, self.current_model_id())
+        self._update_live_status()
+
+    def _apply_feature_contextMeter(self, on: bool) -> None:
+        del on
+        self._update_context_meter()
+
+    # --- v2: egress log, boundary map, palette, keyboard, zones, netlog ----
+
+    def _egress(self, route: str, what: str) -> None:
+        """Record one connection that left this machine - times and
+        destinations only - while the netlog or boundary feature is on."""
+        if not (self.feature("netlog") or self.feature("boundary")):
+            return
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        if log_type is None:
+            return
+        log_type(self.egress_path).append(route, what)
+        counts = self._today_counts()
+        counts["tor" if route == "Tor" else "direct"] = counts.get("tor" if route == "Tor" else "direct", 0) + 1
+        if what.startswith("Chat search"):
+            counts["search"] = counts.get("search", 0) + 1
+        self._refresh_boundary()
+
+    def _today_counts(self) -> dict[str, int]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._egress_counts is None or getattr(self, "_egress_counts_day", "") != today:
+            log_type = getattr(self.desktop_core, "EgressLog", None)
+            self._egress_counts = log_type(self.egress_path).counts(today) if log_type else {}
+            self._egress_counts_day = today
+        return self._egress_counts
+
+    def toggle_boundary(self, visible: Optional[bool] = None) -> None:
+        if not self.feature("boundary"):
+            return
+        target = self.boundary_panel.isHidden() if visible is None else bool(visible)
+        self.boundary_panel.setVisible(target)
+        self.boundary_button.setChecked(target)
+        self._refresh_boundary()
+
+    def _refresh_boundary(self) -> None:
+        if not hasattr(self, "boundary_panel") or not self.feature("boundary"):
+            return
+        counts = self._today_counts()
+        searches, direct = counts.get("search", 0), counts.get("direct", 0)
+        open_path = self.tor_phase == "running" and _tor_is_enabled(self.core)
+        label = f"{searches} search{'es' if searches != 1 else ''} today" if searches else "Nothing left today"
+        self.boundary_button.set_state(open_path, self._searching, label)
+        if self.boundary_panel.isHidden():
+            return
+        panel = self.boundary_panel
+        panel.receipt.setText(
+            f"Today: {searches} search quer{'y' if searches == 1 else 'ies'} left over Tor · "
+            f"{direct} direct download{'s' if direct != 1 else ''} · no telemetry")
+        model = self.current_model_id()
+        if self._model_loading:
+            model_text = f"Loading {self._tier_name(self._model_loading)}…"
+        else:
+            model_text = f"{self._tier_name(model)} · {self._describe_model(model)} · ready"
+        rows = panel.machine_rows
+        rows["Model"].setText(model_text)
+        rows["Project"].setText(f"{Path(self.workspace).name} · {self.branch_label.text()}" if self.workspace
+                                else "No project open")
+        changes = len((self.current_snapshot or {}).get("changes") or [])
+        rows["Disk"].setText(f"{changes} observed change{'s' if changes != 1 else ''}")
+        rows["Sessions"].setText("Saved on this machine" if getattr(self, "preferences", {}).get("save_history", True)
+                                 else "Not saved")
+        panel.node_state.setText({
+            "running": "Circuit verified", "starting": "Checking the circuit…", "probing": "Checking the circuit…",
+        }.get(self.tor_phase, "Nothing can leave over Tor"))
+        out = panel.outside_rows
+        if not open_path and self.tor_phase not in ("starting", "probing"):
+            out["Chat search"].setText("Blocked · Tor is off")
+        elif self.search_consent.isChecked() or (self.active_kind == "chat" and self.tor_in_use):
+            out["Chat search"].setText("Allowed this turn")
+        else:
+            out["Chat search"].setText("Not allowed this turn")
+        rules = self._project_rules() if self.feature("rules") else None
+        out["Agent network"].setText("Closed by this project’s rules" if rules and rules.get("noNetwork")
+                                     else "Tor-only bridge · fails closed")
+        out["Downloads"].setText(f"Downloading {self._pulling} directly…" if self._pulling
+                                 else "Direct, only after you confirm")
+        out["Updates"].setText("Over Tor, checked automatically while Tor is up" if self.update_permission_enabled()
+                               else "Over Tor, only when you check")
+
+    def _pull_finished(self) -> None:
+        self._pulling = None
+        self._refresh_boundary()
+
+    def _sync_toolbar_features(self) -> None:
+        width = self.width()
+        self.palette_button.setVisible(self.feature("palette") and width >= 1000)
+        self.boundary_button.setVisible(self.feature("boundary") and width >= 860)
+        self.boundary_button.set_label_visible(width >= 1200)
+        if width >= 1200 and self.toolbar_layout.minimumSize().width() > width:
+            # Everything on at once can over-fill the toolbar; the label goes
+            # first so no control is drawn over another.
+            self.boundary_button.set_label_visible(False)
+        lock = getattr(self, "lock_button", None)
+        if lock is not None:
+            lock.setVisible(self.feature("lock") and width >= 1000)
+
+    def _palette_rows(self) -> list[tuple[str, str, str, Callable[[], None]]]:
+        rows: list[tuple[str, str, str, Callable[[], None]]] = []
+        for index in range(self.left_rail.projects.count()):
+            item = self.left_rail.projects.item(index)
+            path = _as_text(item.data(Qt.ItemDataRole.UserRole))
+            hint = "current" if _path_key(path) == _path_key(self.workspace) else path
+            rows.append(("Projects", Path(path).name or path, hint, lambda p=path: self.select_workspace(p)))
+        for index in range(self.left_rail.sessions.count()):
+            item = self.left_rail.sessions.item(index)
+            title, _, when = item.text().partition("\n")
+            session_id = _as_text(item.data(Qt.ItemDataRole.UserRole))
+            rows.append(("Sessions", title, when, lambda sid=session_id: self.load_session(sid)))
+        for model in self.installed_model_ids:
+            hint = "in use" if model == self.current_model_id() else ""
+
+            def pick(m: str = model) -> None:
+                index = self.model_combo.findData(m)
+                if index >= 0:
+                    self.model_combo.setCurrentIndex(index)
+                    self._model_picked()
+
+            rows.append(("Model power", f"{self._tier_name(model)} · {self._describe_model(model)}", hint, pick))
+        native = lambda seq: QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+        commands: list[tuple[str, str, Callable[[], None], bool]] = [
+            ("New task", native("Ctrl+N"), lambda: self.new_task(), True),
+            ("Toggle terminal", native("Ctrl+`"), lambda: self.toggle_terminal(), True),
+            ("Review changes", "", lambda: (self.toggle_inspector(True), self.inspector.tabs.setCurrentWidget(self.inspector.changes_tab)), True),
+            ("Show the Run tab", "", lambda: (self.toggle_inspector(True), self.inspector.show_run_tab()), self.feature("runPanel")),
+            ("Turn Tor off" if self.tor_phase == "running" else "Turn Tor on", "", self._toggle_tor, True),
+            ("Models", "", self.open_model_manager, True),
+            ("Settings", native("Ctrl+,"), self.open_settings, True),
+            ("New features", "", self.open_features_popover, True),
+            ("Export conversation", native("Ctrl+Shift+S"), self.export_conversation, True),
+            ("Boundary map", native("Ctrl+B"), lambda: self.toggle_boundary(), self.feature("boundary")),
+            ("Keyboard shortcuts", "?", lambda: self.open_settings_tab("Keyboard"), self.feature("keyboard")),
+            ("Run setup again", "", self.open_setup, self.feature("setup")),
+            ("Lock Onionmind", "", lambda: getattr(self, "lock_now", lambda: None)(), self.feature("lock")),
+            ("Export network log", "", self.open_network_log, self.feature("netlog")),
+            ("Agent rules for this project", "", lambda: self.open_settings_tab("Agent rules"), self.feature("rules")),
+        ]
+        if self.feature("presets"):
+            for preset in getattr(self.desktop_core, "load_presets", lambda _s: [])(self.settings_data):
+                commands.append((f"Preset: {preset['name']}", "",
+                                 lambda pid=preset["id"]: getattr(self, "set_preset", lambda _p: None)(pid), True))
+        if self.feature("appearance"):
+            commands.append(("Switch to light theme" if current_theme() == "dark" else "Switch to dark theme", "",
+                             lambda: getattr(self, "toggle_theme", lambda: None)(), True))
+        rows.extend(("Commands", label, hint, action) for label, hint, action, shown in commands if shown)
+        return rows
+
+    def open_palette(self) -> None:
+        if not self.feature("palette"):
+            return
+        palette = CommandPalette(self, self._palette_rows())
+        self._palette = palette
+        palette.place()
+        palette.open()
+        palette.search.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def open_settings_tab(self, label: str) -> None:
+        dialog = SettingsDialog(self.data_root, self.harness_bridge.limitation, self.update_bridge, self)
+        dialog.show_tab(label)
+        dialog.exec()
+
+    def _question_shortcut(self) -> None:
+        if not self.feature("keyboard"):
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)) and not getattr(focus, "isReadOnly", lambda: False)():
+            return                               # typing a question mark, not asking for help
+        self.open_settings_tab("Keyboard")
+
+    def network_log_rows(self) -> list[dict[str, str]]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        rows: list[dict[str, str]] = []
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        if log_type is not None:
+            rows.extend(log_type(self.egress_path).entries(today))
+        agent_rows = getattr(self.desktop_core, "agent_net_entries", None)
+        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
+        if callable(agent_rows) and net_log:
+            rows.extend(agent_rows(net_log, today))
+        return sorted(rows, key=lambda row: row.get("time", ""))
+
+    def open_network_log(self) -> None:
+        if not self.feature("netlog"):
+            return
+        dialog = NetworkLogDialog(self.network_log_rows(), self.desktop_core, self)
+        self._netlog_dialog = dialog
+        dialog.exec()
+        if dialog.saved_path:
+            self.set_status(f"Saved {dialog.saved_path} · {len(dialog.rows)} entries")
+
+    def _apply_feature_palette(self, on: bool) -> None:
+        del on
+        self._sync_toolbar_features()
+
+    def _apply_feature_boundary(self, on: bool) -> None:
+        if not on:
+            self.boundary_panel.hide()
+        self._sync_toolbar_features()
+        self._refresh_boundary()
+
+    def _apply_feature_zones(self, on: bool) -> None:
+        self.inspector.set_zones(on)
+
+    def _apply_feature_netlog(self, on: bool) -> None:
+        self.inspector.netlog_button.setVisible(on)
+
+    def _apply_feature_keyboard(self, on: bool) -> None:
+        set_system_motion_probe(on)
+
+    # --- v2: message actions -------------------------------------------
+
+    def _render_messages(self) -> None:
+        """The transcript from self.chat_messages, each block knowing its index."""
+        self.transcript.clear()
+        for index, message in enumerate(self.chat_messages):
+            role = message.get("role")
+            if role in ("user", "assistant"):
+                content = message.get("content")
+                block = self.transcript.add_message(
+                    role, content if isinstance(content, str) else "[local image attachment]")
+                self._index_block(block, index)
+            elif role == "tool":
+                self.transcript.add_tool_card(
+                    _as_text(message.get("tool_name") or "Tool result"),
+                    [("Local tool output", _as_text(message.get("content"))[:80])],
+                )
+
+    def _index_block(self, block: Optional[MessageBlock], index: int) -> None:
+        if block is None or index < 0:
+            return
+        block.message_index = index
+        block.set_actions(self._message_actions(block) if self.feature("msgActions") else [])
+
+    def _message_actions(self, block: MessageBlock) -> list[tuple[str, str, Callable[[], None]]]:
+        if block.role == "user":
+            return [("Edit", "pencil", lambda b=block: self._edit_message(b)),
+                    ("Copy", "copy", lambda b=block: self._copy_message(b))]
+        return [("Copy", "copy", lambda b=block: self._copy_message(b)),
+                ("Regenerate", "regenerate", lambda b=block: self._regenerate(b)),
+                ("Branch from here", "branch", lambda b=block: self._branch_from(b))]
+
+    def _copy_message(self, block: MessageBlock) -> None:
+        QApplication.clipboard().setText(block.text)
+        self.set_status("Copied to the clipboard.")
+
+    def _valid_index(self, block: MessageBlock) -> Optional[int]:
+        index = block.message_index
+        if index is None or index >= len(self.chat_messages):
+            return None
+        return index if self.chat_messages[index].get("role") == block.role else None
+
+    def _edit_message(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            self.set_status("Stop the active run before editing a message." if self.active_kind
+                            else "That message is no longer in this session.")
+            return
+        self._edit_from = index
+        self.set_mode("chat")
+        self.composer.setPlainText(block.text.split("\n\nAttached locally:", 1)[0])
+        self.edit_banner.show()
+        self.composer_frame.setMaximumHeight(214)
+        self.focus_composer()
+
+    def _cancel_edit(self) -> None:
+        self._edit_from = None
+        self.edit_banner.hide()
+        self.composer_frame.setMaximumHeight(178 if self.context_warning.isHidden() else 214)
+
+    def _regenerate(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            return
+        user = next((i for i in range(index - 1, -1, -1) if self.chat_messages[i].get("role") == "user"), None)
+        if user is None:
+            self.set_status("There is no question before this reply to ask again.")
+            return
+        self.chat_messages = self.chat_messages[:user + 1]
+        self._render_messages()
+        self.set_mode("chat")
+        self.inspector.append_activity("Regenerating a reply")
+        self._set_active("chat")
+        self._start_chat()
+
+    def _branch_from(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            return
+        if not self.preferences.get("save_history", True):
+            self.set_status("Saving conversations to this machine is off, so there is nowhere to branch to.")
+            return
+        if not self.save_current_session():
+            return
+        source = _as_text(_field(self.current_session, "title", "")) or self._session_title()
+        title = f"Branch of {source}"[:72]
+        messages = copy.deepcopy(self.chat_messages[:index + 1])
+        try:
+            model = self.current_model_id()
+            session = self.session_bridge.create(title, model, self.workspace, messages)
+            session = self.session_bridge.save(session, title=title, model=model,
+                                               workspace=self.workspace, messages=messages)
+        except Exception as exc:
+            self.set_status(f"Could not branch the session: {exc}")
+            return
+        session_id = _as_text(_field(session, "id"))
+        self._refresh_session_rows()
+        self.current_session = None
+        self.chat_messages = []
+        self.load_session(session_id)
+        self.set_status(f"New session branched from “{source}”. The original is unchanged.")
+        self.inspector.append_activity(f"Branched a new session from “{source}”")
+
+    def _apply_feature_msgActions(self, on: bool) -> None:
+        for block in list(self.transcript._message_blocks):
+            if block.message_index is not None:
+                block.set_actions(self._message_actions(block) if on else [])
+        if not on and self._edit_from is not None:
+            self._cancel_edit()
+
+    # --- v2: session search ------------------------------------------------
+
+    def _session_search(self, text: str) -> None:
+        search = getattr(self.desktop_core, "search_sessions", None)
+        if not self.feature("sessionSearch") or not callable(search) or len(text.strip()) < 2:
+            self.left_rail.set_message_hits(None, str)
+            return
+        hits = search(self.session_bridge.list(), text)
+        self.left_rail.set_message_hits(
+            hits, lambda workspace: Path(_as_text(workspace)).name if workspace else "No project")
+
+    def _apply_feature_sessionSearch(self, on: bool) -> None:
+        field = self.left_rail.session_filter
+        field.setPlaceholderText("Search sessions and messages" if on else "Filter sessions")
+        field.setAccessibleName("Search sessions and messages in every project" if on else "Filter sessions by name")
+        self._session_search(field.text())
+
+    # --- v2: undo agent changes --------------------------------------------
+
+    def _revert_paths(self, paths: list[str]) -> None:
+        reverter = getattr(self.desktop_core, "revert_changes", None)
+        if not self.feature("undo") or not callable(reverter) or not self.workspace:
+            return
+        if self.active_kind:
+            self.set_status("Stop the active run before reverting changes.")
+            return
+        wanted = set(paths)
+        changes = [c for c in (self.current_snapshot or {}).get("changes") or [] if c.get("path") in wanted]
+        if not changes:
+            return
+        workspace, backups = self.workspace, self.data_root / "reverts"
+        previous = self._revert_record
+        label = changes[0]["path"] if len(changes) == 1 else f"{len(changes)} files"
+
+        def job(signals: WorkerSignals) -> Any:
+            del signals
+            record = reverter(workspace, changes, backups)
+            if previous is not None:
+                shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
+            return record
+
+        def done(record: Any) -> None:
+            self._revert_record = record
+            self.inspector.undo_label.setText(f"Reverted {label}")
+            self.inspector.undo_bar.show()
+            self.set_status(f"Reverted {len(changes)} file(s) to the last commit.")
+            self.inspector.append_activity(f"Reverted {label} (git restore)", "machine")
+            self.refresh_workspace()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not revert: {message}"))
+
+    def _undo_revert(self) -> None:
+        undo = getattr(self.desktop_core, "undo_revert", None)
+        record = self._revert_record
+        if record is None or not callable(undo):
+            return
+
+        def job(signals: WorkerSignals) -> int:
+            del signals
+            restored = undo(record)
+            shutil.rmtree(_field(record, "backup"), ignore_errors=True)
+            return restored
+
+        def done(_restored: int) -> None:
+            self._revert_record = None
+            self.inspector.undo_bar.hide()
+            self.set_status("Revert undone. The changes are back on disk.")
+            self.inspector.append_activity("Revert undone; the changes are back on disk", "machine")
+            self.refresh_workspace()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not undo the revert: {message}"))
+
+    def _apply_feature_undo(self, on: bool) -> None:
+        self.inspector.undo_enabled = on
+        if not on:
+            self.inspector.undo_bar.hide()
+        self.inspector.update_snapshot(self.current_snapshot or {})
+
+    # --- v2: rules and presets ---------------------------------------------
+
+    def save_project_rules(self, rules: dict[str, Any]) -> None:
+        store = getattr(self.desktop_core, "store_rules", None)
+        if not callable(store) or not self.workspace:
+            return
+        store(self.settings_data, self.workspace, rules)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def presets(self) -> list[dict[str, str]]:
+        loader = getattr(self.desktop_core, "load_presets", None)
+        return list(loader(self.settings_data)) if callable(loader) else []
+
+    def _preset_text(self) -> str:
+        if not self.feature("presets"):
+            return ""
+        chooser = getattr(self.desktop_core, "active_preset", None)
+        return _as_text(chooser(self.settings_data).get("text")) if callable(chooser) else ""
+
+    def set_preset(self, preset_id: str) -> None:
+        self.settings_data["preset"] = preset_id
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._sync_preset_chip()
+        name = next((p["name"] for p in self.presets() if p["id"] == preset_id), preset_id)
+        if preset_id != "default":
+            self.inspector.append_activity(f"Preset: {name}")
+        self.set_status(f"Preset: {name}")
+        self._update_context_meter()
+
+    def set_preset_text(self, preset_id: str, text: Optional[str]) -> None:
+        """Store edited text, or None to go back to the shipped text."""
+        texts = dict(self.settings_data.get("preset_texts") or {})
+        if text is None:
+            texts.pop(preset_id, None)
+        else:
+            texts[preset_id] = text
+        self.settings_data["preset_texts"] = texts
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def _sync_preset_chip(self) -> None:
+        chooser = getattr(self.desktop_core, "active_preset", None)
+        active = chooser(self.settings_data) if callable(chooser) else {"id": "default", "name": "Default"}
+        self.preset_chip.setText(active["name"])
+        self.preset_chip.setAccessibleName(f"Preset: {active['name']}")
+        self.preset_menu.clear()
+        title = self.preset_menu.addAction("Preset")
+        title.setEnabled(False)
+        for preset in self.presets():
+            action = self.preset_menu.addAction(f"{preset['name']} · {preset['short']}")
+            action.setCheckable(True)
+            action.setChecked(preset["id"] == active["id"])
+            action.triggered.connect(lambda _checked=False, pid=preset["id"]: self.set_preset(pid))
+        self.preset_menu.addSeparator()
+        self.preset_menu.addAction("Edit presets…").triggered.connect(lambda: self.open_settings_tab("Presets"))
+
+    def _apply_feature_presets(self, on: bool) -> None:
+        self.preset_chip.setVisible(on and self.mode == "chat")
+        if on:
+            self._sync_preset_chip()
+        self._update_context_meter()
+
+    # --- v2: errors and recovery -------------------------------------------
+
+    FAULTS: dict[str, dict[str, str]] = {
+        "server": {"title": "The local model server stopped",
+                   "body": "Onionmind can’t reach the model server on this machine, so nothing can be answered "
+                           "right now. Your conversation is safe.",
+                   "status": "Model server stopped. Restart it to continue.",
+                   "fix": "Restarting the model server…", "done": "Model server restarted. Onionmind is ready."},
+        "oom": {"title": "Not enough GPU memory for {tier}",
+                "body": "The model needs more graphics memory than is free right now{vram}. Close another app "
+                        "that uses the GPU, or switch to a lighter tier.",
+                "status": "Out of GPU memory. Free some memory or switch to a lighter tier.",
+                "fix": "Freeing GPU memory and reloading…", "done": "Memory freed. {tier} is loaded again."},
+        "tor": {"title": "The Tor circuit failed",
+                "body": "The search couldn’t complete because the Tor circuit dropped. Nothing left this machine "
+                        "outside Tor. You can try a new circuit or answer without searching.",
+                "status": "Tor circuit failed. Try a new circuit.",
+                "fix": "Building a new Tor circuit…", "done": "New Tor circuit verified."},
+        "node": {"title": "Agent stopped: Node.js crashed",
+                 "body": "The Agent runtime exited unexpectedly. No files were changed after the last observed "
+                         "change. Chat still works.",
+                 "status": "Agent runtime stopped. Restart it to continue.",
+                 "fix": "Restarting the Agent runtime…", "done": "Agent runtime restarted."},
+    }
+
+    def _fault_text(self, kind: str, key: str) -> str:
+        total = self._model_power.get("vram_total")
+        return self.FAULTS[kind][key].format(
+            tier=self._tier_name(self.current_model_id()),
+            vram=f" (this GPU has {total / 1024:.0f} GB)" if total else "")
+
+    def _show_fault(self, kind: str, detail: str = "") -> None:
+        self._clear_fault()
+        self._fault = kind
+        card = NoticeCard("error", self._fault_text(kind, "title"), self._fault_text(kind, "body"))
+        if detail:
+            card.setToolTip(_brand_runtime_text(detail)[:300])
+        primary, secondary = {
+            "server": (("Restart model server", self._fix_server), ("Open Models", self._fault_open_models)),
+            "oom": ((f"Switch to {self._tier_name(self._lighter_model() or '') or 'a lighter tier'}", self._fix_oom_switch),
+                    ("Free memory and retry", self._fix_oom_free)),
+            "tor": (("Try a new circuit", self._fix_tor), ("Continue without search", self._fix_tor_skip)),
+            "node": (("Restart Agent runtime", self._fix_node), ("Switch to Chat", self._fix_node_chat)),
+        }[kind]
+        card.add_button(secondary[0], secondary[1])
+        card.add_button(primary[0], primary[1], primary=True)
+        self._fault_card = card
+        self.fault_layout.addWidget(card)
+        self.fault_host.show()
+        self.retry_button.hide()
+        self.set_status(self.FAULTS[kind]["status"])
+        self.inspector.append_activity(f"Problem: {self._fault_text(kind, 'title')}")
+
+    def _clear_fault(self, done: str = "") -> None:
+        if self._fault_card is not None:
+            self.fault_layout.removeWidget(self._fault_card)
+            self._fault_card.hide()
+            self._fault_card.deleteLater()
+        self._fault_card = None
+        self._fault = None
+        self._sync_no_model_banner()
+        if done:
+            self.set_status(done)
+            self.inspector.append_activity(done)
+
+    def _fault_busy(self, kind: str) -> None:
+        if self._fault_card is not None:
+            self._fault_card.set_busy(self._fault_text(kind, "fix"))
+
+    def _fault_failed(self, kind: str, message: str) -> None:
+        self._show_fault(kind, message)
+        if self._fault_card is not None:
+            self._fault_card.body_label.setText(
+                f"{self._fault_text(kind, 'body')}\n\nThat did not work: {_brand_runtime_text(message)[:200]}")
+
+    def _fix_server(self) -> None:
+        """Re-probe the model server; start it first when its program is here and it is not running."""
+        self._fault_busy("server")
+        core = self.core
+
+        def job(signals: WorkerSignals) -> list[str]:
+            del signals
+            detector = getattr(core, "detect_backend", None)
+            try:
+                if callable(detector):
+                    detector()
+            except BaseException:
+                program = shutil.which("ollama")
+                if not program:
+                    raise RuntimeError("The model server is not running and its program was not found. "
+                                       "Start it, then try again.")
+                subprocess.Popen([program, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                                 start_new_session=os.name != "nt")
+                deadline = time.monotonic() + 20
+                while True:
+                    try:
+                        detector()
+                        break
+                    except BaseException:
+                        if time.monotonic() > deadline:
+                            raise RuntimeError("The model server did not come up within 20 seconds.")
+                        time.sleep(0.5)
+            installed = getattr(core, "installed_models", None)
+            return list(installed()) if callable(installed) else []
+
+        def done(models: list[str]) -> None:
+            self._clear_fault(self._fault_text("server", "done"))
+            self._model_probe_complete(("", models))
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self._fault_failed("server", message))
+
+    def _fault_open_models(self) -> None:
+        self.open_model_manager()
+
+    def _lighter_model(self) -> Optional[str]:
+        current = self.current_model_id()
+        sizes = self._model_power.get("sizes") or {}
+        order = {"SPARK": 0, "EMBER": 1, "BLAZE": 2, "INFERNO": 3}
+        def weight(model: str) -> tuple[int, int]:
+            return (sizes.get(model) or 0, order.get(self._tier_name(model), 9))
+        lighter = [m for m in self.installed_model_ids if m != current and weight(m) < weight(current)]
+        return max(lighter, key=weight) if lighter else None
+
+    def _fix_oom_switch(self) -> None:
+        target = self._lighter_model()
+        if target is None:
+            self._fault_failed("oom", "No lighter model is installed. Add one in Models.")
+            return
+        self.model_combo.setCurrentIndex(self.model_combo.findData(target))
+        self._clear_fault(f"Switched to {self._tier_name(target)} · {self._describe_model(target)}")
+        self.inspector.append_activity(f"Switched to {self._tier_name(target)} after running out of GPU memory")
+        self._switch_loaded_model(target)
+
+    def _fix_oom_free(self) -> None:
+        """Unload every model this server holds, then ask the same turn again."""
+        self._fault_busy("oom")
+        loaded, unload = getattr(self.core, "loaded_models", None), getattr(self.core, "unload_model", None)
+
+        def job(signals: WorkerSignals) -> int:
+            del signals
+            names = [item.get("name") for item in (loaded() if callable(loaded) else []) if item.get("name")]
+            for name in names:
+                if callable(unload):
+                    unload(name)
+            return len(names)
+
+        def done(_count: int) -> None:
+            self._clear_fault(self._fault_text("oom", "done"))
+            self._retry_last_turn()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self._fault_failed("oom", message))
+
+    def _fix_tor(self) -> None:
+        self._fault_busy("tor")
+        self._clear_fault()
+        self._start_tor_from_toolbar()
+        self._awaiting_tor_fix = True
+
+    def _fix_tor_skip(self) -> None:
+        self._clear_fault("Search turned off for this turn.")
+        if self.chat_messages and self.chat_messages[-1].get("role") == "assistant" and _as_text(
+                self.chat_messages[-1].get("content")).startswith("Local inference failed"):
+            self._retry_last_turn()
+
+    def _fix_node(self) -> None:
+        task = self._last_agent_task
+        self._clear_fault(self._fault_text("node", "done"))
+        if task and not self.active_kind:
+            self.set_mode("agent")
+            self._set_active("agent")
+            self._start_harness(task)
+
+    def _fix_node_chat(self) -> None:
+        self._clear_fault("Switched to Chat.")
+        self.set_mode("chat")
+
+    def _apply_feature_errors(self, on: bool) -> None:
+        if not on:
+            self._clear_fault()
+
+    # --- v2: empty and first-use states -------------------------------------
+
+    STARTERS = (
+        "Explain how this project is structured",
+        "Find likely bugs in the files I selected",
+        "Write tests for the code I selected",
+        "Is there a newer release of a library this project uses?",
+    )
+
+    def _sync_starters(self) -> None:
+        if self._starters is not None:
+            self.transcript.remove_widget(self._starters)
+            self._starters = None
+        if not self.feature("empty") or self.chat_messages or self.active_kind:
+            return
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Try one of these")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        for prompt in self.STARTERS:
+            button = QPushButton(prompt)
+            button.setObjectName("chipButton")
+            button.setAccessibleName(f"Start with: {prompt}")
+            button.clicked.connect(lambda _checked=False, text=prompt: self._use_starter(text))
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+        self._starters = self.transcript.add_widget(box)
+
+    def _use_starter(self, prompt: str) -> None:
+        if self.active_kind:
+            return
+        if self._starters is not None:
+            self.transcript.remove_widget(self._starters)
+            self._starters = None
+        self.composer.setPlainText(prompt)
+        self.submit()
+
+    def _sync_no_model_banner(self) -> None:
+        if not hasattr(self, "fault_layout"):
+            return
+        banner = getattr(self, "_no_model_banner", None)
+        wanted = self.feature("empty") and self._no_models and self._fault is None
+        if wanted and banner is None:
+            banner = NoticeCard("ask", "No model is installed yet. Onionmind needs one on this machine before it can answer.")
+            banner.add_button("Choose a model", self.open_model_manager, primary=True)
+            self._no_model_banner = banner
+            self.fault_layout.addWidget(banner)
+        elif not wanted and banner is not None:
+            self.fault_layout.removeWidget(banner)
+            banner.hide()
+            banner.deleteLater()
+            self._no_model_banner = None
+        self.fault_host.setVisible(self._fault is not None or getattr(self, "_no_model_banner", None) is not None)
+
+    def _apply_feature_empty(self, on: bool) -> None:
+        self.left_rail.empty_text_enabled = on
+        self.left_rail.sync_empty_text()
+        self.inspector.empty_changes_note = (
+            "Nothing has changed in this project yet. When Agent edits files here, each change shows up in "
+            "this list with its diff, read straight from git." if on else "")
+        self.inspector.update_snapshot(self.current_snapshot or {})
+        self._sync_starters()
+        self._sync_no_model_banner()
+
+    # --- v2: first-launch setup ----------------------------------------------
+
+    def open_setup(self) -> None:
+        if not self.feature("setup"):
+            self.set_status("Turn on First-launch setup in New features to run it.")
+            return
+        self.setup_overlay.open()
+
+    # --- v2: auto-delete and app lock ----------------------------------------
+
+    def _lock_settings(self) -> dict[str, Any]:
+        stored = self.settings_data.get("lock")
+        return dict(stored) if isinstance(stored, dict) else {}
+
+    def set_lock_setting(self, key: str, value: Any) -> None:
+        settings = self._lock_settings()
+        settings[key] = value
+        self.settings_data["lock"] = settings
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_feature_lock(self.feature("lock"))
+
+    def set_passphrase(self, passphrase: str) -> bool:
+        hasher = getattr(self.desktop_core, "hash_passphrase", None)
+        if not passphrase or not callable(hasher):
+            return False
+        self.set_lock_setting("passphrase", hasher(passphrase))
+        return True
+
+    def has_passphrase(self) -> bool:
+        return isinstance(self._lock_settings().get("passphrase"), dict)
+
+    def _verify_passphrase(self, text: str) -> bool:
+        verify = getattr(self.desktop_core, "verify_passphrase", None)
+        record = self._lock_settings().get("passphrase")
+        return bool(callable(verify) and isinstance(record, dict) and verify(text, record))
+
+    def lock_now(self) -> bool:
+        if not self.feature("lock"):
+            return False
+        if not self.has_passphrase():
+            self.set_status("Set a passphrase in Settings → Privacy before locking.")
+            self.open_settings_tab("Privacy")
+            return False
+        self.lock_overlay.lock()
+        self.inspector.append_activity("Onionmind locked")
+        return True
+
+    _INPUT_EVENTS = None
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        kinds = OnionmindWindow._INPUT_EVENTS
+        if kinds is None:
+            from PySide6.QtCore import QEvent
+
+            kinds = OnionmindWindow._INPUT_EVENTS = {
+                QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.Wheel}
+        if event.type() in kinds:
+            self._last_input = time.monotonic()
+        return False
+
+    def _set_idle_tracking(self, on: bool) -> None:
+        """Watch for input app-wide only while an idle lock is armed."""
+        app = QApplication.instance()
+        if app is None or on == self._idle_tracking:
+            return
+        if on:
+            self._last_input = time.monotonic()
+            app.installEventFilter(self)
+        else:
+            app.removeEventFilter(self)
+        self._idle_tracking = on
+
+    def _check_idle(self) -> None:
+        minutes = int(self._lock_settings().get("lock_after") or 0)
+        if not self.feature("lock") or not minutes or self.lock_overlay.isVisible() or not self.has_passphrase():
+            return
+        if time.monotonic() - self._last_input >= minutes * 60:
+            self.lock_now()
+
+    def old_sessions(self) -> list[Any]:
+        days = int(self._lock_settings().get("auto_delete_days") or 0)
+        finder = getattr(self.desktop_core, "sessions_older_than", None)
+        if not days or not callable(finder):
+            return []
+        current = _as_text(_field(self.current_session, "id", "")) if self.current_session is not None else ""
+        candidates = [*self.session_bridge.list(), *self.session_bridge.list(archived=True)]
+        return [s for s in finder(candidates, days) if _as_text(_field(s, "id")) != current]
+
+    def _auto_delete_old(self) -> int:
+        if not self.feature("lock"):
+            return 0
+        removed = sum(1 for session in self.old_sessions() if self.session_bridge.delete(_as_text(_field(session, "id"))))
+        if removed:
+            self._refresh_session_rows()
+            self.inspector.append_activity(f"Deleted {removed} old conversation(s)")
+            self.set_status(f"Deleted {removed} old conversation(s).")
+        return removed
+
+    def _apply_feature_lock(self, on: bool) -> None:
+        self._sync_toolbar_features()
+        minutes = int(self._lock_settings().get("lock_after") or 0)
+        if on and minutes:
+            self.idle_timer.start()
+        else:
+            self.idle_timer.stop()
+        self._set_idle_tracking(bool(on and minutes))
+        if on and self._lock_settings().get("auto_delete_days"):
+            self.housekeeping_timer.start()
+            if not self.demo:
+                QTimer.singleShot(0, self._auto_delete_old)
+        else:
+            self.housekeeping_timer.stop()
+        if not on and self.lock_overlay.isVisible():
+            # Turning the feature off is done from an unlocked window only.
+            pass
+
+    # --- v2: appearance --------------------------------------------------------
+
+    def _appearance(self) -> dict[str, Any]:
+        stored = self.settings_data.get("appearance")
+        values = {"theme": "dark", "ui_scale": 100, "notify": False}
+        if isinstance(stored, dict):
+            if stored.get("theme") in ("dark", "light"):
+                values["theme"] = stored["theme"]
+            if stored.get("ui_scale") in (90, 100, 110, 125):
+                values["ui_scale"] = stored["ui_scale"]
+            values["notify"] = bool(stored.get("notify"))
+        return values
+
+    def _ui_scale_factor(self) -> float:
+        if not getattr(self, "features", None) or not self.feature("appearance"):
+            return 1.0
+        return self._appearance()["ui_scale"] / 100
+
+    def set_appearance(self, key: str, value: Any) -> None:
+        values = self._appearance()
+        values[key] = value
+        self.settings_data["appearance"] = values
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_feature_appearance(self.feature("appearance"))
+
+    def toggle_theme(self) -> None:
+        self.set_appearance("theme", "light" if current_theme() == "dark" else "dark")
+
+    def _apply_feature_appearance(self, on: bool) -> None:
+        theme = self._appearance()["theme"] if on else "dark"
+        look = (theme, self._ui_scale_factor())
+        if look == getattr(self, "_applied_look", ("dark", 1.0)):
+            return                               # restyling every widget is not free
+        self._applied_look = look
+        if theme != current_theme():
+            set_theme(theme)
+            _retheme_icons(self)
+            self.tor_status._update_state_icon()
+            self.model_status.refresh_theme()
+        if hasattr(self, "preferences"):
+            self._apply_preferences()
+
+    def _apply_feature_runPanel(self, on: bool) -> None:
+        self.inspector.set_run_tab(on)
+
+    def _apply_feature_approvals(self, on: bool) -> None:
+        del on
+        self.approval_state.setText(self._approval_text(self.yolo_consent.isChecked()))
+
+    def _notify(self, title: str, body: str) -> None:
+        """A real OS notification (system tray), only with appearance on, the
+        person's say-so, and the window not already in front."""
+        if not self.feature("appearance") or not self._appearance().get("notify"):
+            return
+        if self.isActiveWindow() and not self.isMinimized():
+            return
+        self.last_notification = (title, body)
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            if self._tray is None:
+                self._tray = QSystemTrayIcon(self.windowIcon(), self)
+                self._tray.setToolTip("Onionmind")
+            self._tray.show()
+            self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 6000)
+        else:
+            QApplication.alert(self)
+
+    # --- v2 features -----------------------------------------------------
+    #
+    # One dict, saved with the other settings. Each feature owns an
+    # _apply_feature_<key>(on) hook that shows or hides its own UI, so turning
+    # a flag off restores the original workbench at once, without a restart.
+
+    def _load_features(self) -> dict[str, bool]:
+        loader = getattr(self.desktop_core, "load_features", None)
+        if not callable(loader):
+            return {}
+        try:
+            return dict(loader(self.settings_data))
+        except Exception:
+            return {}
+
+    def feature(self, key: str) -> bool:
+        return bool(self.features.get(key))
+
+    def set_feature(self, key: str, on: bool) -> None:
+        if key not in self.features or self.features[key] == bool(on):
+            return
+        self.features[key] = bool(on)
+        self._store_features()
+
+    def set_all_features(self, on: bool) -> None:
+        if not self.features:
+            return
+        for key in self.features:
+            self.features[key] = bool(on)
+        self._store_features()
+
+    def _store_features(self) -> None:
+        self.settings_data["features"] = dict(self.features)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_features()
+        on = sum(1 for value in self.features.values() if value)
+        self.set_status(f"New features: {on} of {len(self.features)} on")
+
+    def _apply_features(self) -> None:
+        for key, on in self.features.items():
+            hook = getattr(self, f"_apply_feature_{key}", None)
+            if callable(hook):
+                hook(bool(on))
+        popover = self._features_popover
+        if popover is not None:
+            popover.toggles.sync()
+        self.featuresChanged.emit(dict(self.features))
+
+    def open_features_popover(self) -> None:
+        if self._features_popover is None:
+            self._features_popover = FeaturesPopover(self)
+        self._features_popover.show_below(self.features_button)
 
     def _populate_demo(self) -> None:
         self.set_model_options(["inferno", "blaze", "ember"], "inferno")
@@ -11196,6 +16461,7 @@ class OnionmindWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self.transcript.verticalScrollBar().setValue(0))
 
     def closeEvent(self, event: Any) -> None:
+        self._set_idle_tracking(False)
         self._save_window_layout()
         self._remember_draft()
         self.save_current_session()
