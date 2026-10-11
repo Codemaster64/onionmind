@@ -26,15 +26,24 @@ kill "$SRV"; sleep 2
 # same bytes twice (measured: two 484MB blobs for one 484MB GGUF). On a stick
 # that doubles the weights, so drop every blob the manifests don't reference.
 python3 - <<'PY'
-import json, glob, os
+import json, glob, os, sys
 root = "/usr/lib/onionmind/models"
 keep = set()
-for m in glob.glob(root + "/manifests/**/*", recursive=True):
+# ollama < 0.40 writes manifests/<registry>/... as plain JSON files; 0.40+
+# writes manifests-v2/... as links to the manifest, which is itself a blob
+# and has to be kept too.
+for m in glob.glob(root + "/manifests*/**/*", recursive=True):
     if not os.path.isfile(m):
         continue
+    if os.path.islink(m):
+        keep.add(os.path.basename(os.path.realpath(m)).split("-", 1)[1])
     d = json.load(open(m))
     keep.add(d["config"]["digest"].split(":")[1])
     keep.update(l["digest"].split(":")[1] for l in d.get("layers", []))
+if not keep:
+    # A layout this loop does not know would leave keep empty and delete
+    # every blob - an image with no model. Fail the build instead.
+    sys.exit(f"no manifests under {root}; refusing to GC every blob")
 for b in glob.glob(root + "/blobs/sha256-*"):
     if os.path.basename(b).split("-", 1)[1] not in keep:
         print(f"GC unreferenced blob: {os.path.basename(b)}")

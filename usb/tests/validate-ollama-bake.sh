@@ -30,21 +30,32 @@ ollama create test-model -f /tmp/MF
 echo "-- store layout --"
 find /store/models -type f -printf '%12s  %p\n' | sort -rn | head -6
 echo "-- manifest --"
-cat /store/models/manifests/registry.ollama.ai/library/test-model/latest; echo
+# manifests/registry.ollama.ai/... before ollama 0.40, manifests-v2/ollama.com/...
+# (a link to the manifest blob) from 0.40 on.
+cat /store/models/manifests*/*/library/test-model/latest; echo
 
 echo "== 2b. GC: ollama create keeps BOTH the raw GGUF blob and its converted"
 echo "    layer (same bytes twice). Drop what the manifest doesn't reference -"
 echo "    exactly what the bake hook does. Then prove inference still works."
 python3 - <<'PY'
-import json, glob, os
+import json, glob, os, sys
 root = "/store/models"
 keep = set()
-for m in glob.glob(root + "/manifests/**/*", recursive=True):
+# ollama < 0.40 writes manifests/<registry>/... as plain JSON files; 0.40+
+# writes manifests-v2/... as links to the manifest, which is itself a blob
+# and has to be kept too.
+for m in glob.glob(root + "/manifests*/**/*", recursive=True):
     if not os.path.isfile(m):
         continue
+    if os.path.islink(m):
+        keep.add(os.path.basename(os.path.realpath(m)).split("-", 1)[1])
     d = json.load(open(m))
     keep.add(d["config"]["digest"].split(":")[1])
     keep.update(l["digest"].split(":")[1] for l in d.get("layers", []))
+if not keep:
+    # A layout this loop does not know would leave keep empty and delete
+    # every blob - an image with no model. Fail the build instead.
+    sys.exit(f"no manifests under {root}; refusing to GC every blob")
 for b in glob.glob(root + "/blobs/sha256-*"):
     if os.path.basename(b).split("-", 1)[1] not in keep:
         print(f"GC unreferenced blob: {os.path.basename(b)}")
@@ -57,8 +68,8 @@ kill "$SRV"; sleep 2
 
 echo "== 3. serve from a READ-ONLY store AFTER GC (the squashfs case) =="
 mount --bind /store /store && mount -o remount,ro,bind /store
-mkdir -p /run2/blobs /run2/manifests
-cp -a /store/models/manifests/. /run2/manifests/
+mkdir -p /run2/blobs
+for d in /store/models/manifests*; do cp -a "$d" /run2/; done   # as link-store.sh
 for b in /store/models/blobs/*; do ln -s "$b" "/run2/blobs/$(basename "$b")"; done
 OLLAMA_MODELS=/run2 OLLAMA_HOST=127.0.0.1:11435 /usr/bin/ollama serve >/tmp/ollama2.log 2>&1 &
 SRV2=$!
