@@ -28,6 +28,7 @@ Onionmind
 ├── Desktop workbench (PySide6)
 │   ├── logic, no Qt import           onionmind_desktop_core.py   (unit-tested)
 │   └── Qt widget tree + workers      onionmind_desktop.py
+├── Terminal UI (Textual)            onionmind_tui.py   (reuses the desktop core's SessionStore)
 ├── Android app (Kotlin)             android/
 │   ├── platform-free core            core/  (Agent, Socks5, ModelSource, …)
 │   └── app shell (WebView + services) app/   (Server, ProcessManager, …)
@@ -134,6 +135,15 @@ generated PowerShell helper that keeps dated backups and rolls back a failed mov
 The feed is a plain release-asset URL, **not** `api.github.com` (per-exit rate
 limits are hostile to shared Tor exits). Full detail:
 [TECHNICAL.md → Self-update over Tor](TECHNICAL.md#self-update-over-tor).
+
+## The terminal UI
+
+`onionmind_tui.py` is a third front end, built on Textual. It follows the same
+seams: inference and Tor through `onionmind.py` (`turn_stream`, `start_tor_hidden`,
+`tor_check`), sessions and model names through `onionmind_desktop_core.py`
+(`SessionStore`, `describe_model`), with no Qt import. Streaming text is shown only
+after `strip_thinking`, which fails closed on half-open tags. Checked by
+`tests/test_tui.py` (skips when Textual is absent).
 
 ## Android (`android/`)
 

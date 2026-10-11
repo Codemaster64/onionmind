@@ -71,6 +71,9 @@ class V2Base(unittest.TestCase):
         return window
 
     def _close(self, widget: QWidget) -> None:
+        # Let background jobs (a git inspection, say) finish first: on Windows
+        # a child still running in a temp folder keeps it from being removed.
+        self._wait_until(lambda: not getattr(widget, "_workers", None))
         widget.close()
         widget.deleteLater()
         self.app.processEvents()

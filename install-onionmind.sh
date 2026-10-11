@@ -13272,6 +13272,8 @@ class OnionmindWindow(QMainWindow):
         self.inspector.append_activity(f"Project refreshed; {count} observed change(s)")
 
     def _workspace_failed(self, message: str) -> None:
+        if not self.workspace:
+            return
         self.branch_label.setText("Inspection failed")
         self.set_status(f"Could not inspect project: {message}")
         self.inspector.append_activity(f"Project inspection failed: {message}")
