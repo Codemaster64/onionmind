@@ -62,4 +62,20 @@ class PreferencesTest {
         assertEquals(1.15, WorkbenchPreferences.textScaleFactor("comfortable"))
         assertEquals(1.0, WorkbenchPreferences.textScaleFactor("unheard-of"))
     }
+
+    @Test
+    fun `the v2 settings round trip and reject junk`() {
+        val set = WorkbenchPreferences.DEFAULT.patch(
+            theme = "light", preset = "concise", autoDeleteDays = "7", secureScreen = "true")
+        assertEquals("light", set.theme)
+        assertEquals("concise", set.preset)
+        assertEquals(7, set.autoDeleteDays)
+        assertTrue(set.secureScreen)
+        assertEquals(set, WorkbenchPreferences.fromJson(set.toJson()))
+        assertEquals(set, set.patch(theme = "neon", preset = "evil", autoDeleteDays = "3", secureScreen = "maybe"))
+        val stored = WorkbenchPreferences.fromJson("""{"autoDeleteDays":"30","theme":"neon","preset":"x"}""")
+        assertEquals(30, stored.autoDeleteDays)
+        assertEquals("dark", stored.theme)
+        assertEquals("default", stored.preset)
+    }
 }

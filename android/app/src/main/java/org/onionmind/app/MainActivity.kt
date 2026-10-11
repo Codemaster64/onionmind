@@ -15,14 +15,26 @@ class MainActivity : Activity() {
         // which Android 13+ still shows without the runtime notification grant,
         // so startup asks for nothing and nothing is requested behind the
         // user's back.
+        // lock: with the private screen on, the conversation never shows in
+        // the app switcher or in screenshots.
+        applySecure(Workbench.secureWanted(this))
+        Workbench.onSecureChanged = { wanted -> runOnUiThread { applySecure(wanted) } }
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
+        // Nocturne ground behind the page, so the first frame is not Material grey.
+        web.setBackgroundColor(0xFF161826.toInt())
         setContentView(web)
         web.loadUrl(Server.pageUrl())
     }
 
+    private fun applySecure(wanted: Boolean) {
+        if (wanted) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
     override fun onDestroy() {
+        Workbench.onSecureChanged = null
         // the model server keeps running while the process lives; the OS will
         // reap everything eventually, and every boot resumes cleanly
         super.onDestroy()

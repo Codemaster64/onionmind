@@ -5,67 +5,131 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Onionmind</title>
 <style>
-  :root { --purple: #7D4698; --dim: #9c7bb0; --bg: #0e0b12; --card: #17121d; --line: #2a2133; }
+  /* Nocturne, the desktop workbench's palette (DESIGN.md). Every color below
+     is a role; the light theme (appearance feature) only swaps the values. */
+  :root {
+    --bg: #161826; --card: #232532; --field: #1d1f2c; --text: #e9e9ed; --strong: #f3f5fe;
+    --muted: #b2b6ca; --faint: #9397ab; --line: rgba(233, 233, 237, .16); --line-soft: rgba(233, 233, 237, .10);
+    --accent: #9184d9; --accent-text: #d2cefd; --fill: #796cbf; --on-fill: #f5f4ff;
+    --good: #74c692; --good-bg: rgba(116, 198, 146, .12); --good-line: rgba(116, 198, 146, .45);
+    --warn: #e3b667; --warn-bg: rgba(227, 182, 103, .12); --warn-line: rgba(227, 182, 103, .45);
+    --bad: #eb8373; --bad-bg: rgba(235, 131, 115, .12); --bad-line: rgba(235, 131, 115, .45);
+    --danger: #8a3b3b; color-scheme: dark;
+  }
+  html[data-theme="light"] {
+    --bg: #f2f3f8; --card: #fbfbfe; --field: #ffffff; --text: #1d1f2b; --strong: #1d1f2b;
+    --muted: #595d6c; --faint: #75798c; --line: rgba(29, 31, 43, .14); --line-soft: rgba(29, 31, 43, .08);
+    --accent: #6b5fc0; --accent-text: #5d5294; --fill: #6b5fc0; --on-fill: #ffffff;
+    --good: #2f7a4b; --good-bg: rgba(47, 122, 75, .10); --good-line: rgba(47, 122, 75, .40);
+    --warn: #8a6216; --warn-bg: rgba(138, 98, 22, .10); --warn-line: rgba(138, 98, 22, .40);
+    --bad: #a63d2f; --bad-bg: rgba(166, 61, 47, .10); --bad-line: rgba(166, 61, 47, .40);
+    --danger: #a63d2f; color-scheme: light;
+  }
   * { box-sizing: border-box; margin: 0; }
-  body { background: var(--bg); color: #e8e2ee; font: 16px/1.5 system-ui, sans-serif;
+  /* A display rule below must never beat the hidden attribute. */
+  [hidden] { display: none !important; }
+  body { background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif;
          display: flex; flex-direction: column; height: 100dvh; }
   header { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
            border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header svg { flex: none; }
-  header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; }
-  #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: #888; }
-  #manage, #settings-btn { background: transparent; border: 1px solid var(--line); color: #cdbbd5; padding: 6px 9px; font-size: 12px; }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: .3px; color: var(--strong); }
+  #dots { margin-left: auto; display: flex; gap: 6px; font-size: 11px; color: var(--faint); }
+  .ghost, #manage, #settings-btn { background: transparent; border: 1px solid var(--line); color: var(--muted); padding: 6px 9px; font-size: 12px; font-weight: 500; }
   .dot { padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); }
-  .dot.on { color: #9ef0b0; border-color: #2c5e3c; }
+  .dot.on { color: var(--good); border-color: var(--good-line); }
+  .dot.wait { color: var(--warn); border-color: var(--warn-line); }
+  #statusline { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 11px; color: var(--faint);
+                padding: 6px 16px; border-bottom: 1px solid var(--line-soft); }
+  #ctx { display: flex; align-items: center; gap: 6px; }
+  #ctx .meter { width: 64px; height: 4px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  #ctx .meter i { display: block; height: 100%; background: var(--accent); width: 0%; }
+  #ctx.warn { color: var(--warn); } #ctx.warn .meter i { background: var(--warn); }
   #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
           width: 100%; max-width: 720px; margin-inline: auto; }
   .msg { max-width: 92%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap;
          word-break: break-word; }
-  .you { align-self: flex-end; background: var(--purple); color: #fff; border-bottom-right-radius: 4px; }
+  .you { align-self: flex-end; background: var(--fill); color: var(--on-fill); border-bottom-right-radius: 4px; }
   .bot { align-self: flex-start; background: var(--card); border: 1px solid var(--line);
          border-bottom-left-radius: 4px; }
-  .bot small { display: block; color: var(--dim); font-size: 11px; margin-top: 6px; }
+  .msg small, .msg .meta { display: block; color: var(--faint); font-size: 11px; margin-top: 6px; white-space: normal; }
+  .you small { color: var(--on-fill); opacity: .8; }
+  .meta .chip { display: inline-block; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; margin: 2px 4px 0 0; }
+  .meta .chip.tor { color: var(--accent-text); border-color: var(--accent); }
+  .meta .chip.bad { color: var(--bad); border-color: var(--bad-line); }
+  .acts { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; white-space: normal; }
+  .acts span { cursor: pointer; color: var(--faint); text-decoration: underline; text-underline-offset: 2px; }
+  .you .acts span { color: var(--on-fill); opacity: .85; }
+  .card-note { align-self: stretch; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+  .card-note.ask { border-color: var(--accent); }
+  .card-note.err { border-color: var(--bad-line); background: var(--bad-bg); }
+  .card-note.warn { border-color: var(--warn-line); background: var(--warn-bg); }
+  .card-note strong { display: block; margin-bottom: 4px; color: var(--strong); }
+  .card-note p { color: var(--muted); font-size: 13px; }
+  .card-note .row { justify-content: flex-start; margin-top: 10px; flex-wrap: wrap; }
+  .card-note button { padding: 8px 12px; font-size: 13px; }
+  #starters { display: flex; flex-direction: column; gap: 8px; align-self: stretch; }
+  #starters button { text-align: left; background: var(--card); color: var(--text); border: 1px solid var(--line); font-weight: 400; font-size: 14px; }
+  #starters p { color: var(--faint); font-size: 12px; }
   #form { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
           border-top: 1px solid var(--line); flex-wrap: wrap;
           width: 100%; max-width: 720px; margin-inline: auto; }
   #search-permission { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
-                       color: #cdbbd5; font-size: 12px; padding: 0 2px 2px; }
-  #search-permission input { accent-color: var(--purple); width: 16px; height: 16px; }
-  #q { flex: 1; background: var(--card); border: 1px solid var(--line); color: inherit;
+                       color: var(--muted); font-size: 12px; padding: 0 2px 2px; }
+  #search-permission input, .pref-check input, .feature input { accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+  #preset-row { flex-basis: 100%; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  #preset-row button { flex: none; background: var(--card); color: var(--muted); border: 1px solid var(--line); font-weight: 400; padding: 5px 10px; font-size: 12px; }
+  #preset-row button.on { color: var(--on-fill); background: var(--fill); border-color: transparent; }
+  #q { flex: 1; background: var(--field); border: 1px solid var(--line); color: inherit;
        border-radius: 12px; padding: 11px 14px; font: inherit; outline: none; }
-  button { background: var(--purple); color: #fff; border: 0; border-radius: 12px;
+  #q:focus { border-color: var(--accent); }
+  button { background: var(--fill); color: var(--on-fill); border: 0; border-radius: 12px;
            padding: 11px 18px; font: inherit; font-weight: 600; }
   button:disabled { opacity: .4; }
   #setup { margin: auto; max-width: 340px; text-align: center; padding: 24px; }
   #setup .ring { margin: 0 auto 18px; width: 84px; height: 84px; }
-  #setup p { color: #b9aec4; font-size: 14px; margin: 8px 0 18px; }
-  #device-note { color: #9ef0b0; font-size: 12px; margin: -8px 0 14px; }
+  #setup p { color: var(--muted); font-size: 14px; margin: 8px 0 18px; }
+  #device-note { color: var(--good); font-size: 12px; margin: -8px 0 14px; }
   #model-list { display: grid; gap: 10px; text-align: left; }
   .model-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-  .model-card.recommended { border-color: #9ef0b0; box-shadow: 0 0 0 1px #2c5e3c inset; }
+  .model-card + .model-card { margin-top: 10px; }
+  #model-list .model-card + .model-card { margin-top: 0; }
+  .model-card.recommended { border-color: var(--good-line); box-shadow: 0 0 0 1px var(--good-line) inset; }
   .model-head { display: flex; align-items: baseline; gap: 8px; }
-  .model-head strong { font-size: 14px; }
-  .model-head span { color: #9ef0b0; font-size: 11px; margin-left: auto; }
-  .model-meta { color: #b9aec4; font-size: 12px; margin: 4px 0 9px; }
+  .model-head strong { font-size: 14px; color: var(--strong); }
+  .model-head span { color: var(--good); font-size: 11px; margin-left: auto; }
+  .fit { font-size: 11px; border-radius: 99px; padding: 0 7px; border: 1px solid var(--line); }
+  .model-head .fit { margin-left: 2px; }   /* beside the name; only the status label sits right */
+  .fit.Fits { color: var(--good); border-color: var(--good-line); }
+  .fit.Tight { color: var(--warn); border-color: var(--warn-line); }
+  .fit.Too { color: var(--bad); border-color: var(--bad-line); }
+  .model-meta { color: var(--muted); font-size: 12px; margin: 4px 0 9px; }
   .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 14px 0; }
-  .bar i { display: block; height: 100%; background: var(--purple); width: 0%; transition: width .5s; }
-  #busy { text-align: center; color: var(--dim); font-size: 13px; padding: 6px; display: none; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0%; transition: width .5s; }
+  #busy { text-align: center; color: var(--faint); font-size: 13px; padding: 6px; display: none; }
   .row { display: flex; gap: 10px; justify-content: center; }
-  #manager { position: fixed; inset: 0; z-index: 2; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
-  #settings { position: fixed; inset: 0; z-index: 3; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
-  #manager h2, #settings h2 { font-size: 20px; margin-bottom: 4px; }
-  #manager > p, #settings > p { color: #b9aec4; font-size: 13px; margin-bottom: 16px; }
-  #manager > *, #settings > * { max-width: 560px; margin-left: auto; margin-right: auto; }
-  #manager input, #setup input { width: 100%; background: var(--card); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
+  .sheet { position: fixed; inset: 0; z-index: 2; background: var(--bg); overflow-y: auto; padding: 18px 16px calc(24px + env(safe-area-inset-bottom)); }
+  #settings { z-index: 3; }
+  .sheet h2 { font-size: 20px; margin-bottom: 4px; color: var(--strong); }
+  .sheet > p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .sheet > * { max-width: 560px; margin-left: auto; margin-right: auto; }
+  #manager input, #setup input { width: 100%; background: var(--field); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
   .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
   .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }
-  .danger { background: #5b2634; } .muted { background: transparent; border: 1px solid var(--line); }
+  .danger { background: var(--danger); color: #fff; } .muted { background: transparent; border: 1px solid var(--line); color: var(--text); }
   .seg { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
-  .seg button { background: var(--card); border: 1px solid var(--line); color: inherit;
+  .seg button { background: var(--field); border: 1px solid var(--line); color: inherit;
                  font-weight: 400; padding: 8px 12px; font-size: 13px; }
-  .seg button.on { background: var(--purple); color: #fff; border-color: transparent; font-weight: 600; }
-  .pref-check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: #cdbbd5; margin-top: 8px; }
-  .pref-check input { accent-color: var(--purple); width: 16px; height: 16px; }
+  .seg button.on { background: var(--fill); color: var(--on-fill); border-color: transparent; font-weight: 600; }
+  .pref-check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .feature { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--line-soft); }
+  .feature:first-of-type { border-top: 0; }
+  .feature input { margin-top: 3px; }
+  .feature b { display: block; font-size: 14px; font-weight: 600; color: var(--strong); }
+  .feature span { display: block; font-size: 12px; color: var(--muted); }
+  .zone { border-left: 3px solid var(--line); }
+  .zone.phone { border-left-color: var(--good); } .zone.tor { border-left-color: var(--accent); } .zone.direct { border-left-color: var(--warn); }
+  .zone ul { margin: 6px 0 0 18px; padding: 0; color: var(--muted); font-size: 13px; }
   textarea#q { resize: none; min-height: 44px; max-height: 132px; }
   html.reduced *, html.reduced *::before { transition: none !important; animation: none !important; }
   @media (prefers-reduced-motion: reduce) { *, *::before { transition: none !important; animation: none !important; } }
@@ -77,6 +141,7 @@
 <body>
 
 <header>
+  <!-- The logo keeps its brand purple: DESIGN.md makes it the one exception to the palette. -->
   <svg width="26" height="26" viewBox="0 0 128 128" fill="none" stroke="#7D4698" stroke-width="9" stroke-linecap="round">
     <circle cx="64" cy="64" r="52" stroke-dasharray="290 36" transform="rotate(-104 64 64)" opacity=".4"/>
     <circle cx="64" cy="64" r="28" stroke-dasharray="156 20" transform="rotate(40 64 64)"/>
@@ -85,17 +150,22 @@
   <h1>Onionmind</h1>
   <button id="manage" onclick="openManager()">Models</button>
   <button id="settings-btn" onclick="openSettings()">Settings</button>
+  <button id="boundary-btn" class="ghost" onclick="openBoundary()" hidden>Map</button>
   <div id="dots">
     <span class="dot" id="d-tor">tor</span><span class="dot" id="d-model">model</span>
   </div>
 </header>
+<div id="statusline" hidden>
+  <span id="live"></span>
+  <span id="ctx" hidden><span id="ctx-text"></span><span class="meter"><i id="ctx-bar"></i></span></span>
+</div>
 
 <!-- AI Act Art. 50(1): the interface itself must say it is an AI. -->
 <p style="padding:8px 16px;font-size:12px;opacity:.65;line-height:1.4">
   You are talking to an AI. It can be wrong; you are responsible for what you do with the output.
 </p>
 
-<section id="manager" hidden>
+<section id="manager" class="sheet" hidden>
   <div class="manage-head"><h2>Models on this phone</h2><button class="muted" onclick="closeManager()">Done</button></div>
   <p>Download several models and switch between them any time. Models are stored locally.</p>
   <div id="installed-list"></div>
@@ -108,13 +178,25 @@
   </div>
 </section>
 
-<section id="settings" hidden>
+<section id="boundary" class="sheet" hidden>
+  <div class="manage-head"><h2>Where things go</h2><button class="muted" onclick="closeBoundary()">Done</button></div>
+  <p>What stays on this phone, what leaves over Tor, and what goes direct. Counts are today's, from the network log.</p>
+  <div id="zones"></div>
+</section>
+
+<section id="settings" class="sheet" hidden>
   <div class="manage-head"><h2>Settings</h2><button class="muted" onclick="closeSettings()">Done</button></div>
   <p>These choices apply immediately and stay on this phone. Privacy behavior — Tor and the per-turn search permission — is not a setting.</p>
   <div class="model-card">
     <strong>Text size</strong>
     <div class="seg" id="seg-text">
       <button data-v="system">System</button><button data-v="compact">Compact</button><button data-v="comfortable">Comfortable</button>
+    </div>
+  </div>
+  <div class="model-card" data-feature="appearance" hidden>
+    <strong>Theme</strong>
+    <div class="seg" id="seg-theme">
+      <button data-v="dark">Dark</button><button data-v="light">Light</button><button data-v="system">Follow system</button>
     </div>
   </div>
   <div class="model-card">
@@ -136,6 +218,33 @@
       <button onclick="shareConversation()">Share as text</button>
       <button class="danger" onclick="clearConversation()">Clear</button>
     </div>
+  </div>
+  <div class="model-card" data-feature="lock" hidden>
+    <strong>Auto-delete</strong>
+    <div class="seg" id="seg-delete">
+      <button data-v="0">Keep</button><button data-v="1">After 1 day</button><button data-v="7">After 7 days</button><button data-v="30">After 30 days</button>
+    </div>
+    <p class="model-meta">Counted from the last message. The conversation is deleted the next time Onionmind opens after that.</p>
+    <label class="pref-check"><input id="pref-secure" type="checkbox"> Private screen: hide from the app switcher and block screenshots</label>
+  </div>
+  <div class="model-card" data-feature="netlog" hidden>
+    <strong>Network log</strong>
+    <p class="model-meta">Every connection that left this phone while the log was on: time, route (Tor or direct), host and kind. Never what you asked.</p>
+    <p class="model-meta" id="netlog-count"></p>
+    <div class="model-actions">
+      <button onclick="shareNetlog('json')">Share JSON</button>
+      <button onclick="shareNetlog('csv')">Share CSV</button>
+      <button class="danger" onclick="clearNetlog()">Clear</button>
+    </div>
+  </div>
+  <div class="model-card">
+    <div class="model-head"><strong>Features</strong></div>
+    <p class="model-meta">New workbench features. Each one shows or hides at once; nothing here changes the Tor boundary.</p>
+    <div class="model-actions" style="margin-bottom:6px">
+      <button class="muted" onclick="setAllFeatures('on')">Turn all on</button>
+      <button class="muted" onclick="setAllFeatures('off')">Turn all off</button>
+    </div>
+    <div id="feature-list"></div>
   </div>
 </section>
 
@@ -165,6 +274,7 @@
 <button id="to-bottom" onclick="scrollBottom()">Jump to latest</button>
 <div id="busy">thinking locally…</div>
 <form id="form">
+  <div id="preset-row" hidden></div>
   <label id="search-permission">
     <input id="allow-search" type="checkbox">
     Allow Tor search this turn
@@ -188,16 +298,27 @@ const errorText = err => err instanceof Error ? (err.message || String(err)) : S
 const busyText = () => status.llama === false ? 'loading the model into memory…' : 'thinking locally…';
 let history = [], status = {model:'none', models:[]}, ready = false;
 let busy = false, pendingRedirect = null;
+let features = {}, featureCatalog = [], presets = [];
+// The last context figure: real (from the model) or an estimate until then.
+let contextUse = null;
 const $ = id => document.getElementById(id);
 const chatEl = $('chat');
 const nearBottom = () => chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
 const scrollBottom = () => { chatEl.scrollTop = chatEl.scrollHeight; $('to-bottom').style.display = 'none'; };
+const on = key => features[key] === true;
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const GREETING = () => 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn".' +
+  (status.tor ? ' Tor is up.' : '') + ' Ask anything.';
 
 async function poll() {
   try { status = await (await api('/api/status')).json(); } catch {}
+  if (status.features) { const changed = JSON.stringify(status.features) !== JSON.stringify(features); features = status.features; if (changed) applyFeatures(); }
   $('d-tor').classList.toggle('on', !!status.tor);
   $('d-tor').title = status.tor ? 'Onionmind background Tor is running' : 'Background Tor is off';
-  $('d-model').classList.toggle('on', status.model !== 'none' && !status.downloading);
+  const loading = on('ladder') && status.llamaLoading;
+  $('d-model').classList.toggle('on', status.model !== 'none' && !status.downloading && !loading);
+  $('d-model').classList.toggle('wait', !!loading);
+  $('d-model').textContent = loading ? 'loading' : 'model';
   const setup = $('setup'), chat = $('chat'), form = $('form');
   if (status.model === 'none' && !status.downloading) {
     setup.hidden = false; chat.style.display = form.style.display = 'none'; ready = false;
@@ -219,12 +340,16 @@ async function poll() {
   } else {
     setup.hidden = true; chat.style.display = form.style.display = '';
     if ($('busy').style.display === 'block') $('busy').textContent = busyText();
-    if (!ready) { if (!history.length) add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn"' + (status.tor ? ' Tor is up.' : '') + ' Ask anything.'); ready = true; }
+    if (!ready) { ready = true; if (!history.length) renderHistory(); }
   }
+  updateStatusLine();
+  if (!$('boundary').hidden) renderBoundary();
+  if (!$('manager').hidden) renderManager();
 }
 // Restore the saved conversation before the first poll so the greeting and
 // the restored turns appear in the right order.
 loadPrefs();
+loadFeatures();
 loadConversation().finally(() => { setInterval(poll, 2000); poll(); });
 
 function recommendedTier() {
@@ -253,7 +378,14 @@ function downloadDetails(done, total, speed) {
 function uncensoredNote(m) {
   // The flag is a name screen, not a guarantee; say so where it shows.
   return m.uncensored
-    ? '<div class="model-meta" style="color:#e8b0a0">Flagged by name as refusal-removed (' + m.uncensored + ') - verify yourself</div>'
+    ? '<div class="model-meta" style="color:var(--bad)">Flagged by name as refusal-removed (' + esc(m.uncensored) + ') - verify yourself</div>'
+    : '';
+}
+
+// ladder: fit is an estimate from the real file size and this phone's RAM.
+function fitPill(m) {
+  return on('ladder') && m.fit
+    ? '<span class="fit ' + m.fit.split(' ')[0] + '" title="Estimate from the file size and this phone\'s memory">' + esc(m.fit) + '</span>'
     : '';
 }
 
@@ -268,8 +400,8 @@ function renderModelPicker() {
   const models = status.models || [];
   $('model-list').innerHTML = models.map(m =>
     '<div class="model-card ' + (m.id === rec ? 'recommended' : '') + '">' +
-      '<div class="model-head"><strong>' + m.name + '</strong>' + (m.id === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
-      '<div class="model-meta">' + (m.description ? m.description + '<br>' : '') + (m.bytes ? (Math.round(m.bytes/107374182.4)/10 + ' GB') : 'size detected during download') + '</div>' +
+      '<div class="model-head"><strong>' + esc(m.name) + '</strong>' + fitPill(m) + (m.id === rec ? '<span>RECOMMENDED</span>' : '') + '</div>' +
+      '<div class="model-meta">' + (m.description ? esc(m.description) + '<br>' : '') + (m.bytes ? (Math.round(m.bytes/107374182.4)/10 + ' GB') : 'size detected during download') + '</div>' +
       uncensoredNote(m) +
       '<button onclick="install(\'' + m.id + '\')">Download</button>' +
     '</div>'
@@ -290,25 +422,42 @@ function confirmModelDownload() {
   return confirm('This model download uses direct HTTPS, not Tor. Continuing exposes this phone’s network address to the model host. Inference and local files stay on this phone. Downloads are resumable even when Onionmind is minimized. Continue?');
 }
 
-function openManager() { $('manager').hidden = false; renderManager(); }
+function openManager() { $('manager').hidden = false; managerHtml = null; renderManager(); }
 function closeManager() { $('manager').hidden = true; }
-function openSettings() { $('settings').hidden = false; }
+function openSettings() { $('settings').hidden = false; renderFeatureList(); refreshNetlogCount(); }
 function closeSettings() { $('settings').hidden = true; }
+function openBoundary() { $('boundary').hidden = false; renderBoundary(); }
+function closeBoundary() { $('boundary').hidden = true; }
 
 // --- Workbench preferences -------------------------------------------
-// Presentation-only: text size, the send key, and animation. They persist on
-// the phone through the token-gated API and apply the moment they change.
-let prefs = {textScale: 'system', enterSends: true, reduceMotion: 'system'};
+// Presentation-only: text size, the send key, animation, and the v2 choices
+// (theme, preset, auto-delete, private screen). They persist on the phone
+// through the token-gated API and apply the moment they change.
+let prefs = {textScale: 'system', enterSends: true, reduceMotion: 'system',
+             theme: 'dark', preset: 'default', autoDeleteDays: 0, secureScreen: false};
 const TEXT_FACTORS = {system: 1, compact: 0.9, comfortable: 1.15};
 function markSeg(id, value) {
-  for (const button of $(id).children) button.classList.toggle('on', button.dataset.v === value);
+  for (const button of $(id).children) button.classList.toggle('on', button.dataset.v === String(value));
 }
+const systemDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function applyTheme() {
+  // Without the appearance feature the app is the dark theme it always was.
+  const choice = on('appearance') ? prefs.theme : 'dark';
+  const light = choice === 'light' || (choice === 'system' && systemDark && !systemDark.matches);
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+}
+if (systemDark && systemDark.addEventListener) systemDark.addEventListener('change', applyTheme);
 function applyPrefs() {
   document.documentElement.classList.toggle('reduced', prefs.reduceMotion === 'reduced');
   document.body.style.fontSize = Math.round(16 * (TEXT_FACTORS[prefs.textScale] || 1) * 10) / 10 + 'px';
   $('pref-enter').checked = prefs.enterSends !== false;
+  $('pref-secure').checked = !!prefs.secureScreen;
   markSeg('seg-text', prefs.textScale);
   markSeg('seg-motion', prefs.reduceMotion);
+  markSeg('seg-theme', prefs.theme);
+  markSeg('seg-delete', prefs.autoDeleteDays);
+  applyTheme();
+  renderPresets();
   autoGrow();
 }
 async function loadPrefs() {
@@ -320,15 +469,137 @@ async function savePrefs(patch) {
   applyPrefs();
   try { prefs = await (await api('/api/preferences', form(new URLSearchParams(prefs)))).json(); applyPrefs(); } catch {}
 }
-$('seg-text').addEventListener('click', e => {
-  const button = e.target.closest('button'); if (!button) return;
-  savePrefs({textScale: button.dataset.v});
-});
-$('seg-motion').addEventListener('click', e => {
-  const button = e.target.closest('button'); if (!button) return;
-  savePrefs({reduceMotion: button.dataset.v});
-});
+for (const [id, key] of [['seg-text', 'textScale'], ['seg-motion', 'reduceMotion'], ['seg-theme', 'theme'], ['seg-delete', 'autoDeleteDays']]) {
+  $(id).addEventListener('click', e => {
+    const button = e.target.closest('button'); if (!button) return;
+    savePrefs({[key]: key === 'autoDeleteDays' ? Number(button.dataset.v) : button.dataset.v});
+  });
+}
 $('pref-enter').addEventListener('change', e => savePrefs({enterSends: e.target.checked}));
+$('pref-secure').addEventListener('change', e => savePrefs({secureScreen: e.target.checked}));
+
+// --- Features ----------------------------------------------------------
+// The desktop's v2 flags, the ones that fit a phone. Same keys, same default
+// (only webAsk on). Turning one on or off shows or hides it at once.
+async function loadFeatures(patch) {
+  try {
+    const r = await api('/api/features', patch ? form(new URLSearchParams(patch)) : undefined);
+    const data = await r.json();
+    features = data.flags || {}; featureCatalog = data.catalog || []; presets = data.presets || [];
+  } catch {}
+  applyFeatures();
+}
+const setFeature = (key, value) => loadFeatures({[key]: String(value)});
+const setAllFeatures = value => loadFeatures({all: value});
+function renderFeatureList() {
+  $('feature-list').innerHTML = featureCatalog.map(f =>
+    '<label class="feature"><input type="checkbox" data-key="' + esc(f.key) + '"' + (on(f.key) ? ' checked' : '') + '>' +
+    '<div><b>' + esc(f.name) + '</b><span>' + esc(f.description) + '</span></div></label>').join('');
+}
+$('feature-list').addEventListener('change', e => {
+  const box = e.target.closest('input[data-key]'); if (box) setFeature(box.dataset.key, box.checked);
+});
+function applyFeatures() {
+  for (const el of document.querySelectorAll('[data-feature]')) el.hidden = !on(el.dataset.feature);
+  $('boundary-btn').hidden = !on('boundary');
+  if (!on('boundary')) $('boundary').hidden = true;
+  applyTheme();
+  renderPresets();
+  if (!$('settings').hidden) { renderFeatureList(); refreshNetlogCount(); }
+  updateStatusLine();
+  if (ready) renderHistory();
+}
+
+// presets: a system prompt sent before the conversation, chosen here.
+function renderPresets() {
+  const row = $('preset-row');
+  row.hidden = !on('presets') || !presets.length;
+  if (row.hidden) return;
+  row.innerHTML = presets.map(p => '<button type="button" data-id="' + esc(p.id) + '" title="' + esc(p.short) + '"' +
+    (p.id === prefs.preset ? ' class="on"' : '') + '>' + esc(p.name) + '</button>').join('');
+}
+$('preset-row').addEventListener('click', e => {
+  const button = e.target.closest('button'); if (button) savePrefs({preset: button.dataset.id});
+});
+
+// modelPlus + contextMeter: real numbers from the last reply; the context
+// figure is marked ≈ while it is still an estimate.
+function updateStatusLine() {
+  const parts = [];
+  if (on('modelPlus')) {
+    const last = [...history].reverse().find(m => m.role === 'assistant' && m._meta && m._meta.stats);
+    const tps = last && last._meta.stats.tokensPerSecond;
+    parts.push(tps ? tps + ' tok/s last reply' : 'speed shows after a reply');
+    if (status.freeRamMb) parts.push(formatBytes(status.freeRamMb * 1048576) + ' RAM free');
+  }
+  $('live').textContent = parts.join(' · ');
+  const meter = on('contextMeter') && ready;
+  $('ctx').hidden = !meter;
+  if (meter) {
+    const limit = Number(status.contextLimit || 16384);
+    const estimate = contextUse === null;
+    const used = estimate ? estimateTokens() : contextUse;
+    const share = Math.min(1, used / limit);
+    $('ctx-text').textContent = 'context ' + (estimate ? '≈' : '') + formatTokens(used) + ' / ' + formatTokens(limit);
+    $('ctx-bar').style.width = Math.round(share * 100) + '%';
+    $('ctx').classList.toggle('warn', share >= 0.8);
+    $('ctx').title = share >= 0.8 ? 'Almost full: when it is full the model cannot answer. Clear the conversation to start fresh.' : '';
+  }
+  $('statusline').hidden = !parts.length && !meter;
+}
+function estimateTokens() {
+  let chars = 0;
+  for (const m of history) chars += String(m.content || '').length;
+  return Math.ceil(chars / 4);
+}
+function formatTokens(n) {
+  if (n < 1000) return String(n);
+  const k = n / 1024;
+  return k < 10 ? k.toFixed(1) + 'k' : Math.round(k) + 'k';
+}
+
+// --- Boundary map ------------------------------------------------------
+function renderBoundary() {
+  const today = status.egressToday || {tor: 0, direct: 0};
+  const active = (status.models || []).find(m => m.id === status.model);
+  $('zones').innerHTML =
+    '<div class="model-card zone phone"><strong>On this phone</strong><ul>' +
+      '<li>The model' + (active ? ' (' + esc(active.name) + ')' : '') + ' answers here; your messages never leave for inference.</li>' +
+      '<li>The conversation, settings and models stay in this app\'s private storage.</li>' +
+      '<li>The network log, when on, records only route, host and kind.</li></ul></div>' +
+    '<div class="model-card zone tor"><strong>Over Tor</strong><ul>' +
+      '<li>Web search, only on a turn where you allow it, through the DuckDuckGo onion service.</li>' +
+      '<li>Tor is ' + (status.tor ? 'running.' : 'off; it starts only when an allowed search needs it.') + '</li>' +
+      '<li>Today: ' + (today.tor || 0) + ' connection' + ((today.tor || 0) === 1 ? '' : 's') + '.</li></ul></div>' +
+    '<div class="model-card zone direct"><strong>Direct (not Tor)</strong><ul>' +
+      '<li>Model downloads use HTTPS straight to the model host, which sees this phone\'s address. You confirm each one.</li>' +
+      '<li>Today: ' + (today.direct || 0) + ' connection' + ((today.direct || 0) === 1 ? '' : 's') + '.</li></ul></div>';
+}
+
+// --- Network log -------------------------------------------------------
+async function refreshNetlogCount() {
+  if (!on('netlog')) return;
+  try {
+    const entries = await (await api('/api/netlog')).json();
+    $('netlog-count').textContent = entries.length ? entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies') + ' logged.' : 'Nothing logged yet.';
+  } catch {}
+}
+async function shareNetlog(format) {
+  try {
+    const text = await (await api('/api/netlog?format=' + format)).text();
+    await shareText(text, 'Onionmind network log');
+  } catch { alert('Could not read the network log.'); }
+}
+async function clearNetlog() {
+  if (!confirm('Clear the network log?')) return;
+  try { await api('/api/netlog', {method: 'DELETE'}); } catch {}
+  refreshNetlogCount();
+}
+// The WebView has no navigator.share; the app opens Android's share sheet.
+async function shareText(text, subject) {
+  const r = await api('/api/share', form(new URLSearchParams({text, subject: subject || ''})));
+  if (!r.ok) throw new Error('share failed');
+}
 
 // The composer grows with what you type; Enter behaviour follows the
 // preference. Shift+Enter is always a newline.
@@ -345,8 +616,12 @@ $('q').addEventListener('keydown', e => {
   $('form').requestSubmit();
 });
 function renderManager() {
-  $('installed-list').innerHTML = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + m.name + '</strong>' + (m.id === status.model ? '<span>ACTIVE</span>' : '') + '</div>' + '<div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + '</div>' + uncensoredNote(m) + '<div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
+  const html = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + esc(m.name) + '</strong>' + fitPill(m) + (m.id === status.model ? '<span>' + (on('ladder') && status.llamaLoading ? 'LOADING' : 'ACTIVE') + '</span>' : '') + '</div>' + '<div class="model-meta">' + (m.description ? esc(m.description) + '<br>' : '') + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + (m.bytes ? ' · ' + formatBytes(m.bytes) : '') + '</div>' + uncensoredNote(m) + '<div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
+  // Re-rendered on every poll while open; only touch the DOM on a change so
+  // a tap landing during a poll is never swallowed.
+  if (html !== managerHtml) { managerHtml = html; $('installed-list').innerHTML = html; }
 }
+let managerHtml = null;
 async function selectModel(id) { await api('/api/select', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
 async function removeModel(id) { if (!confirm('Remove this model from the phone?')) return; await api('/api/remove', form('id='+encodeURIComponent(id))); await poll(); renderManager(); }
 // urlField lets first-run reuse this: same endpoint, same validation, one box.
@@ -365,28 +640,125 @@ async function addCustom(urlField) {
   if (!urlField) renderManager();
 }
 
-function add(cls, text) {
-  const d = document.createElement('div');
-  d.className = 'msg ' + cls;
-  d.textContent = text;
-  if (cls === 'bot') {
-    const b = document.createElement('small');
-    b.textContent = 'copy';
-    b.style.cursor = 'pointer';
-    b.onclick = () => { navigator.clipboard.writeText(text); b.textContent = 'copied'; };
-    d.appendChild(document.createElement('br')); d.appendChild(b);
-  }
-  chatEl.appendChild(d);
+// --- Rendering ---------------------------------------------------------
+function follow() {
   // Follow the conversation only when the reader is already at the bottom;
   // scrolled-up reading keeps its place and gets a jump-back button.
   if (nearBottom()) chatEl.scrollTop = chatEl.scrollHeight;
-  else $('to-bottom').style.display = 'block';
+  else {
+    // Above the composer, however tall the preset row makes it.
+    $('to-bottom').style.bottom = ($('form').offsetHeight + 12) + 'px';
+    $('to-bottom').style.display = 'block';
+  }
+}
+
+// provenance + thinking: what the reply really was, from the turn's stats.
+function metaLine(meta) {
+  if (!meta) return '';
+  const chips = [];
+  const s = meta.stats || {};
+  if (on('provenance')) {
+    chips.push('<span class="chip">On this phone' + (meta.model ? ' · ' + esc(meta.model) : '') + '</span>');
+    const searches = s.searches || [];
+    const okCount = searches.filter(x => x.ok).reduce((n, x) => n + x.results, 0);
+    const failed = searches.filter(x => !x.ok).length;
+    if (okCount) {
+      const domains = [...new Set(searches.flatMap(x => x.domains || []))].slice(0, 3);
+      chips.push('<span class="chip tor">Tor search · ' + okCount + ' result' + (okCount === 1 ? '' : 's') + (domains.length ? ' · ' + esc(domains.join(', ')) : '') + '</span>');
+    }
+    if (failed) chips.push('<span class="chip bad">Tor search failed</span>');
+    if (!searches.length) chips.push('<span class="chip">No web search</span>');
+  }
+  if (on('thinking')) {
+    if (s.reasoningHidden) chips.push('<span class="chip">Reasoning hidden</span>');
+    if (s.elapsedMs) chips.push('<span class="chip">' + (s.elapsedMs >= 10000 ? Math.round(s.elapsedMs / 1000) : (s.elapsedMs / 1000).toFixed(1)) + ' s</span>');
+  }
+  return chips.length ? '<div class="meta">' + chips.join('') + '</div>' : '';
+}
+
+function add(cls, text, index, meta) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  if (cls === 'bot' && meta) d.insertAdjacentHTML('beforeend', metaLine(meta));
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+  if (cls === 'bot') {
+    const b = document.createElement('span');
+    b.textContent = 'copy';
+    b.onclick = () => { navigator.clipboard.writeText(text); b.textContent = 'copied'; };
+    acts.appendChild(b);
+  }
+  // msgActions: only on real history entries, never on notices.
+  if (on('msgActions') && index !== undefined) {
+    const a = document.createElement('span');
+    a.textContent = cls === 'you' ? 'edit' : 'ask again';
+    a.onclick = () => cls === 'you' ? editFrom(index) : askAgain(index);
+    acts.appendChild(a);
+  }
+  if (acts.children.length) d.appendChild(acts);
+  chatEl.appendChild(d);
+  follow();
   return d;
+}
+
+function note(kind, title, body, buttons) {
+  const d = document.createElement('div');
+  d.className = 'card-note ' + kind;
+  d.innerHTML = '<strong>' + esc(title) + '</strong>' + (body ? '<p>' + esc(body) + '</p>' : '');
+  if (buttons && buttons.length) {
+    const row = document.createElement('div'); row.className = 'row';
+    for (const [label, action, style] of buttons) {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+      if (style) b.className = style;
+      b.onclick = () => { d.remove(); action(); };
+      row.appendChild(b);
+    }
+    d.appendChild(row);
+  }
+  chatEl.appendChild(d);
+  follow();
+  return d;
+}
+
+// The whole transcript from history, so edits, regenerations and feature
+// changes all show the same thing a reload would.
+function renderHistory() {
+  chatEl.innerHTML = '';
+  if (!history.length) {
+    add('bot', GREETING());
+    if (on('empty')) renderStarters();
+  }
+  history.forEach((m, i) => {
+    if (m.role === 'user') add('you', m.content || '', i);
+    else if (m.role === 'assistant' && m.content) add('bot', m.content, i, m._meta);
+  });
+  scrollBottom();
+  updateStatusLine();
+}
+
+// empty: starters fill the composer; nothing is sent until you press Send.
+const STARTERS = [
+  ['Explain something simply', 'Explain how public-key encryption works, simply.'],
+  ['Draft a message', 'Help me write a short, polite message declining an invitation.'],
+  ['Summarize text', 'Summarize this in three bullet points:\n\n'],
+  ['Something current (asks before searching)', 'What is the latest stable version of Firefox?'],
+];
+function renderStarters() {
+  const box = document.createElement('div'); box.id = 'starters';
+  box.innerHTML = '<p>Start from one of these:</p>';
+  for (const [label, text] of STARTERS) {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+    b.onclick = () => { $('q').value = text; autoGrow(); $('q').focus(); };
+    box.appendChild(b);
+  }
+  chatEl.appendChild(box);
 }
 
 // --- The conversation stays on the phone -----------------------------
 // Saved to private storage after every turn and restored on open, so closing
-// the app or losing the WebView's memory never loses the chat.
+// the app or losing the WebView's memory never loses the chat. A reply's
+// details (_meta) are saved with it but never sent to the model.
 async function saveConversation() {
   try { await api('/api/conversation', form(new URLSearchParams({messages: JSON.stringify(history)}))); } catch {}
 }
@@ -395,32 +767,45 @@ async function loadConversation() {
     const restored = await (await api('/api/conversation')).json();
     if (Array.isArray(restored)) {
       history = restored;
-      for (const m of restored) {
-        if (m.role === 'user') add('you', m.content || '');
-        else if (m.role === 'assistant') add('bot', m.content || '');
-      }
-      if (history.length) scrollBottom();
+      if (history.length) { ready = true; renderHistory(); scrollBottom(); }
     }
   } catch {}
 }
 function transcriptText() {
-  return history.map(m => (m.role === 'user' ? 'You: ' : 'Onionmind: ') + (m.content || '')).join('\n\n');
+  return history.filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
+    .map(m => (m.role === 'user' ? 'You: ' : 'Onionmind: ') + m.content).join('\n\n');
 }
 async function shareConversation() {
   const text = transcriptText();
   if (!text) return;
-  if (navigator.share) {
-    try { await navigator.share({text}); return; } catch {}
-  }
+  try { await shareText(text, 'Onionmind conversation'); return; } catch {}
   try { await navigator.clipboard.writeText(text); alert('Conversation copied to the clipboard.'); }
   catch { alert('Sharing is not available here; copy a message instead.'); }
 }
 async function clearConversation() {
   if (!confirm('Clear this conversation from the phone? It cannot be recovered.')) return;
-  history = [];
+  history = []; contextUse = null;
   try { await api('/api/conversation', {method: 'DELETE'}); } catch {}
-  $('chat').innerHTML = '';
-  add('bot', 'Ready. Chat is local and private; web search runs only when you tick "Allow Tor search this turn". Ask anything.');
+  renderHistory();
+}
+
+// msgActions: edit puts a message back in the composer and drops it and
+// everything after; ask again drops a reply and sends its question again.
+function editFrom(index) {
+  if (busy) return;
+  const text = history[index] && history[index].content || '';
+  history = history.slice(0, index); contextUse = null;
+  saveConversation(); renderHistory();
+  $('q').value = text; autoGrow(); $('q').focus();
+}
+function askAgain(index) {
+  if (busy) return;
+  let u = index - 1;
+  while (u >= 0 && history[u].role !== 'user') u--;
+  if (u < 0) return;
+  history = history.slice(0, u + 1); contextUse = null;
+  saveConversation(); renderHistory();
+  sendTurn(false);
 }
 
 // A send during a live run stops the answer; with text in the composer it
@@ -435,6 +820,13 @@ async function stopRun() {
   }
 }
 
+// webAsk: decided on the phone from your own words; it only ever ASKS.
+// Kept identical to WEB_ASK_PATTERN in onionmind_desktop_core.py and
+// WebAsk in android/core (a core test checks this line).
+const WEB_ASK = /\b(latest|newest|newer|current(ly)?|today|this week|news|release[sd]?|version|changelog|look (it )?up|search|online|price|docs? for)\b/i;
+const WEB_LEAD = /^(is there|are there|can you|could you|please|what('s| is)|do you know)\s+/i;
+const webQuery = text => text.trim().replace(/[?.!]+$/, '').replace(WEB_LEAD, '').slice(0, 70);
+
 $('form').onsubmit = async e => {
   e.preventDefault();
   if (busy) { stopRun(); return; }
@@ -443,33 +835,98 @@ $('form').onsubmit = async e => {
   // Consume permission before any asynchronous work. It cannot silently carry
   // into the next message, even if this request fails.
   $('allow-search').checked = false;
+  $('q').value = ''; autoGrow();
+  history.push({role:'user', content:q});
+  add('you', q, history.length - 1);
+  if (!allowSearch && on('webAsk') && WEB_ASK.test(q)) {
+    // The answer to the card is this turn's permission - nothing is saved.
+    note('ask', 'Search the web over Tor?',
+      'This looks like it needs current information. Search for "' + webQuery(q) + '" through Tor, or answer from what the model already knows.',
+      [['Search over Tor', () => sendTurn(true)], ['Answer without searching', () => sendTurn(false), 'muted']]);
+    return;
+  }
+  sendTurn(allowSearch);
+};
+
+async function sendTurn(allowSearch) {
+  if (busy) return;
   $('allow-search').disabled = true;
   busy = true; $('send').textContent = 'Stop';
-  $('q').value = ''; autoGrow(); add('you', q);
-  history.push({role:'user', content:q});
   $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
   $('busy').style.display = 'block';
   try {
+    const wire = history.map(({_meta, ...m}) => m);
     const response = await api('/api/chat',
-      form(new URLSearchParams({messages:JSON.stringify(history), allowSearch:String(allowSearch)})));
+      form(new URLSearchParams({messages:JSON.stringify(wire), allowSearch:String(allowSearch)})));
     const raw = await response.text();
     let r;
     try { r = JSON.parse(raw); }
     catch (_) { throw new Error(raw.slice(0, 240) || 'invalid server response'); }
-    if (!response.ok || r.error) throw new Error(r.error || 'chat request failed');
-    add('bot', r.answer || '(empty response)');
+    if (!response.ok || r.error) throw Object.assign(new Error(r.error || 'chat request failed'), {kind: r.kind});
+    // The server echoes the conversation it was sent plus this turn; earlier
+    // replies keep the details they were saved with.
+    const before = history;
     history = r.messages || history;
+    before.forEach((m, i) => { if (m._meta && history[i]) history[i]._meta = m._meta; });
+    const last = history[history.length - 1];
+    if (r.kind && on('errors')) {
+      // A failed model call comes back as the answer text; show it as the
+      // error it is and keep it out of the conversation.
+      if (last && last.role === 'assistant') history.pop();
+      showError(r.kind, r.answer, allowSearch);
+    } else {
+      if (last && last.role === 'assistant') last._meta = {stats: r.stats, model: r.model};
+      if (r.stats && r.stats.contextTokens) contextUse = r.stats.contextTokens;
+      add('bot', r.answer || '(empty response)', history.length - 1, last && last._meta);
+      const failedSearch = r.stats && (r.stats.searches || []).some(s => !s.ok);
+      if (failedSearch && on('errors')) showError('tor', '', true);
+    }
     saveConversation();
-  } catch (err) { add('bot', '(error: ' + errorText(err) + ')'); saveConversation(); }
+  } catch (err) {
+    if (err.kind && on('errors')) showError(err.kind, errorText(err), allowSearch);
+    else add('bot', '(error: ' + errorText(err) + ')');
+    saveConversation();
+  }
   $('busy').style.display = 'none';
   $('allow-search').disabled = false;
   busy = false; $('send').textContent = 'Send';
+  updateStatusLine();
   if (pendingRedirect) {
     const redirect = pendingRedirect; pendingRedirect = null;
     $('q').value = redirect; autoGrow();
     $('form').requestSubmit();
   }
-};
+}
+
+// errors: say what failed and offer the fix that actually exists.
+function showError(kind, detail, allowSearch) {
+  const retry = () => { const last = history[history.length - 1]; if (last && last.role === 'user') sendTurn(allowSearch); };
+  if (kind === 'oom') {
+    const active = (status.models || []).find(m => m.id === status.model);
+    const lighter = (status.models || []).filter(m => m.installed && active && m.bytes && m.bytes < active.bytes)
+      .sort((a, b) => b.bytes - a.bytes)[0];
+    note('err', 'Not enough memory for ' + (active ? active.name : 'this model'),
+      'The phone could not fit the model in memory. ' + (lighter ? 'Switch to ' + lighter.name + ', a lighter model already on this phone, and ask again.' : 'Close other apps and try again, or download a lighter model.'),
+      lighter ? [['Use ' + lighter.name + ' and retry', async () => { await selectModel(lighter.id); retry(); }], ['Try again', retry, 'muted']]
+              : [['Try again', retry], ['Models', openManager, 'muted']]);
+  } else if (kind === 'tor') {
+    note('warn', 'Tor search did not work',
+      'Tor could not reach the search service this time, so the answer may not include current information. A new attempt uses a fresh circuit.',
+      [['Search again', () => { dropLastReply(); sendTurn(true); }], ['Keep this answer', () => {}, 'muted']]);
+  } else {
+    note('err', 'The local model stopped',
+      'The model server on this phone could not answer' + (detail ? ' (' + detail.replace(/^\(|\)$/g, '') + ')' : '') + '. Trying again restarts it.',
+      [['Try again', retry]]);
+  }
+}
+function dropLastReply() {
+  if (history.length && history[history.length - 1].role === 'assistant') {
+    let u = history.length - 1;
+    while (u >= 0 && history[u].role !== 'user') u--;
+    history = history.slice(0, u + 1);
+    renderHistory();
+  }
+}
 </script>
 </body>
 </html>

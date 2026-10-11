@@ -480,6 +480,16 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   (`/api/preferences`, behind the same token) are presentation-only, persist
   in the app's private storage, and never cross the network. The Tor boundary
   and the per-turn search permission are deliberately not preferences.
+- **Workbench v2 features:** 14 of the desktop's 24 flags, adapted for a phone.
+  They use the same keys, and every flag is off except "Ask before searching
+  the web". The phone set is: reply provenance and details, live speed and
+  context from llama-server's own counts, model fit, a boundary map, a network
+  log (route and host only, written only while that feature is on), edit and
+  ask again, presets, error cards, starters, auto-delete with a
+  `FLAG_SECURE` private screen, and a light theme. None of them adds a
+  network path; webAsk only asks, and the answer is that turn's permission.
+  [docs/android-v2.md](docs/android-v2.md) gives the per-feature reasons and
+  explains why the Agent features stay on the desktop.
 - **Stop is cancellation only:** `/api/stop` sets a per-request flag that
   `Agent.turn` polls between rounds and before each tool call; it never opens
   or closes a network path, and a flag from one answer can never stop another.

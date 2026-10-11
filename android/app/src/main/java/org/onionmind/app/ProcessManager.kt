@@ -3,6 +3,7 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.onionmind.core.EgressLog
 import org.onionmind.core.ModelSource
 import org.onionmind.core.OwnedLoopbackProcess
 import java.io.File
@@ -36,9 +37,13 @@ object ProcessManager {
     private val builtins = listOf(
         // Model names are ordered from least heavy to heaviest. Keep ids stable
         // because they are used for recommendations and persisted selections.
-        Model("lfm", "SPARK", "LFM2.5-2.6B-heretic-Q4_K_M.gguf", "https://huggingface.co/Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF/resolve/main/LFM2.5-2.6B-heretic-Q4_K_M.gguf", 1_674_454_432L, true, "1–3B params · low latency · mobile/edge optimized · quick replies · IoT · smart devices", mirrorUrl("LFM2.5-2.6B-heretic-Q4_K_M.gguf")),
-        Model("4b", "EMBER", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", 2_707_514_688L, true, "Lite / Local · Start something.", mirrorUrl("Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf")),
-        Model("9b", "BLAZE", "Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", 5_627_045_248L, true, "7–14B params · efficient reasoning · runs on local GPUs · everyday assistant · coding · summarization · Pro / Real-time · After the burn.", mirrorUrl("Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf")),
+        // Descriptions follow the desktop's _TIER_MODELS: the real model, then
+        // its weight class (RAM here, not VRAM). INFERNO (Qwen3.8 27B) is not
+        // offered: even its smallest quant needs ~10 GB and runs well under
+        // 1 tok/s on a phone CPU. A custom link can still add it.
+        Model("lfm", "SPARK", "LFM2.5-2.6B-heretic-Q4_K_M.gguf", "https://huggingface.co/Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF/resolve/main/LFM2.5-2.6B-heretic-Q4_K_M.gguf", 1_674_454_432L, true, "LFM2.5 2.6B · very light - quick replies on most phones", mirrorUrl("LFM2.5-2.6B-heretic-Q4_K_M.gguf")),
+        Model("4b", "EMBER", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", 2_707_514_688L, true, "Qwen3.5 4B · light - best from about 7 GB of RAM", mirrorUrl("Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf")),
+        Model("9b", "BLAZE", "Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", 5_627_045_248L, true, "Qwen3.5 9B · moderate - stronger reasoning, needs about 11 GB of RAM", mirrorUrl("Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf")),
     )
 
     fun models(ctx: Context): List<Model> = builtins + readCustom(ctx)
@@ -147,6 +152,11 @@ object ProcessManager {
             if (out.exists()) out.delete()
             var expected = m.bytes
             val sources = listOfNotNull(m.url, m.mirrorUrl).distinct()
+            // netlog: downloads go direct over HTTPS, not Tor - say so in the
+            // log too. Host and model name only, never the full URL.
+            sources.mapNotNull { runCatching { URL(it).host }.getOrNull() }.distinct().forEach { host ->
+                Workbench.recordEgress(ctx, EgressLog.DIRECT, host, "model download", m.name)
+            }
             var sourceIndex = 0
             if (expected > 0 && part.length() > expected) part.delete()
 
@@ -334,7 +344,7 @@ object ProcessManager {
                 "-m", File(modelDir(ctx), m.file).absolutePath,
                 "--host", "127.0.0.1",
                 "--port", LLAMA_PORT.toString(),
-                "-c", "16384",
+                "-c", "16384",   // = ContextWindow.TOKENS (WorkbenchTest checks)
             ).apply {
                 redirectErrorStream(true)
                 environment()["LD_LIBRARY_PATH"] = ctx.applicationInfo.nativeLibraryDir
@@ -371,6 +381,7 @@ object ProcessManager {
         val dir = File(ctx.filesDir, "tor").apply { mkdirs() }
         File(dir, "torrc").writeText("SocksPort 9050\nDataDirectory ${File(dir, "data").apply { mkdirs() }.absolutePath}\nCookieAuthentication 0\nAvoidDiskWrites 1\nLog notice file ${File(dir, "log").absolutePath}")
         tor = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libtor.so").absolutePath, "-f", File(dir, "torrc").absolutePath).redirectErrorStream(true).start()
+        Workbench.recordEgress(ctx, EgressLog.TOR, "Tor network", "start Tor", "relay directory and circuits")
         Thread { try { tor!!.inputStream.readBytes() } catch (_: Exception) {} }.start()
         return true
     }
@@ -387,6 +398,7 @@ object ProcessManager {
 
     private fun stopLlama() = llama.stop()
     fun llamaReady(): Boolean = llama.ready()
+    fun llamaLoading(): Boolean = llama.alive() && !llama.ready()
     fun torReady() = tor?.isAlive == true && portOpen(9050)
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }

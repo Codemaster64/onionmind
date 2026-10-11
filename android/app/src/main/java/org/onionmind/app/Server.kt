@@ -1,7 +1,7 @@
 package org.onionmind.app
 
 import android.content.Context
-import android.content.SharedPreferences
+import android.content.Intent
 import android.app.ActivityManager
 import android.os.StatFs
 import fi.iki.elonen.NanoHTTPD
@@ -9,9 +9,18 @@ import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
 import kotlinx.serialization.json.*
 import org.onionmind.core.Agent
+import org.onionmind.core.ContextWindow
 import org.onionmind.core.ConversationStore
+import org.onionmind.core.EgressLog
+import org.onionmind.core.ErrorKind
+import org.onionmind.core.Features
 import org.onionmind.core.ModelCatalog
+import org.onionmind.core.ModelFit
+import org.onionmind.core.Presets
+import org.onionmind.core.TurnStats
 import org.onionmind.core.WorkbenchPreferences
+import java.io.File
+import java.io.RandomAccessFile
 import java.net.URLDecoder
 import java.security.SecureRandom
 import java.util.Base64
@@ -58,6 +67,9 @@ object Server {
                             error(Response.Status.FORBIDDEN, "bad or missing token")
                         session.uri == "/api/status" -> status()
                         session.uri == "/api/preferences" -> preferences(session)
+                        session.uri == "/api/features" -> features(session)
+                        session.uri == "/api/netlog" -> netlog(session)
+                        session.uri == "/api/share" -> share(session)
                         session.uri == "/api/conversation" -> conversation(session)
                         session.uri == "/api/stop" -> stopChat()
                         session.uri == "/api/install" -> install(session)
@@ -106,9 +118,23 @@ object Server {
         (ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
             .getMemoryInfo(memory)
         val storage = StatFs(ctx.filesDir.path).availableBytes / (1024 * 1024)
+        val totalRamMb = memory.totalMem / (1024 * 1024)
+        val flags = Workbench.features(ctx)
         return json(buildJsonObject {
             put("tor", ProcessManager.torReady())
             put("llama", ProcessManager.llamaReady())
+            // ladder: our llama-server is running but not listening yet.
+            put("llamaLoading", ProcessManager.llamaLoading())
+            put("freeRamMb", memory.availMem / (1024 * 1024))
+            put("contextLimit", ContextWindow.TOKENS)
+            put("features", JsonObject(flags.mapValues { JsonPrimitive(it.value) }))
+            if (flags["netlog"] == true || flags["boundary"] == true) {
+                val today = Workbench.egress(ctx).today()
+                put("egressToday", buildJsonObject {
+                    put("tor", today[EgressLog.TOR] ?: 0)
+                    put("direct", today[EgressLog.DIRECT] ?: 0)
+                })
+            }
             put("model", model?.id
                 ?: (if (ProcessManager.downloadProgress >= 0.0) ProcessManager.downloadId else "none"))
             put("downloading", ProcessManager.downloadProgress in 0.0..0.99)
@@ -122,6 +148,8 @@ object Server {
                 put("id", m.id); put("name", m.name); put("file", m.file); put("url", m.url)
                 put("bytes", m.bytes); put("description", m.description)
                 put("installed", ProcessManager.isInstalled(ctx, m)); put("builtin", m.builtin)
+                // An estimate from the real file size and this phone's RAM.
+                ModelFit.label(m.bytes, totalRamMb).takeIf { it.isNotEmpty() }?.let { put("fit", it) }
                 // A name screen, not a guarantee; the UI says exactly that.
                 ModelCatalog.uncensoredMarker(m.id, m.name, m.url)?.let { put("uncensored", it) }
             }}))
@@ -155,25 +183,71 @@ object Server {
      * GET returns the current set; POST applies a partial update.
      */
     private fun preferences(session: IHTTPSession): Response {
-        val store = ctx.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
         if (session.method == NanoHTTPD.Method.GET) {
-            return json(storedPreferences(store).toJson())
+            return json(Workbench.preferences(ctx).toJson())
         }
         val files = HashMap<String, String>()
         session.parseBody(files)
         val body = files["postData"] ?: files["content"]
         fun value(name: String) = session.parms[name] ?: formValue(body, name)
-        val next = storedPreferences(store).patch(
+        val next = Workbench.preferences(ctx).patch(
             textScale = value("textScale"),
             enterSends = value("enterSends"),
             reduceMotion = value("reduceMotion"),
+            theme = value("theme"),
+            preset = value("preset"),
+            autoDeleteDays = value("autoDeleteDays"),
+            secureScreen = value("secureScreen"),
         )
-        store.edit().putString(UI_PREFS_JSON, next.toJson()).apply()
+        Workbench.savePreferences(ctx, next)
         return json(next.toJson())
     }
 
-    private fun storedPreferences(store: SharedPreferences): WorkbenchPreferences =
-        WorkbenchPreferences.fromJson(store.getString(UI_PREFS_JSON, null))
+    /** The v2 feature flags: GET the catalog and current state, POST a patch
+     *  (one key per flag, or all=on|off). Presets ride along for the picker. */
+    private fun features(session: IHTTPSession): Response {
+        if (session.method != NanoHTTPD.Method.GET) {
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: files["content"]
+            val values = (Features.KEYS + "all").associateWith { session.parms[it] ?: formValue(body, it) }
+            Workbench.saveFeatures(ctx, Features.patch(Workbench.features(ctx), values))
+        }
+        val flags = Workbench.features(ctx)
+        return json(buildJsonObject {
+            put("flags", JsonObject(flags.mapValues { JsonPrimitive(it.value) }))
+            put("catalog", Features.catalogJson())
+            put("presets", Presets.catalogJson())
+        }.toString())
+    }
+
+    /** netlog: GET ?format=json|csv returns the log; DELETE clears it. */
+    private fun netlog(session: IHTTPSession): Response {
+        val log = Workbench.egress(ctx)
+        if (session.method == NanoHTTPD.Method.DELETE) { log.clear(); return json("{\"ok\":true}") }
+        val csv = session.parms["format"] == "csv"
+        return NanoHTTPD.newFixedLengthResponse(Response.Status.OK,
+            if (csv) "text/csv" else "application/json", if (csv) log.toCsv() else log.toJson())
+    }
+
+    /** Hand text to Android's share sheet - the user picks where it goes.
+     *  The WebView has no navigator.share, so the page asks the app. */
+    private fun share(session: IHTTPSession): Response {
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        val body = files["postData"] ?: files["content"]
+        val text = session.parms["text"] ?: formValue(body, "text")
+        if (text.isNullOrEmpty()) return error(Response.Status.BAD_REQUEST, "nothing to share")
+        val subject = (session.parms["subject"] ?: formValue(body, "subject")).orEmpty().take(80)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+            if (subject.isNotEmpty()) putExtra(Intent.EXTRA_SUBJECT, subject)
+        }
+        ctx.startActivity(Intent.createChooser(send, subject.ifEmpty { "Share" })
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        return json("{\"ok\":true}")
+    }
 
     /**
      * The single conversation, on private storage only: GET returns it,
@@ -185,6 +259,9 @@ object Server {
             return json("{\"ok\":true}")
         }
         if (session.method == NanoHTTPD.Method.GET) {
+            // lock: an old conversation is deleted before it is ever shown.
+            if (Workbench.on(ctx, "lock"))
+                ConversationStore.expire(ctx.filesDir, Workbench.preferences(ctx).autoDeleteDays)
             return json(JsonArray(ConversationStore.load(ctx.filesDir)).toString())
         }
         val files = HashMap<String, String>()
@@ -204,8 +281,14 @@ object Server {
     private fun select(session: IHTTPSession): Response {
         val files = HashMap<String, String>(); session.parseBody(files)
         val id = session.parms["id"] ?: formValue(files["postData"] ?: files["content"], "id")
-        return if (id != null && ProcessManager.selectModel(ctx, id)) json("{\"ok\":true}")
-        else error(Response.Status.BAD_REQUEST, "model is not installed")
+        if (id == null || !ProcessManager.selectModel(ctx, id))
+            return error(Response.Status.BAD_REQUEST, "model is not installed")
+        // ladder: load the new model now, so switching shows it loading
+        // instead of the next message silently paying for it.
+        if (Workbench.on(ctx, "ladder")) chatLock.submit {
+            if (ProcessManager.ensureLlama(ctx)) ProcessManager.awaitLlamaReady()
+        }
+        return json("{\"ok\":true}")
     }
 
     private fun remove(session: IHTTPSession): Response {
@@ -237,8 +320,14 @@ object Server {
         // non-true values fail closed; nothing is saved in preferences.
         val allowSearch = (session.parms["allowSearch"]
             ?: formValue(body, "allowSearch")).equals("true", ignoreCase = true)
-        val messages = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
-            .map { it.jsonObject }.toMutableList()
+        val flags = Workbench.features(ctx)
+        val conversation = Json.parseToJsonElement(raw?.ifBlank { null } ?: "[]").jsonArray
+            .map { it.jsonObject }
+        // presets: one system message first, only while the feature is on;
+        // with it off the request is exactly what the app always sent.
+        val preset = if (flags["presets"] == true) Presets.byId(Workbench.preferences(ctx).preset) else null
+        val messages = Presets.withSystemPrompt(conversation, preset)
+        val stats = TurnStats()
         // the UI sends plain {role, content} turns; the agent extends the list
         // Stop belongs to this request only: a fresh flag per chat, so a stop
         // pressed for one answer can never cancel a different one.
@@ -252,30 +341,65 @@ object Server {
                 if (!ProcessManager.ensureLlama(ctx) || !ProcessManager.awaitLlamaReady()) {
                     null
                 } else {
-                    Agent.turn(LLAMA, messages, allowSearch, shouldStop = { flag.get() }) { query ->
+                    Agent.turn(LLAMA, messages, allowSearch, shouldStop = { flag.get() }, stats = stats) { query ->
                         // Starting Tor is lazy: checking the one-turn box merely makes
                         // the tool available. No Tor process or network is touched
                         // unless the model actually asks to search during this turn.
-                        if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady())
+                        if (!ProcessManager.ensureTor(ctx) || !ProcessManager.awaitTorReady()) {
+                            stats.recordSearch(emptyList(), "tor")
                             "(Tor could not start safely; web search was not performed)"
-                        else Agent.webSearch(query)
+                        } else {
+                            val result = Agent.searchWeb(query)
+                            stats.recordSearch(result.hits, result.error)
+                            // The route and the result count - never the query.
+                            Workbench.recordEgress(ctx, EgressLog.TOR, "DuckDuckGo onion service", "search",
+                                if (result.error == null) "${result.hits.size} results" else "failed")
+                            result.text
+                        }
                     }
                 }
             }.get()
         } catch (e: ExecutionException) {
-            return error(Response.Status.INTERNAL_ERROR, rootMessage(e))
+            return failure(Response.Status.INTERNAL_ERROR, rootMessage(e))
         } finally {
             stopFlag = null
         }
-        if (answer == null) return error(
+        if (answer == null) return failure(
             Response.Status.SERVICE_UNAVAILABLE,
             "Local model server could not start safely",
         )
+        // Agent.turn reports a failed model call as its answer text; give
+        // that a kind too, so the errors card can offer the right fix.
+        val kind = if (answer.startsWith("(local model request failed") ||
+            answer.startsWith("(llama-server returned")) ErrorKind.classify(answer, llamaLogTail()) else null
         return json(buildJsonObject {
             put("answer", answer)
-            put("messages", JsonArray(messages))
+            // The preset's system message is per request, never part of the
+            // saved conversation.
+            put("messages", JsonArray(messages.filterNot {
+                (it["role"] as? JsonPrimitive)?.contentOrNull == "system" }))
+            put("stats", stats.toJson())
+            ProcessManager.installedModel(ctx)?.let { put("model", it.name) }
+            kind?.let { put("kind", it) }
         }.toString())
     }
+
+    /** An error the errors card can act on: the message plus its kind. */
+    private fun failure(status: Response.Status, message: String): Response =
+        NanoHTTPD.newFixedLengthResponse(status, "application/json", buildJsonObject {
+            put("error", message)
+            ErrorKind.classify(message, llamaLogTail())?.let { put("kind", it) }
+        }.toString())
+
+    /** The end of llama-server's own log: an allocation failure is written
+     *  there, while the chat only sees that the server went away. */
+    private fun llamaLogTail(bytes: Int = 4096): String = try {
+        RandomAccessFile(File(ctx.filesDir, "llama-server.log"), "r").use { f ->
+            val start = (f.length() - bytes).coerceAtLeast(0)
+            f.seek(start)
+            ByteArray((f.length() - start).toInt()).also { f.readFully(it) }.toString(Charsets.UTF_8)
+        }
+    } catch (_: Exception) { "" }
 
     private fun rootMessage(error: Throwable): String =
         generateSequence(error) { it.cause }
@@ -286,7 +410,8 @@ object Server {
 
     private val API_PATHS = setOf(
         "/api/status", "/api/preferences", "/api/conversation", "/api/stop",
-        "/api/install", "/api/select", "/api/remove", "/api/chat"
+        "/api/install", "/api/select", "/api/remove", "/api/chat",
+        "/api/features", "/api/netlog", "/api/share"
     )
 
     // Set by /api/stop from outside the chat lock; the running turn polls it
@@ -299,6 +424,4 @@ object Server {
         return json("{\"ok\":true}")
     }
 
-    private const val UI_PREFS = "onionmind_ui"
-    private const val UI_PREFS_JSON = "preferences_json"
 }

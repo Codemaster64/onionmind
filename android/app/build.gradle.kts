@@ -12,7 +12,7 @@ android {
         applicationId = "org.onionmind.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
+        versionCode = 6
         versionName = "1.4"
         ndk { abiFilters += listOf("arm64-v8a") }   // phones this app is for are all arm64
         val modelMirrorBase = providers.gradleProperty("modelMirrorBase").orNull?.trimEnd('/') ?: ""
