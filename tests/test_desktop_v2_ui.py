@@ -1111,19 +1111,23 @@ class UndoTests(V2Base):
                 row.findChild(ui.QToolButton).click()
                 self.assertTrue(self._wait_until(
                     lambda: (root / path).read_text(encoding="utf-8") in ("original\n", "keep\n")))
-                self.assertTrue(self._wait_until(lambda: not inspector.undo_bar.isHidden()))
-                self.assertEqual(inspector.undo_label.text(), f"Reverted {path}")
+                self.assertTrue(self._wait_until(lambda: inspector.undo_label.text() == f"Reverted {path}"),
+                                inspector.undo_label.text())
+                self.assertFalse(inspector.undo_bar.isHidden())
                 status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
                 self.assertEqual(len(status.stdout.splitlines()), 1)
                 inspector.undo_button.click()
                 self.assertTrue(self._wait_until(lambda: inspector.undo_bar.isHidden()))
-                status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
-                self.assertEqual(len(status.stdout.splitlines()), 2)
+                self.assertTrue(self._wait_until(lambda: len(subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout.splitlines()) == 2))
                 self.assertTrue(self._wait_until(lambda: len(window.current_snapshot.get("changes") or []) == 2))
                 inspector.revert_all_button.click()
                 self.assertTrue(self._wait_until(lambda: subprocess.run(
                     ["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""))
-                self.assertEqual(inspector.undo_label.text(), "Reverted 2 files")
+                # The files are restored before the job's result reaches the
+                # window, so a clean tree can come a moment before the label.
+                self.assertTrue(self._wait_until(lambda: inspector.undo_label.text() == "Reverted 2 files"),
+                                inspector.undo_label.text())
             finally:
                 window.workspace = None
                 self._close(window)
