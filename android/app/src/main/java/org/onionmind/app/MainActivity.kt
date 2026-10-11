@@ -22,6 +22,8 @@ class MainActivity : Activity() {
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
+        // Nocturne ground behind the page, so the first frame is not Material grey.
+        web.setBackgroundColor(0xFF161826.toInt())
         setContentView(web)
         web.loadUrl(Server.pageUrl())
     }

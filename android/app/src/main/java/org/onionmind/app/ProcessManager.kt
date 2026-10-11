@@ -37,9 +37,13 @@ object ProcessManager {
     private val builtins = listOf(
         // Model names are ordered from least heavy to heaviest. Keep ids stable
         // because they are used for recommendations and persisted selections.
-        Model("lfm", "SPARK", "LFM2.5-2.6B-heretic-Q4_K_M.gguf", "https://huggingface.co/Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF/resolve/main/LFM2.5-2.6B-heretic-Q4_K_M.gguf", 1_674_454_432L, true, "1–3B params · low latency · mobile/edge optimized · quick replies · IoT · smart devices", mirrorUrl("LFM2.5-2.6B-heretic-Q4_K_M.gguf")),
-        Model("4b", "EMBER", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", 2_707_514_688L, true, "Lite / Local · Start something.", mirrorUrl("Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf")),
-        Model("9b", "BLAZE", "Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", 5_627_045_248L, true, "7–14B params · efficient reasoning · runs on local GPUs · everyday assistant · coding · summarization · Pro / Real-time · After the burn.", mirrorUrl("Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf")),
+        // Descriptions follow the desktop's _TIER_MODELS: the real model, then
+        // its weight class (RAM here, not VRAM). INFERNO (Qwen3.8 27B) is not
+        // offered: even its smallest quant needs ~10 GB and runs well under
+        // 1 tok/s on a phone CPU. A custom link can still add it.
+        Model("lfm", "SPARK", "LFM2.5-2.6B-heretic-Q4_K_M.gguf", "https://huggingface.co/Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF/resolve/main/LFM2.5-2.6B-heretic-Q4_K_M.gguf", 1_674_454_432L, true, "LFM2.5 2.6B · very light - quick replies on most phones", mirrorUrl("LFM2.5-2.6B-heretic-Q4_K_M.gguf")),
+        Model("4b", "EMBER", "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf", 2_707_514_688L, true, "Qwen3.5 4B · light - best from about 7 GB of RAM", mirrorUrl("Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf")),
+        Model("9b", "BLAZE", "Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", "https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/main/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf", 5_627_045_248L, true, "Qwen3.5 9B · moderate - stronger reasoning, needs about 11 GB of RAM", mirrorUrl("Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf")),
     )
 
     fun models(ctx: Context): List<Model> = builtins + readCustom(ctx)

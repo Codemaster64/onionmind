@@ -99,6 +99,7 @@
   .model-head strong { font-size: 14px; color: var(--strong); }
   .model-head span { color: var(--good); font-size: 11px; margin-left: auto; }
   .fit { font-size: 11px; border-radius: 99px; padding: 0 7px; border: 1px solid var(--line); }
+  .model-head .fit { margin-left: 2px; }   /* beside the name; only the status label sits right */
   .fit.Fits { color: var(--good); border-color: var(--good-line); }
   .fit.Tight { color: var(--warn); border-color: var(--warn-line); }
   .fit.Too { color: var(--bad); border-color: var(--bad-line); }
@@ -140,10 +141,11 @@
 <body>
 
 <header>
-  <svg width="26" height="26" viewBox="0 0 128 128" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" style="color:var(--accent)">
+  <!-- The logo keeps its brand purple: DESIGN.md makes it the one exception to the palette. -->
+  <svg width="26" height="26" viewBox="0 0 128 128" fill="none" stroke="#7D4698" stroke-width="9" stroke-linecap="round">
     <circle cx="64" cy="64" r="52" stroke-dasharray="290 36" transform="rotate(-104 64 64)" opacity=".4"/>
     <circle cx="64" cy="64" r="28" stroke-dasharray="156 20" transform="rotate(40 64 64)"/>
-    <circle cx="64" cy="64" r="5" fill="currentColor" stroke="none"/>
+    <circle cx="64" cy="64" r="5" fill="#7D4698" stroke="none"/>
   </svg>
   <h1>Onionmind</h1>
   <button id="manage" onclick="openManager()">Models</button>
@@ -248,12 +250,12 @@
 
 <div id="setup" hidden>
   <div class="ring">
-    <svg viewBox="0 0 128 128" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" style="color:var(--accent)">
+    <svg viewBox="0 0 128 128" fill="none" stroke="#7D4698" stroke-width="7" stroke-linecap="round">
       <circle cx="64" cy="64" r="52" stroke-dasharray="290 36" transform="rotate(-104 64 64)" opacity=".35"/>
       <circle cx="64" cy="64" r="40" stroke-dasharray="223 28" transform="rotate(-32 64 64)" opacity=".55"/>
       <circle cx="64" cy="64" r="28" stroke-dasharray="156 20" transform="rotate(40 64 64)" opacity=".78"/>
       <circle cx="64" cy="64" r="16" stroke-dasharray="89 11" transform="rotate(112 64 64)"/>
-      <circle cx="64" cy="64" r="6" fill="currentColor" stroke="none"/>
+      <circle cx="64" cy="64" r="6" fill="#7D4698" stroke="none"/>
     </svg>
   </div>
   <p id="setup-text"></p>
@@ -614,7 +616,7 @@ $('q').addEventListener('keydown', e => {
   $('form').requestSubmit();
 });
 function renderManager() {
-  const html = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + esc(m.name) + '</strong>' + fitPill(m) + (m.id === status.model ? '<span>' + (on('ladder') && status.llamaLoading ? 'LOADING' : 'ACTIVE') + '</span>' : '') + '</div>' + '<div class="model-meta">' + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + (m.bytes ? ' · ' + formatBytes(m.bytes) : '') + '</div>' + uncensoredNote(m) + '<div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
+  const html = (status.models || []).map(m => '<div class="model-card"><div class="model-head"><strong>' + esc(m.name) + '</strong>' + fitPill(m) + (m.id === status.model ? '<span>' + (on('ladder') && status.llamaLoading ? 'LOADING' : 'ACTIVE') + '</span>' : '') + '</div>' + '<div class="model-meta">' + (m.description ? esc(m.description) + '<br>' : '') + (m.installed ? 'Downloaded on this phone' : 'Not downloaded') + (m.bytes ? ' · ' + formatBytes(m.bytes) : '') + '</div>' + uncensoredNote(m) + '<div class="model-actions">' + (m.installed && m.id !== status.model ? '<button onclick="selectModel(\'' + m.id + '\')">Use this model</button>' : '') + (m.installed ? '<button class="danger" onclick="removeModel(\'' + m.id + '\')">Remove</button>' : '') + (!m.installed ? '<button onclick="install(\'' + m.id + '\')">Download</button>' : '') + '</div></div>').join('');
   // Re-rendered on every poll while open; only touch the DOM on a change so
   // a tap landing during a poll is never swallowed.
   if (html !== managerHtml) { managerHtml = html; $('installed-list').innerHTML = html; }

@@ -55,6 +55,19 @@ The rules are the same as on the desktop:
 **Result:** 14 features on the phone (9 built as on the desktop, 5 adapted),
 setup already present, and 9 left on the desktop for the reasons above.
 
+## Models
+
+The phone offers the desktop's three lighter tiers, with the same files:
+SPARK (LFM2.5 2.6B), EMBER (Qwen3.5 4B) and BLAZE (Qwen3.5 9B). Their
+descriptions now follow the desktop's: the real model first, then its weight
+class (RAM on a phone, not VRAM). With the ladder feature on, each one is
+labelled Fits, Tight or Too big. INFERNO (Qwen3.8 27B) is not offered on the
+phone: even its smallest quant needs about 10 GB and runs well under 1 tok/s on
+a phone CPU. A custom HTTPS link can still add any GGUF.
+
+The in-app logo and the launcher icon keep the brand purple. `DESIGN.md`
+makes the supplied logo the one exception to the Nocturne palette.
+
 ## Where the code is
 
 - `android/core/.../Workbench.kt` (no Android imports, JVM-tested):
