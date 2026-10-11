@@ -243,6 +243,55 @@ the API is heavily rate-limited per exit address, which is hostile to shared
 Tor exits. `onionmind-update` (the CLI command) remains the updater for
 source installs and leaves model weights untouched in both paths.
 
+### Workbench v2 features
+
+The workbench has 24 optional features (command palette, boundary map, Agent
+approvals, Run tab, model power details, undo, per-project rules, app lock,
+light theme and the rest). They live in one `features` dict in
+`settings.json`; **every flag is off except "Ask before searching the web"**,
+and with a flag off the workbench looks and behaves as it did before. They
+are switched in the toolbar's sparkle popover or Settings → Features. The
+known gaps are listed in [docs/v2-gaps.md](docs/v2-gaps.md).
+
+**The privacy boundary does not move.** Inference stays local, Chat search
+goes over Tor only on a turn where it is allowed, the agent keeps the
+Tor-only funnel, and downloads stay direct and confirmed. The only new
+network calls are to the local model server on `127.0.0.1:11434`
+(`/api/ps` for what is loaded, `/api/generate` to load or unload a model),
+never through a proxy.
+
+**Approvals are real pauses.** With approvals, the Run tab, the timeline or
+Agent rules on, Agent mode runs Qwen Code with
+`--input-format/--output-format stream-json` through the same `run_agent`
+funnel (`onionmind.py --agent --stream-json`). The task and each approval
+travel on stdin, so a protected action waits for Deny / Allow once / Allow
+for this run instead of stopping. Deny also interrupts the run; checked
+against qwen-code 0.25.0, the run then ends without another model call.
+With those features off the agent is launched exactly as before (`-p`,
+stops safely). Project rules only narrow the boundary: `--deny` accepts
+`read_file(...)`/`edit(...)` path rules (refused even under YOLO), and
+`--no-network` points every proxy variable at a closed loopback port and
+denies Onionmind's own MCP search tools.
+
+**What v2 writes to disk**, all under the desktop data folder:
+
+- `settings.json` gains `features`, `model_by_mode`, `agent_rules` (per
+  project), `preset`/`preset_texts`, `appearance`, `lock` (with the
+  passphrase stored only as a salted scrypt hash) and `setup_done`.
+- `network-log.jsonl` - one line per connection that left the machine
+  (time, route, destination; never a prompt or a query), written **only
+  while the network-log or boundary-map feature is on**.
+- `reverts/` - copies of files the undo feature reverted, so Undo can put
+  them back; replaced by the next revert and removed on Undo.
+
+Wipe everything shreds the network log and the revert copies with the rest.
+
+**New local processes:** `nvidia-smi` (GPU memory, as the catalog already
+used), `git restore`/`git diff --numstat` (undo), `node --version` (setup),
+`gsettings`/`defaults` (reduced-motion setting, only with the keyboard
+feature), and `ollama serve` when the errors feature's Restart button finds
+the model server down and its program installed.
+
 ## Which build you get
 
 The installer reads your VRAM and picks accordingly. All three are the same abliterated
