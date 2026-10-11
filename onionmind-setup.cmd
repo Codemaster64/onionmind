@@ -7159,7 +7159,36 @@ class MessageBlock(QWidget):
         self.thinking = ThinkingIndicator(self)
         column.addWidget(self.thinking)
         column.addWidget(self.body)
+        # v2 msgActions: built on demand, shown only while the feature is on.
+        self.message_index: Optional[int] = None
+        self.actions_row: Optional[QWidget] = None
+        self._column = column
         outer.addLayout(column, 1)
+
+    def set_actions(self, actions: list[tuple[str, str, Callable[[], None]]]) -> None:
+        """(label, icon, callback) buttons under the message; [] hides them."""
+        if self.actions_row is not None:
+            self._column.removeWidget(self.actions_row)
+            self.actions_row.deleteLater()
+            self.actions_row = None
+        if not actions:
+            self._sync_body_height()
+            return
+        row = QWidget(self)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        for label, icon, callback in actions:
+            button = QPushButton(label)
+            button.setObjectName("chipButton")
+            button.setIcon(_icon(icon, 14))
+            button.setAccessibleName(f"{label} this message")
+            button.clicked.connect(lambda _checked=False, run=callback: run())
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self._column.addWidget(row)
+        self.actions_row = row
+        self.updateGeometry()
 
     @property
     def text(self) -> str:
@@ -8849,6 +8878,18 @@ class LeftRail(QWidget):
         self.session_delete_action.triggered.connect(self._delete_selected_session)
         self.session_delete_action.setEnabled(False)
         layout.addWidget(self.sessions, 1)
+        # v2 sessionSearch: message hits from every project under the list.
+        self.hits_title = QLabel("IN MESSAGES · ALL PROJECTS")
+        self.hits_title.setObjectName("sectionTitle")
+        self.hits_title.hide()
+        layout.addWidget(self.hits_title)
+        self.message_hits = QListWidget()
+        self.message_hits.setAccessibleName("Message matches in every project")
+        self.message_hits.setWordWrap(True)
+        self.message_hits.hide()
+        self.message_hits.itemActivated.connect(self._hit_chosen)
+        self.message_hits.itemClicked.connect(self._hit_chosen)
+        layout.addWidget(self.message_hits, 1)
 
         export = QPushButton("Export conversation")
         export.setObjectName("railAction")
@@ -8875,6 +8916,45 @@ class LeftRail(QWidget):
         layout.addWidget(export)
         layout.addWidget(models)
         layout.addWidget(settings)
+
+    hitSelected = Signal(str)
+
+    def _hit_chosen(self, item: QListWidgetItem) -> None:
+        session_id = _as_text(item.data(Qt.ItemDataRole.UserRole))
+        if session_id:
+            self.hitSelected.emit(session_id)
+
+    def set_message_hits(self, hits: Optional[list[dict[str, Any]]], project_name: Callable[[Any], str]) -> None:
+        """None hides the section; a list (maybe empty) shows it."""
+        self.message_hits.clear()
+        visible = hits is not None
+        self.hits_title.setVisible(visible)
+        self.message_hits.setVisible(visible)
+        if not visible:
+            return
+        import html as _html
+        if not hits:
+            empty = QListWidgetItem("No messages match.")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.message_hits.addItem(empty)
+            return
+        accent = theme_tokens()["accent_text"]
+        for hit in hits:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, hit["session_id"])
+            plain = f"{project_name(hit.get('workspace'))} · {hit['title']}\n{hit['before']}{hit['match']}{hit['after']}"
+            item.setToolTip(plain)
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, plain)
+            label = QLabel(
+                f"<span>{_html.escape(project_name(hit.get('workspace')))} · {_html.escape(hit['title'])}</span><br>"
+                f"<span style='color:{theme_tokens()['muted']}'>{_html.escape(hit['before'])}"
+                f"<b style='color:{accent}'>{_html.escape(hit['match'])}</b>{_html.escape(hit['after'])}</span>")
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setWordWrap(True)
+            label.setContentsMargins(6, 4, 6, 4)
+            item.setSizeHint(QSize(100, max(46, label.sizeHint().height() + 6)))
+            self.message_hits.addItem(item)
+            self.message_hits.setItemWidget(item, label)
 
     def _archive_selected(self) -> None:
         item = self.sessions.currentItem()
@@ -9187,6 +9267,8 @@ class TerminalPane(QFrame):
 
 class InspectorPane(QWidget):
     refreshRequested = Signal()
+    revertRequested = Signal(list)
+    undoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -9275,6 +9357,34 @@ class InspectorPane(QWidget):
         self.change_list.setMaximumHeight(175)
         self.change_list.setAccessibleName("Observed Git changes")
         changes_layout.addWidget(self.change_list)
+        # v2 undo: per-file revert, Revert all, and an Undo bar - git on disk.
+        self.undo_enabled = False
+        self.undo_note = QLabel("Read from git on disk. Reverting restores a file to its last commit.")
+        self.undo_note.setObjectName("meta")
+        self.undo_note.setWordWrap(True)
+        self.undo_note.hide()
+        changes_layout.addWidget(self.undo_note)
+        self.revert_all_button = QPushButton("Revert all changes")
+        self.revert_all_button.setObjectName("dangerButton")
+        self.revert_all_button.setAccessibleName("Revert every changed file to its last commit")
+        self.revert_all_button.clicked.connect(lambda: self.revertRequested.emit(list(self._change_paths)))
+        self.revert_all_button.hide()
+        changes_layout.addWidget(self.revert_all_button)
+        self.undo_bar = QFrame()
+        self.undo_bar.setObjectName("banner")
+        undo_layout = QHBoxLayout(self.undo_bar)
+        undo_layout.setContentsMargins(9, 5, 9, 5)
+        self.undo_label = QLabel("")
+        self.undo_label.setWordWrap(True)
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.setAccessibleName("Undo the revert and put the changes back on disk")
+        self.undo_button.clicked.connect(self.undoRequested)
+        undo_layout.addWidget(self.undo_label, 1)
+        undo_layout.addWidget(self.undo_button)
+        self.undo_bar.hide()
+        changes_layout.addWidget(self.undo_bar)
+        self._change_paths: list[str] = []
+        self.empty_changes_note = ""
         diff_title = QLabel("DIFF")
         diff_title.setObjectName("sectionTitle")
         changes_layout.addWidget(diff_title)
@@ -9386,17 +9496,40 @@ class InspectorPane(QWidget):
         self.populate_tree(snapshot.get("file_tree") or [], bool(snapshot.get("tree_truncated")))
         changes = snapshot.get("changes") or []
         self.change_list.clear()
+        self._change_paths = [_as_text(change.get("path", "")) for change in changes]
+        revertable = self.undo_enabled and bool(snapshot.get("is_git"))
         for change in changes:
             status = _as_text(change.get("status", "?"))
             path = _as_text(change.get("path", ""))
             original = change.get("original_path")
             text = f"{status:>2}  {path}" + (f"  from {original}" if original else "")
-            self.change_list.addItem(QListWidgetItem(text))
+            item = QListWidgetItem(text)
+            self.change_list.addItem(item)
+            if revertable:
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(4, 0, 2, 0)
+                label = QLabel(text)
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                revert = QToolButton()
+                revert.setObjectName("bareButton")
+                revert.setIcon(_icon("revert", 15))
+                revert.setToolTip(f"Revert {path} to its last commit")
+                revert.setAccessibleName(f"Revert {path}")
+                revert.clicked.connect(lambda _checked=False, p=path: self.revertRequested.emit([p]))
+                row_layout.addWidget(label, 1)
+                row_layout.addWidget(revert)
+                self.change_list.setItemWidget(item, row)
+        self.undo_note.setVisible(revertable)
+        self.revert_all_button.setVisible(revertable and len(changes) > 1)
         if changes:
             self.change_summary.setText(snapshot.get("summary") or f"{len(changes)} observed change(s)")
         else:
             self.change_summary.setText("Working tree clean" if snapshot.get("is_git") else "Not a Git repository")
-        self.diff_view.setPlainText(snapshot.get("diff") or "No diff to display.")
+        diff = snapshot.get("diff") or "No diff to display."
+        if not changes and self.empty_changes_note and snapshot.get("is_git"):
+            diff = self.empty_changes_note
+        self.diff_view.setPlainText(diff)
 
     def populate_tree(self, paths: list[str], truncated: bool = False) -> None:
         self.file_tree.blockSignals(True)
@@ -9930,6 +10063,145 @@ class SettingsDialog(QDialog):
         outer.addWidget(motion)
         outer.addStretch(1)
         return page
+
+    def _rules_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        window = self._window()
+        core = getattr(window, "desktop_core", None)
+        workspace = getattr(window, "workspace", None)
+        heading = QLabel(f"Agent rules for {Path(workspace).name}" if workspace else "Agent rules")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        if not workspace or not callable(getattr(core, "load_rules", None)):
+            note = QLabel("Open a project to set its Agent rules.")
+            note.setObjectName("meta")
+            outer.addWidget(note)
+            outer.addStretch(1)
+            return page
+        intro = QLabel("Rules apply only to this project. Anything they don’t allow still asks you first, "
+                       "or stops safely.")
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        rules = core.load_rules(window.settings_data, workspace)
+        self.rule_boxes: dict[str, QCheckBox] = {}
+        for key, name, description in core.RULE_FLAGS:
+            box = QCheckBox(name)
+            box.setChecked(bool(rules.get(key)))
+            box.setAccessibleName(f"{name}. {description}")
+            note = QLabel(description)
+            note.setObjectName("meta")
+            note.setContentsMargins(24, 0, 0, 4)
+            outer.addWidget(box)
+            outer.addWidget(note)
+            self.rule_boxes[key] = box
+        blocked_title = QLabel("Never touch these paths")
+        blocked_title.setObjectName("title")
+        self.rule_blocked = QLineEdit(_as_text(rules.get("blocked")))
+        self.rule_blocked.setAccessibleName("Paths Agent can never read or edit in this project")
+        blocked_help = QLabel("Comma separated. Agent can’t read or edit them, even in YOLO.")
+        blocked_help.setObjectName("meta")
+        notes_title = QLabel("Project instructions")
+        notes_title.setObjectName("title")
+        self.rule_notes = QPlainTextEdit(_as_text(rules.get("notes")))
+        self.rule_notes.setPlaceholderText("Use minitest, not rspec. Keep changes small.")
+        self.rule_notes.setAccessibleName("Project instructions for Agent")
+        self.rule_notes.setMaximumHeight(110)
+        notes_help = QLabel("Sent to the model with every Agent run in this project, alongside AGENTS.md.")
+        notes_help.setObjectName("meta")
+        notes_help.setWordWrap(True)
+        for widget in (blocked_title, self.rule_blocked, blocked_help, notes_title, self.rule_notes, notes_help):
+            outer.addWidget(widget)
+        outer.addStretch(1)
+        self._rules_timer = QTimer(self)
+        self._rules_timer.setSingleShot(True)
+        self._rules_timer.setInterval(350)
+        self._rules_timer.timeout.connect(self._save_rules)
+        for box in self.rule_boxes.values():
+            box.toggled.connect(lambda _on: self._save_rules())
+        self.rule_blocked.editingFinished.connect(self._save_rules)
+        self.rule_notes.textChanged.connect(self._rules_timer.start)
+        return page
+
+    def _save_rules(self) -> None:
+        window = self._window()
+        if window is None or not hasattr(self, "rule_boxes"):
+            return
+        rules = {key: box.isChecked() for key, box in self.rule_boxes.items()}
+        rules["blocked"] = self.rule_blocked.text()
+        rules["notes"] = self.rule_notes.toPlainText()
+        window.save_project_rules(rules)
+
+    def _presets_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Presets")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        intro = QLabel("A preset is the system prompt Onionmind sends before your message. "
+                       "Pick one from the composer.")
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        window = self._window()
+        self.preset_list = QListWidget()
+        self.preset_list.setAccessibleName("Presets")
+        self.preset_list.setMaximumHeight(130)
+        for preset in (window.presets() if window is not None else []):
+            item = QListWidgetItem(f"{preset['name']} · {preset['short']}")
+            item.setData(Qt.ItemDataRole.UserRole, preset["id"])
+            self.preset_list.addItem(item)
+        outer.addWidget(self.preset_list)
+        self.preset_label = QLabel("")
+        self.preset_label.setObjectName("title")
+        outer.addWidget(self.preset_label)
+        self.preset_editor = QPlainTextEdit()
+        self.preset_editor.setAccessibleName("System prompt text")
+        outer.addWidget(self.preset_editor, 1)
+        row = QHBoxLayout()
+        self.preset_use = QPushButton("Use this preset")
+        self.preset_use.setObjectName("primaryButton")
+        self.preset_reset = QPushButton("Reset to default text")
+        row.addWidget(self.preset_use)
+        row.addStretch(1)
+        row.addWidget(self.preset_reset)
+        outer.addLayout(row)
+        self.preset_list.currentRowChanged.connect(lambda _row: self._show_preset())
+        self.preset_editor.textChanged.connect(self._preset_edited)
+        self.preset_use.clicked.connect(
+            lambda: window.set_preset(self._current_preset_id()) if window is not None else None)
+        self.preset_reset.clicked.connect(self._reset_preset)
+        if self.preset_list.count():
+            current = _as_text(getattr(window, "settings_data", {}).get("preset") or "default")
+            ids = [self.preset_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.preset_list.count())]
+            self.preset_list.setCurrentRow(ids.index(current) if current in ids else 0)
+        return page
+
+    def _current_preset_id(self) -> str:
+        item = self.preset_list.currentItem()
+        return _as_text(item.data(Qt.ItemDataRole.UserRole)) if item is not None else "default"
+
+    def _show_preset(self) -> None:
+        window = self._window()
+        preset = next((p for p in window.presets() if p["id"] == self._current_preset_id()), None) if window else None
+        if preset is None:
+            return
+        self.preset_label.setText(f"System prompt for {preset['name']}")
+        self.preset_editor.blockSignals(True)
+        self.preset_editor.setPlainText(preset["text"])
+        self.preset_editor.blockSignals(False)
+
+    def _preset_edited(self) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_preset_text(self._current_preset_id(), self.preset_editor.toPlainText())
+
+    def _reset_preset(self) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_preset_text(self._current_preset_id(), None)
+            self._show_preset()
 
     @staticmethod
     def _padded(content: QWidget) -> QWidget:
@@ -10691,6 +10963,8 @@ class OnionmindWindow(QMainWindow):
         self._turn_searches: list[dict[str, Any]] = []
         self._searching = False
         self._pulling: Optional[str] = None
+        self._edit_from: Optional[int] = None
+        self._revert_record: Any = None
         self._build_window()
         self.preferences = self._load_preferences()
         self._apply_preferences()
@@ -10865,6 +11139,8 @@ class OnionmindWindow(QMainWindow):
         self.left_rail.archiveRequested.connect(self.archive_session)
         self.left_rail.deleteSessionRequested.connect(self.delete_session_from_machine)
         self.left_rail.renameSessionRequested.connect(self.rename_session)
+        self.left_rail.hitSelected.connect(self.load_session)
+        self.left_rail.session_filter.textChanged.connect(self._session_search)
         self.main_splitter.addWidget(self.left_rail)
 
         center = QWidget()
@@ -10893,6 +11169,8 @@ class OnionmindWindow(QMainWindow):
         self.inspector.refreshRequested.connect(self.refresh_workspace)
         self.inspector.run_panel.stopRequested.connect(self.stop_active)
         self.inspector.netlog_button.clicked.connect(self.open_network_log)
+        self.inspector.revertRequested.connect(self._revert_paths)
+        self.inspector.undoRequested.connect(self._undo_revert)
         self.main_splitter.addWidget(self.inspector)
         self.main_splitter.setSizes([224, 860, 292])
         self.main_splitter.setStretchFactor(0, 0)
@@ -11018,6 +11296,20 @@ class OnionmindWindow(QMainWindow):
         self.composer.sendRequested.connect(self.submit)
         self.composer.filesDropped.connect(self.add_attachments)
         self.composer.textChanged.connect(self._sync_action_states)
+        # v2 msgActions: editing an earlier message.
+        self.edit_banner = QFrame()
+        self.edit_banner.setObjectName("banner")
+        edit_layout = QHBoxLayout(self.edit_banner)
+        edit_layout.setContentsMargins(9, 4, 6, 4)
+        edit_text = QLabel("Editing an earlier message. Sending replaces everything after it in this session.")
+        edit_text.setWordWrap(True)
+        edit_cancel = QPushButton("Cancel")
+        edit_cancel.setAccessibleName("Cancel editing the earlier message")
+        edit_cancel.clicked.connect(lambda: self._cancel_edit())
+        edit_layout.addWidget(edit_text, 1)
+        edit_layout.addWidget(edit_cancel)
+        self.edit_banner.hide()
+        outer.addWidget(self.edit_banner)
         outer.addWidget(self.composer, 1)
         self.attachment_row = QWidget()
         attachment_layout = QHBoxLayout(self.attachment_row)
@@ -11111,6 +11403,15 @@ class OnionmindWindow(QMainWindow):
         )
         self.search_consent.setAccessibleName("Allow Tor web search for the next Chat turn only")
         controls.addWidget(self.search_consent)
+        # v2 presets: the system prompt chip.
+        self.preset_chip = QPushButton("Default")
+        self.preset_chip.setObjectName("chipButton")
+        self.preset_chip.setToolTip("Preset: changes how Onionmind answers")
+        self.preset_chip.setAccessibleName("Preset")
+        self.preset_menu = QMenu(self)
+        self.preset_chip.setMenu(self.preset_menu)
+        self.preset_chip.hide()
+        controls.addWidget(self.preset_chip)
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
@@ -11733,6 +12034,8 @@ class OnionmindWindow(QMainWindow):
         self.settings_data["mode"] = mode
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
+        if hasattr(self, "preset_chip") and getattr(self, "features", None):
+            self.preset_chip.setVisible(self.feature("presets") and mode == "chat")
         if getattr(self, "features", None) and self.feature("modelPlus"):
             wanted = _as_text((self.settings_data.get("model_by_mode") or {}).get(mode))
             if wanted and wanted in self.installed_model_ids and wanted != self.current_model_id():
@@ -12363,6 +12666,9 @@ class OnionmindWindow(QMainWindow):
             # completed; only the copy owned by the UI is cleaned here.
             self.chat_messages = _sanitize_assistant_messages(self.chat_messages)
             title = self._session_title()
+            kept = _as_text(_field(self.current_session, "title", "")) if self.current_session is not None else ""
+            if kept.startswith("Branch of "):
+                title = kept                     # a branch keeps the name it was given
             model = self.current_model_id()
             if self._session_is_unchanged(model):
                 return True
@@ -12484,6 +12790,10 @@ class OnionmindWindow(QMainWindow):
         if callable(shred_file) and Path(self.egress_path).is_file():
             shred_file(self.egress_path)
             self._egress_counts = None
+        reverts = self.data_root / "reverts"
+        if callable(shred_tree) and reverts.is_dir():
+            shred_tree(reverts)
+            self._revert_record = None
         tor = self.wipe_tor_state()
 
         self.left_rail.clear_projects()
@@ -12724,17 +13034,7 @@ class OnionmindWindow(QMainWindow):
         self.chat_messages = _sanitize_assistant_messages(
             _field(session, "messages", ()) or ()
         )
-        self.transcript.clear()
-        for message in self.chat_messages:
-            role = message.get("role")
-            if role in ("user", "assistant"):
-                content = message.get("content")
-                self.transcript.add_message(role, content if isinstance(content, str) else "[local image attachment]")
-            elif role == "tool":
-                self.transcript.add_tool_card(
-                    _as_text(message.get("tool_name") or "Tool result"),
-                    [("Local tool output", _as_text(message.get("content"))[:80])],
-                )
+        self._render_messages()
         workspace = _as_text(_field(session, "workspace"))
         if workspace and Path(workspace).is_dir() and workspace != self.workspace:
             self.select_workspace(workspace)
@@ -12768,6 +13068,11 @@ class OnionmindWindow(QMainWindow):
         if self._model_loading:
             self.set_status(f"{self._describe_model(self._model_loading)} is still loading. Sending waits until it is ready.")
             return
+        if self._edit_from is not None:
+            # Sending an edit replaces that message and everything after it.
+            self.chat_messages = self.chat_messages[:self._edit_from]
+            self._render_messages()
+            self._cancel_edit()
         if not task:
             task = "Review the attached local files."
         search_allowed = self.mode == "chat" and self.search_consent.isChecked()
@@ -12794,7 +13099,7 @@ class OnionmindWindow(QMainWindow):
         visible_task = task + ("\n\nAttached locally: " + ", ".join(attachment_names) if attachment_names else "")
         message, agent_task = self._build_user_payload(task)
         self.chat_messages.append(message)
-        self.transcript.add_message("user", visible_task)
+        self._index_block(self.transcript.add_message("user", visible_task), len(self.chat_messages) - 1)
         self.composer.clear()
         self._forget_draft()
         self.clear_attachments()
@@ -12986,6 +13291,9 @@ class OnionmindWindow(QMainWindow):
         stop_event = self.stop_event
         model = self.current_model_id()
         history = copy.deepcopy(self.chat_messages)
+        preset = self._preset_text()
+        if preset and callable(getattr(self.desktop_core, "with_system_prompt", None)):
+            history = self.desktop_core.with_system_prompt(history, preset)
         block = self.transcript.add_message("assistant", "")
         block.start_thinking("Starting Tor" if allow_search else "Thinking")
         self.stream_block = block
@@ -13178,11 +13486,14 @@ class OnionmindWindow(QMainWindow):
             *self.chat_messages,
             {"role": "assistant", "content": answer},
         ]
+        # A preset's system prompt is sent, never stored with the conversation.
+        raw_history = [m for m in raw_history if m.get("role") != "system"]
         self.chat_messages = _sanitize_assistant_messages(raw_history)
         if self.chat_messages and self.chat_messages[-1].get("role") == "assistant":
             self.chat_messages[-1]["content"] = answer
         if not self.chat_messages or self.chat_messages[-1].get("role") != "assistant":
             self.chat_messages.append({"role": "assistant", "content": answer})
+        self._index_block(self.stream_block, len(self.chat_messages) - 1)
         local_probe = getattr(self.core, "tor_proxy_port", None)
         try:
             port = local_probe() if callable(local_probe) else None
@@ -13203,6 +13514,7 @@ class OnionmindWindow(QMainWindow):
         if self.stream_block is not None:
             self.stream_block.set_text(f"Local inference could not continue. {message}")
         self.chat_messages.append({"role": "assistant", "content": f"Local inference failed: {message}"})
+        self._index_block(self.stream_block, len(self.chat_messages) - 1)
         local_probe = getattr(self.core, "tor_proxy_port", None)
         try:
             port = local_probe() if callable(local_probe) else None
@@ -13380,6 +13692,7 @@ class OnionmindWindow(QMainWindow):
             self.stream_block.append_text(suffix)
         content = (self.stream_block.text if self.stream_block is not None else self.harness_output + suffix)
         self.chat_messages.append({"role": "assistant", "content": content})
+        self._index_block(self.stream_block, len(self.chat_messages) - 1)
         self.terminal.append(suffix + "\n")
         self.set_status(f"Agent exited with code {exit_code}; refreshing observed changes…")
         self.inspector.append_activity(f"Agent exited with code {exit_code}; disk inspection requested")
@@ -14555,6 +14868,262 @@ class OnionmindWindow(QMainWindow):
 
     def _apply_feature_keyboard(self, on: bool) -> None:
         set_system_motion_probe(on)
+
+    # --- v2: message actions -------------------------------------------
+
+    def _render_messages(self) -> None:
+        """The transcript from self.chat_messages, each block knowing its index."""
+        self.transcript.clear()
+        for index, message in enumerate(self.chat_messages):
+            role = message.get("role")
+            if role in ("user", "assistant"):
+                content = message.get("content")
+                block = self.transcript.add_message(
+                    role, content if isinstance(content, str) else "[local image attachment]")
+                self._index_block(block, index)
+            elif role == "tool":
+                self.transcript.add_tool_card(
+                    _as_text(message.get("tool_name") or "Tool result"),
+                    [("Local tool output", _as_text(message.get("content"))[:80])],
+                )
+
+    def _index_block(self, block: Optional[MessageBlock], index: int) -> None:
+        if block is None or index < 0:
+            return
+        block.message_index = index
+        block.set_actions(self._message_actions(block) if self.feature("msgActions") else [])
+
+    def _message_actions(self, block: MessageBlock) -> list[tuple[str, str, Callable[[], None]]]:
+        if block.role == "user":
+            return [("Edit", "pencil", lambda b=block: self._edit_message(b)),
+                    ("Copy", "copy", lambda b=block: self._copy_message(b))]
+        return [("Copy", "copy", lambda b=block: self._copy_message(b)),
+                ("Regenerate", "regenerate", lambda b=block: self._regenerate(b)),
+                ("Branch from here", "branch", lambda b=block: self._branch_from(b))]
+
+    def _copy_message(self, block: MessageBlock) -> None:
+        QApplication.clipboard().setText(block.text)
+        self.set_status("Copied to the clipboard.")
+
+    def _valid_index(self, block: MessageBlock) -> Optional[int]:
+        index = block.message_index
+        if index is None or index >= len(self.chat_messages):
+            return None
+        return index if self.chat_messages[index].get("role") == block.role else None
+
+    def _edit_message(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            self.set_status("Stop the active run before editing a message." if self.active_kind
+                            else "That message is no longer in this session.")
+            return
+        self._edit_from = index
+        self.set_mode("chat")
+        self.composer.setPlainText(block.text.split("\n\nAttached locally:", 1)[0])
+        self.edit_banner.show()
+        self.composer_frame.setMaximumHeight(214)
+        self.focus_composer()
+
+    def _cancel_edit(self) -> None:
+        self._edit_from = None
+        self.edit_banner.hide()
+        self.composer_frame.setMaximumHeight(178 if self.context_warning.isHidden() else 214)
+
+    def _regenerate(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            return
+        user = next((i for i in range(index - 1, -1, -1) if self.chat_messages[i].get("role") == "user"), None)
+        if user is None:
+            self.set_status("There is no question before this reply to ask again.")
+            return
+        self.chat_messages = self.chat_messages[:user + 1]
+        self._render_messages()
+        self.set_mode("chat")
+        self.inspector.append_activity("Regenerating a reply")
+        self._set_active("chat")
+        self._start_chat()
+
+    def _branch_from(self, block: MessageBlock) -> None:
+        index = self._valid_index(block)
+        if self.active_kind or index is None:
+            return
+        if not self.preferences.get("save_history", True):
+            self.set_status("Saving conversations to this machine is off, so there is nowhere to branch to.")
+            return
+        if not self.save_current_session():
+            return
+        source = _as_text(_field(self.current_session, "title", "")) or self._session_title()
+        title = f"Branch of {source}"[:72]
+        messages = copy.deepcopy(self.chat_messages[:index + 1])
+        try:
+            model = self.current_model_id()
+            session = self.session_bridge.create(title, model, self.workspace, messages)
+            session = self.session_bridge.save(session, title=title, model=model,
+                                               workspace=self.workspace, messages=messages)
+        except Exception as exc:
+            self.set_status(f"Could not branch the session: {exc}")
+            return
+        session_id = _as_text(_field(session, "id"))
+        self._refresh_session_rows()
+        self.current_session = None
+        self.chat_messages = []
+        self.load_session(session_id)
+        self.set_status(f"New session branched from “{source}”. The original is unchanged.")
+        self.inspector.append_activity(f"Branched a new session from “{source}”")
+
+    def _apply_feature_msgActions(self, on: bool) -> None:
+        for block in list(self.transcript._message_blocks):
+            if block.message_index is not None:
+                block.set_actions(self._message_actions(block) if on else [])
+        if not on and self._edit_from is not None:
+            self._cancel_edit()
+
+    # --- v2: session search ------------------------------------------------
+
+    def _session_search(self, text: str) -> None:
+        search = getattr(self.desktop_core, "search_sessions", None)
+        if not self.feature("sessionSearch") or not callable(search) or len(text.strip()) < 2:
+            self.left_rail.set_message_hits(None, str)
+            return
+        hits = search(self.session_bridge.list(), text)
+        self.left_rail.set_message_hits(
+            hits, lambda workspace: Path(_as_text(workspace)).name if workspace else "No project")
+
+    def _apply_feature_sessionSearch(self, on: bool) -> None:
+        field = self.left_rail.session_filter
+        field.setPlaceholderText("Search sessions and messages" if on else "Filter sessions")
+        field.setAccessibleName("Search sessions and messages in every project" if on else "Filter sessions by name")
+        self._session_search(field.text())
+
+    # --- v2: undo agent changes --------------------------------------------
+
+    def _revert_paths(self, paths: list[str]) -> None:
+        reverter = getattr(self.desktop_core, "revert_changes", None)
+        if not self.feature("undo") or not callable(reverter) or not self.workspace:
+            return
+        if self.active_kind:
+            self.set_status("Stop the active run before reverting changes.")
+            return
+        wanted = set(paths)
+        changes = [c for c in (self.current_snapshot or {}).get("changes") or [] if c.get("path") in wanted]
+        if not changes:
+            return
+        workspace, backups = self.workspace, self.data_root / "reverts"
+        previous = self._revert_record
+        label = changes[0]["path"] if len(changes) == 1 else f"{len(changes)} files"
+
+        def job(signals: WorkerSignals) -> Any:
+            del signals
+            record = reverter(workspace, changes, backups)
+            if previous is not None:
+                shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
+            return record
+
+        def done(record: Any) -> None:
+            self._revert_record = record
+            self.inspector.undo_label.setText(f"Reverted {label}")
+            self.inspector.undo_bar.show()
+            self.set_status(f"Reverted {len(changes)} file(s) to the last commit.")
+            self.inspector.append_activity(f"Reverted {label} (git restore)", "machine")
+            self.refresh_workspace()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not revert: {message}"))
+
+    def _undo_revert(self) -> None:
+        undo = getattr(self.desktop_core, "undo_revert", None)
+        record = self._revert_record
+        if record is None or not callable(undo):
+            return
+
+        def job(signals: WorkerSignals) -> int:
+            del signals
+            restored = undo(record)
+            shutil.rmtree(_field(record, "backup"), ignore_errors=True)
+            return restored
+
+        def done(_restored: int) -> None:
+            self._revert_record = None
+            self.inspector.undo_bar.hide()
+            self.set_status("Revert undone. The changes are back on disk.")
+            self.inspector.append_activity("Revert undone; the changes are back on disk", "machine")
+            self.refresh_workspace()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not undo the revert: {message}"))
+
+    def _apply_feature_undo(self, on: bool) -> None:
+        self.inspector.undo_enabled = on
+        if not on:
+            self.inspector.undo_bar.hide()
+        self.inspector.update_snapshot(self.current_snapshot or {})
+
+    # --- v2: rules and presets ---------------------------------------------
+
+    def save_project_rules(self, rules: dict[str, Any]) -> None:
+        store = getattr(self.desktop_core, "store_rules", None)
+        if not callable(store) or not self.workspace:
+            return
+        store(self.settings_data, self.workspace, rules)
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def presets(self) -> list[dict[str, str]]:
+        loader = getattr(self.desktop_core, "load_presets", None)
+        return list(loader(self.settings_data)) if callable(loader) else []
+
+    def _preset_text(self) -> str:
+        if not self.feature("presets"):
+            return ""
+        chooser = getattr(self.desktop_core, "active_preset", None)
+        return _as_text(chooser(self.settings_data).get("text")) if callable(chooser) else ""
+
+    def set_preset(self, preset_id: str) -> None:
+        self.settings_data["preset"] = preset_id
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._sync_preset_chip()
+        name = next((p["name"] for p in self.presets() if p["id"] == preset_id), preset_id)
+        if preset_id != "default":
+            self.inspector.append_activity(f"Preset: {name}")
+        self.set_status(f"Preset: {name}")
+        self._update_context_meter()
+
+    def set_preset_text(self, preset_id: str, text: Optional[str]) -> None:
+        """Store edited text, or None to go back to the shipped text."""
+        texts = dict(self.settings_data.get("preset_texts") or {})
+        if text is None:
+            texts.pop(preset_id, None)
+        else:
+            texts[preset_id] = text
+        self.settings_data["preset_texts"] = texts
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def _sync_preset_chip(self) -> None:
+        chooser = getattr(self.desktop_core, "active_preset", None)
+        active = chooser(self.settings_data) if callable(chooser) else {"id": "default", "name": "Default"}
+        self.preset_chip.setText(active["name"])
+        self.preset_chip.setAccessibleName(f"Preset: {active['name']}")
+        self.preset_menu.clear()
+        title = self.preset_menu.addAction("Preset")
+        title.setEnabled(False)
+        for preset in self.presets():
+            action = self.preset_menu.addAction(f"{preset['name']} · {preset['short']}")
+            action.setCheckable(True)
+            action.setChecked(preset["id"] == active["id"])
+            action.triggered.connect(lambda _checked=False, pid=preset["id"]: self.set_preset(pid))
+        self.preset_menu.addSeparator()
+        self.preset_menu.addAction("Edit presets…").triggered.connect(lambda: self.open_settings_tab("Presets"))
+
+    def _apply_feature_presets(self, on: bool) -> None:
+        self.preset_chip.setVisible(on and self.mode == "chat")
+        if on:
+            self._sync_preset_chip()
+        self._update_context_meter()
 
     def _apply_feature_runPanel(self, on: bool) -> None:
         self.inspector.set_run_tab(on)

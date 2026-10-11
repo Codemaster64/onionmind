@@ -910,5 +910,298 @@ class NetlogTests(V2Base):
                 self._close(window)
 
 
+class _ChatCore:
+    """Records the history each turn sends, answers at once."""
+
+    MODEL = "inferno"
+    BACKEND = "ollama"
+
+    def __init__(self) -> None:
+        self.sent: list[list[dict]] = []
+
+    def turn_stream(self, history, on_text, **kwargs):
+        self.sent.append(json.loads(json.dumps(history)))
+        history.append({"role": "assistant", "content": f"answer {len(self.sent)}"})
+        on_text(f"answer {len(self.sent)}")
+        return f"answer {len(self.sent)}"
+
+
+def _action_labels(block) -> list[str]:
+    if block.actions_row is None:
+        return []
+    return [b.text() for b in block.actions_row.findChildren(QPushButton)]
+
+
+class MsgActionsTests(V2Base):
+    def _turn(self, window, text):
+        window.composer.setPlainText(text)
+        window.submit()
+        self.assertTrue(self._wait_until(lambda: window.active_kind is None))
+
+    def test_off_messages_have_no_actions(self) -> None:
+        core = _ChatCore()
+        window = self._window(core=core)
+        try:
+            window.set_mode("chat")
+            window.chat_messages = []
+            window.transcript.clear()
+            self._turn(window, "hello")
+            self.assertTrue(all(_action_labels(b) == [] for b in window.transcript._message_blocks))
+        finally:
+            self._close(window)
+
+    def test_on_copy_edit_regenerate_and_branch(self) -> None:
+        core = _ChatCore()
+        window = self._window(core=core, msgActions=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                window.session_bridge = ui.SessionBridge(desktop_core, Path(tmp))
+                window.set_mode("chat")
+                window.chat_messages = []
+                window.transcript.clear()
+                self._turn(window, "first question")
+                self._turn(window, "second question")
+                user, reply = window.transcript._message_blocks[0], window.transcript._message_blocks[1]
+                self.assertEqual(_action_labels(user), ["Edit", "Copy"])
+                self.assertEqual(_action_labels(reply), ["Copy", "Regenerate", "Branch from here"])
+                _button(reply.actions_row, "Copy").click()
+                self.assertEqual(QApplication.clipboard().text(), "answer 1")
+                # Edit the first question: everything after it is replaced.
+                _button(window.transcript._message_blocks[0].actions_row, "Edit").click()
+                self.assertFalse(window.edit_banner.isHidden())
+                self.assertEqual(window.composer.toPlainText(), "first question")
+                window.composer.setPlainText("first question, edited")
+                window.submit()
+                self.assertTrue(self._wait_until(lambda: window.active_kind is None))
+                self.assertTrue(window.edit_banner.isHidden())
+                self.assertEqual([m["content"] for m in core.sent[-1]], ["first question, edited"])
+                self.assertEqual(len(window.chat_messages), 2)
+                # Regenerate the reply: the same question goes again.
+                _button(window.transcript._message_blocks[1].actions_row, "Regenerate").click()
+                self.assertTrue(self._wait_until(lambda: window.active_kind is None))
+                self.assertEqual([m["content"] for m in core.sent[-1]], ["first question, edited"])
+                self.assertEqual(window.chat_messages[-1]["content"], f"answer {len(core.sent)}")
+                # Branch from the reply: a new saved session with history up to it.
+                _button(window.transcript._message_blocks[1].actions_row, "Branch from here").click()
+                stored = desktop_core.SessionStore(Path(tmp)).list()
+                self.assertEqual(len(stored), 1)
+                self.assertTrue(stored[0].title.startswith("Branch of "))
+                self.assertEqual(len(stored[0].messages), 2)
+                self.assertIn("The original is unchanged.", window.status_label.text())
+                window.set_feature("msgActions", False)
+                self.assertTrue(all(_action_labels(b) == [] for b in window.transcript._message_blocks))
+            finally:
+                self._close(window)
+
+
+class SessionSearchTests(V2Base):
+    def _store(self, tmp):
+        store = desktop_core.SessionStore(Path(tmp))
+        a = Path(tmp) / "alpha"
+        b = Path(tmp) / "beta"
+        a.mkdir()
+        b.mkdir()
+        store.create(title="Login work", workspace=a,
+                     messages=[{"role": "user", "content": "Fix the login redirect loop"}])
+        store.create(title="Auth notes", workspace=b,
+                     messages=[{"role": "assistant", "content": "The redirect lives in auth.py"}])
+        return store
+
+    def test_off_filter_only_matches_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window()
+            try:
+                self._store(tmp)
+                window.session_bridge = ui.SessionBridge(desktop_core, Path(tmp))
+                window.left_rail.session_filter.setText("redirect")
+                self.assertEqual(window.left_rail.session_filter.placeholderText(), "Filter sessions")
+                self.assertTrue(window.left_rail.message_hits.isHidden())
+            finally:
+                self._close(window)
+
+    def test_on_hits_span_projects_highlight_and_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(sessionSearch=True)
+            try:
+                self._store(tmp)
+                window.session_bridge = ui.SessionBridge(desktop_core, Path(tmp))
+                self.assertEqual(window.left_rail.session_filter.placeholderText(), "Search sessions and messages")
+                window.left_rail.session_filter.setText("redirect")
+                hits = window.left_rail.message_hits
+                self.assertFalse(hits.isHidden())
+                self.assertEqual(hits.count(), 2)
+                texts = [hits.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(2)]
+                self.assertTrue(any(t.startswith("alpha · Login work") for t in texts), texts)
+                self.assertTrue(any(t.startswith("beta · Auth notes") for t in texts), texts)
+                widget = hits.itemWidget(hits.item(0))
+                self.assertIn("<b", widget.text())
+                opened: list[str] = []
+                window.load_session = opened.append
+                window.left_rail.hitSelected.disconnect()
+                window.left_rail.hitSelected.connect(window.load_session)
+                hits.itemClicked.emit(hits.item(0))
+                self.assertEqual(len(opened), 1)
+                window.left_rail.session_filter.setText("r")
+                self.assertTrue(hits.isHidden())
+            finally:
+                self._close(window)
+
+
+class UndoTests(V2Base):
+    def _repo(self, root: Path) -> None:
+        run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+        run("init", "-q")
+        run("config", "user.email", "t@example.invalid")
+        run("config", "user.name", "t")
+        (root / "a.txt").write_text("original\n", encoding="utf-8")
+        (root / "b.txt").write_text("keep\n", encoding="utf-8")
+        run("add", ".")
+        run("commit", "-q", "-m", "init")
+        (root / "a.txt").write_text("agent edit\n", encoding="utf-8")
+        (root / "b.txt").write_text("also edited\n", encoding="utf-8")
+
+    def _open(self, window, root) -> None:
+        window.workspace = str(root)
+        window.refresh_workspace()
+        self.assertTrue(self._wait_until(lambda: len((window.current_snapshot or {}).get("changes") or []) == 2))
+
+    def test_off_changes_are_a_plain_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo(Path(tmp))
+            window = self._window()
+            try:
+                self._open(window, Path(tmp))
+                inspector = window.inspector
+                self.assertIsNone(inspector.change_list.itemWidget(inspector.change_list.item(0)))
+                self.assertTrue(inspector.revert_all_button.isHidden())
+            finally:
+                window.workspace = None
+                self._close(window)
+
+    def test_on_revert_one_file_then_undo_checked_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as data:
+            root = Path(tmp)
+            self._repo(root)
+            window = self._window(undo=True)
+            try:
+                window.data_root = Path(data)
+                self._open(window, root)
+                inspector = window.inspector
+                self.assertFalse(inspector.revert_all_button.isHidden())
+                row = inspector.change_list.itemWidget(inspector.change_list.item(0))
+                path = window.current_snapshot["changes"][0]["path"]
+                row.findChild(ui.QToolButton).click()
+                self.assertTrue(self._wait_until(
+                    lambda: (root / path).read_text(encoding="utf-8") in ("original\n", "keep\n")))
+                self.assertTrue(self._wait_until(lambda: not inspector.undo_bar.isHidden()))
+                self.assertEqual(inspector.undo_label.text(), f"Reverted {path}")
+                status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
+                self.assertEqual(len(status.stdout.splitlines()), 1)
+                inspector.undo_button.click()
+                self.assertTrue(self._wait_until(lambda: inspector.undo_bar.isHidden()))
+                status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
+                self.assertEqual(len(status.stdout.splitlines()), 2)
+                self.assertTrue(self._wait_until(lambda: len(window.current_snapshot.get("changes") or []) == 2))
+                inspector.revert_all_button.click()
+                self.assertTrue(self._wait_until(lambda: subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""))
+                self.assertEqual(inspector.undo_label.text(), "Reverted 2 files")
+            finally:
+                window.workspace = None
+                self._close(window)
+
+
+class RulesTests(AgentStreamBase):
+    def test_off_no_rules_tab_and_no_rule_decisions(self) -> None:
+        window = self._window()
+        try:
+            self.assertNotIn("Agent rules", self._tab_labels(self._settings(window)))
+            self.assertIsNone(window._project_rules() if window.feature("rules") else None)
+        finally:
+            self._close(window)
+
+    def test_on_tab_saves_per_project_and_edit_tests_skips_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(rules=True, approvals=True)
+            try:
+                window.workspace = tmp
+                dialog = self._settings(window)
+                self.assertIn("Agent rules", self._tab_labels(dialog))
+                dialog.rule_boxes["editTests"].click()
+                dialog.rule_blocked.setText(".env, secrets/")
+                dialog.rule_blocked.editingFinished.emit()
+                rules = desktop_core.load_rules(window.settings_data, tmp)
+                self.assertTrue(rules["editTests"])
+                self.assertEqual(rules["blocked"], ".env, secrets/")
+                self.assertEqual(desktop_core.load_rules(window.settings_data, tmp + "-other")["editTests"], False)
+                process = _FakeProcess()
+                window.harness_process = process
+                window.active_kind = "agent"
+                window._agent_stream = True
+                window._agent_rules = window._project_rules()
+                window.stream_block = window.transcript.add_message("assistant", "")
+                request = json.loads(FIXTURE_LINES[3])
+                request["request"]["input"]["file_path"] = str(Path(tmp) / "tests" / "test_a.py")
+                window._handle_agent_line(json.dumps(request))
+                self.assertEqual(_cards(window, "wants to edit"), [])
+                self.assertEqual(process.written[-1]["response"]["response"]["behavior"], "allow")
+                request["request_id"] = "r2"
+                request["request"]["input"]["file_path"] = str(Path(tmp) / ".env")
+                window._handle_agent_line(json.dumps(request))
+                self.assertEqual(process.written[-1]["response"]["response"]["behavior"], "deny")
+                denials = desktop_core.agent_rule_denials(rules)
+                self.assertIn("edit(/.env)", denials)
+            finally:
+                window.active_kind = None
+                window.workspace = None
+                self._close(window)
+
+
+class PresetsTests(V2Base):
+    def _turn(self, window, text):
+        window.composer.setPlainText(text)
+        window.submit()
+        self.assertTrue(self._wait_until(lambda: window.active_kind is None))
+
+    def test_off_no_chip_and_no_system_prompt(self) -> None:
+        core = _ChatCore()
+        window = self._window(core=core)
+        try:
+            window.set_mode("chat")
+            self.assertTrue(window.preset_chip.isHidden())
+            self._turn(window, "hi")
+            self.assertNotIn("system", [m["role"] for m in core.sent[-1]])
+        finally:
+            self._close(window)
+
+    def test_on_chip_menu_editor_and_the_prompt_is_sent_not_stored(self) -> None:
+        core = _ChatCore()
+        window = self._window(core=core, presets=True)
+        try:
+            window.set_mode("chat")
+            self.assertFalse(window.preset_chip.isHidden())
+            self.assertEqual(window.preset_chip.text(), "Default")
+            names = [a.text() for a in window.preset_menu.actions() if a.text()]
+            self.assertIn("Edit presets…", names)
+            self.assertTrue(any(n.startswith("Concise") for n in names))
+            next(a for a in window.preset_menu.actions() if a.text().startswith("Concise")).trigger()
+            self.assertEqual(window.preset_chip.text(), "Concise")
+            self._turn(window, "hi")
+            self.assertEqual(core.sent[-1][0]["role"], "system")
+            self.assertTrue(core.sent[-1][0]["content"].startswith("Answer in as few words"))
+            self.assertNotIn("system", [m["role"] for m in window.chat_messages])
+            dialog = self._settings(window)
+            self.assertIn("Presets", self._tab_labels(dialog))
+            dialog.preset_editor.setPlainText("Only haiku.")
+            self._turn(window, "again")
+            self.assertEqual(core.sent[-1][0]["content"], "Only haiku.")
+            dialog.preset_reset.click()
+            self.assertTrue(dialog.preset_editor.toPlainText().startswith("Answer in as few words"))
+            window.set_mode("agent")
+            self.assertTrue(window.preset_chip.isHidden())
+        finally:
+            self._close(window)
+
+
 if __name__ == "__main__":
     unittest.main()
