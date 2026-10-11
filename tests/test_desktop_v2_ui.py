@@ -652,5 +652,263 @@ class ContextMeterTests(V2Base):
             self._close(window)
 
 
+class PaletteTests(V2Base):
+    def test_off_no_button_and_ctrl_k_does_nothing(self) -> None:
+        window = self._window()
+        try:
+            window.resize(1440, 900)
+            self.app.processEvents()
+            self.assertTrue(window.palette_button.isHidden())
+            window.open_palette()
+            self.assertFalse(hasattr(window, "_palette"))
+        finally:
+            self._close(window)
+
+    def test_on_four_groups_keys_choose_and_focus_returns(self) -> None:
+        window = self._window(palette=True)
+        try:
+            window.resize(1440, 900)
+            self.app.processEvents()
+            self.assertFalse(window.palette_button.isHidden())
+            window.resize(900, 800)
+            self.app.processEvents()
+            self.assertTrue(window.palette_button.isHidden())    # below 1000px
+            window.composer.setFocus()
+            self.app.processEvents()
+            window.open_palette()
+            palette = window._palette
+            self.assertTrue(self._wait_until(palette.isVisible))
+            headers = [palette.list.item(i).text() for i in range(palette.list.count())
+                       if not palette.list.item(i).flags() & Qt.ItemFlag.ItemIsEnabled]
+            self.assertEqual(headers, ["PROJECTS", "SESSIONS", "MODEL POWER", "COMMANDS"])
+            palette.search.setText("zzzz-no-match")
+            self.assertFalse(palette.empty.isHidden())
+            palette.search.setText("new task")
+            self.assertTrue(palette.list.currentItem().text().startswith("New task"))
+            called: list[bool] = []
+            window.new_task = lambda save_current=True: called.append(True)
+            QApplication.sendEvent(palette.search, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Return,
+                                                             Qt.KeyboardModifier.NoModifier))
+            self.assertTrue(self._wait_until(lambda: called))
+            self.assertTrue(self._wait_until(lambda: window.focusWidget() is window.composer))
+        finally:
+            self._close(window)
+
+    def test_escape_closes_the_palette_without_stopping_anything(self) -> None:
+        window = self._window(palette=True)
+        try:
+            stops: list[bool] = []
+            window.stop_active = lambda: stops.append(True)
+            window.open_palette()
+            palette = window._palette
+            self.assertTrue(self._wait_until(palette.isVisible))
+            palette.search.setText("mod")
+            QApplication.sendEvent(palette.search, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Down,
+                                                             Qt.KeyboardModifier.NoModifier))
+            QApplication.sendEvent(palette.search, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                                             Qt.KeyboardModifier.NoModifier))
+            self.assertTrue(self._wait_until(lambda: not palette.isVisible()))
+            self.assertEqual(stops, [])
+        finally:
+            self._close(window)
+
+
+class KeyboardTests(V2Base):
+    def test_off_no_keyboard_tab_and_question_mark_is_inert(self) -> None:
+        window = self._window()
+        try:
+            self.assertNotIn("Keyboard", self._tab_labels(self._settings(window)))
+            opened: list[str] = []
+            window.open_settings_tab = opened.append
+            window.setFocus()
+            window._question_shortcut()
+            self.assertEqual(opened, [])
+        finally:
+            self._close(window)
+
+    def test_on_tab_lists_real_shortcuts_and_question_opens_it(self) -> None:
+        window = self._window(keyboard=True)
+        try:
+            dialog = self._settings(window)
+            self.assertIn("Keyboard", self._tab_labels(dialog))
+            self.assertNotIn("Command palette", dialog.keyboard_rows)   # palette is off
+            self.assertIn("New task", dialog.keyboard_rows)
+            window.set_feature("palette", True)
+            window.set_feature("keyboard", False)
+            window.set_feature("keyboard", True)
+            self.assertIn("Command palette", dialog.keyboard_rows)
+            opened: list[str] = []
+            window.open_settings_tab = opened.append
+            window.composer.setFocus()
+            self.app.processEvents()
+            window._question_shortcut()
+            self.assertEqual(opened, [])                 # typing a "?" in the composer
+            window.inspector.activity.setFocus()
+            self.app.processEvents()
+            window._question_shortcut()
+            self.assertEqual(opened, ["Keyboard"])
+            self.assertTrue(ui._SYSTEM_MOTION_PROBE)
+        finally:
+            ui.set_system_motion_probe(False)
+            self._close(window)
+
+
+class BoundaryTests(V2Base):
+    def _counted(self, window, tmp):
+        window.egress_path = Path(tmp) / "net.jsonl"
+        window._egress_counts = None
+
+    def test_off_no_map_and_nothing_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window()
+            try:
+                self._counted(window, tmp)
+                self.assertTrue(window.boundary_button.isHidden())
+                window.toggle_boundary(True)
+                self.assertTrue(window.boundary_panel.isHidden())
+                window._chat_event({"kind": "tool_finished", "name": "web_search", "results": 2})
+                self.assertFalse(window.egress_path.exists())
+            finally:
+                self._close(window)
+
+    def test_on_counts_real_searches_lights_the_path_and_fills_the_panel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(boundary=True)
+            try:
+                self._counted(window, tmp)
+                window.resize(1440, 900)
+                self.app.processEvents()
+                self.assertFalse(window.boundary_button.isHidden())
+                window._chat_event({"kind": "tool_started", "name": "web_search", "arguments": {"query": "q"}})
+                self.assertTrue(window.boundary_button._searching)
+                window._chat_event({"kind": "tool_finished", "name": "web_search", "results": 2})
+                self.assertFalse(window.boundary_button._searching)
+                self.assertEqual(window.boundary_button._label, "1 search today")
+                self.assertTrue(window.boundary_button._open)          # demo Tor is verified
+                window.toggle_boundary()
+                panel = window.boundary_panel
+                self.assertFalse(panel.isHidden())
+                self.assertIn("Today: 1 search query left over Tor · 0 direct downloads", panel.receipt.text())
+                self.assertEqual(panel.node_state.text(), "Circuit verified")
+                self.assertEqual(panel.machine_rows["Disk"].text(), "4 observed changes")
+                self.assertEqual(panel.outside_rows["Downloads"].text(), "Direct, only after you confirm")
+                entries = desktop_core.EgressLog(window.egress_path).entries()
+                self.assertEqual([e["what"] for e in entries], ["Chat search · DuckDuckGo onion service"])
+                self.assertNotIn("q", json.dumps(entries).replace("query", ""))
+                window.resize(1000, 800)
+                self.app.processEvents()
+                self.assertFalse(window.boundary_button._show_label)  # label only at 1200px+
+                window.resize(840, 800)
+                self.app.processEvents()
+                self.assertTrue(window.boundary_button.isHidden())     # button only at 860px+
+                window.set_feature("boundary", False)
+                self.assertTrue(panel.isHidden())
+            finally:
+                self._close(window)
+
+
+class ZonesTests(V2Base):
+    def test_off_activity_is_one_list(self) -> None:
+        window = self._window()
+        try:
+            self.assertFalse(window.inspector.activity.isHidden())
+            self.assertTrue(window.inspector.lanes.isHidden())
+        finally:
+            self._close(window)
+
+    def test_on_events_land_in_their_lanes(self) -> None:
+        window = self._window(zones=True)
+        try:
+            inspector = window.inspector
+            self.assertTrue(inspector.activity.isHidden())
+            self.assertFalse(inspector.lanes.isHidden())
+            before = {zone: lane.count() for zone, lane in inspector.lane_lists.items()}
+            inspector.append_activity("Project refreshed; 0 observed change(s)")
+            inspector.append_activity("Background Tor path verified")
+            inspector.append_activity("Chat search sent", "outside")
+            after = {zone: lane.count() for zone, lane in inspector.lane_lists.items()}
+            self.assertEqual({z: after[z] - before[z] for z in after}, {"machine": 1, "tor": 1, "outside": 1})
+            self.assertTrue(inspector.lane_titles["outside"].text().startswith("OUTSIDE · "))
+        finally:
+            self._close(window)
+
+
+class ProvenanceTests(V2Base):
+    def _reply(self, window, searches=()):
+        window.active_kind = "chat"
+        window._turn_searches = list(searches)
+        window.stream_block = window.transcript.add_message("assistant", "")
+        window._chat_complete({"answer": "Hi", "history": [], "stopped": False})
+
+    def test_off_no_chips(self) -> None:
+        window = self._window()
+        try:
+            self._reply(window)
+            self.assertEqual(window.transcript.content.findChildren(ui.ProvenanceChips), [])
+        finally:
+            self._close(window)
+
+    def test_on_machine_chip_and_real_search_chip(self) -> None:
+        window = self._window(provenance=True)
+        try:
+            self._reply(window)
+            chips = window.transcript.content.findChildren(ui.ProvenanceChips)[-1]
+            self.assertEqual([l.text() for l in chips.findChildren(ui.QLabel)],
+                             ["Answered on this machine · INFERNO"])
+            window._start_chat = lambda allow_search=False: None
+            self._reply(window, [{"results": 3, "domains": ["rubygems.org", "github.com"]}])
+            chips = window.transcript.content.findChildren(ui.ProvenanceChips)[-1]
+            labels = chips.findChildren(ui.QLabel)
+            self.assertEqual(labels[1].text(), "1 Tor search · 3 results")
+            self.assertIn("github.com", labels[1].toolTip())
+        finally:
+            self._close(window)
+
+
+class NetlogTests(V2Base):
+    def test_off_no_export_button_and_nothing_logged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window()
+            try:
+                window.egress_path = Path(tmp) / "net.jsonl"
+                self.assertTrue(window.inspector.netlog_button.isHidden())
+                window._egress("Tor", "Update check · github.com")
+                self.assertFalse(window.egress_path.exists())
+            finally:
+                self._close(window)
+
+    def test_on_table_and_exports_hold_no_prompt_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core = SimpleNamespace(MODEL="inferno", BACKEND="onionmind", NET_LOG=str(Path(tmp) / "agent-net.log"))
+            today = time.strftime("%Y-%m-%d")
+            Path(core.NET_LOG).write_text(f"{today} 10:00:00 tor pypi.org:443\n", encoding="utf-8")
+            window = self._window(core=core, netlog=True)
+            try:
+                window.egress_path = Path(tmp) / "net.jsonl"
+                self.assertFalse(window.inspector.netlog_button.isHidden())
+                window.composer.setPlainText("my secret prompt")
+                window._chat_event({"kind": "tool_finished", "name": "web_search", "results": 1})
+                window._egress("Direct", "Model download · registry.ollama.ai")
+                rows = window.network_log_rows()
+                self.assertEqual([r["route"] for r in rows], ["Tor", "Tor", "Direct"])
+                dialog = ui.NetworkLogDialog(rows, desktop_core, window)
+                self.assertEqual(dialog.table.rowCount(), 3)
+                self.assertEqual(dialog.table.item(0, 1).text(), "Tor")
+                saved_json = dialog.save("json", str(Path(tmp) / "out.json"))
+                saved_csv = dialog.save("csv", str(Path(tmp) / "out.csv"))
+                for path in (saved_json, saved_csv):
+                    text = Path(path).read_text(encoding="utf-8")
+                    self.assertNotIn("secret", text)
+                    self.assertIn("registry.ollama.ai", text)
+                self.assertEqual(len(json.loads(Path(saved_json).read_text())), 3)
+                self.assertTrue(dialog.feedback.text().endswith("· 3 entries"))
+                empty = ui.NetworkLogDialog([], desktop_core, window)
+                self.assertFalse(empty.empty.isHidden())
+                for d in (dialog, empty):
+                    d.deleteLater()
+            finally:
+                self._close(window)
+
+
 if __name__ == "__main__":
     unittest.main()

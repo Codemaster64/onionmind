@@ -7896,6 +7896,8 @@ class CommandPalette(QDialog):
         target = self._return_focus
         if target is not None:
             try:
+                owner = target.window()
+                owner.activateWindow()
                 target.setFocus(Qt.FocusReason.PopupFocusReason)
             except RuntimeError:
                 pass
