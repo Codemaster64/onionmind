@@ -5072,18 +5072,28 @@ def _request_path(tool_input: Mapping[str, Any]) -> str:
 
 
 def _relative_to(path: str, workspace: Any) -> str:
+    """path relative to the project when it lies inside it, else as given.
+
+    Compared as normalised strings first, so a forward-slash path from the
+    agent still matches on Windows (where "/work/x" is not "absolute"), and
+    case-insensitively there; then through the resolved filesystem paths."""
     if not path:
         return ""
     root = _as_text_core(workspace)
-    try:
-        candidate = Path(path)
-        if root and candidate.is_absolute():
-            return candidate.resolve(strict=False).relative_to(
-                Path(root).resolve(strict=False)
-            ).as_posix()
-    except (OSError, ValueError):
-        return candidate.as_posix()
-    return Path(path).as_posix()
+    text = path.replace("\\", "/")
+    base = root.replace("\\", "/").rstrip("/")
+    if base:
+        fold = (lambda value: value.casefold()) if os.name == "nt" else (lambda value: value)
+        if fold(text).startswith(fold(base) + "/"):
+            return text[len(base) + 1:]
+        try:
+            candidate = Path(path)
+            if candidate.is_absolute():
+                return candidate.resolve(strict=False).relative_to(
+                    Path(root).resolve(strict=False)).as_posix()
+        except (OSError, ValueError):
+            pass
+    return text
 
 
 def _strip_dot_slash(path: str) -> str:

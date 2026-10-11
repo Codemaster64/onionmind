@@ -1074,7 +1074,9 @@ class UndoTests(V2Base):
         (root / "b.txt").write_text("also edited\n", encoding="utf-8")
 
     def _open(self, window, root) -> None:
-        window.workspace = str(root)
+        # Resolved, as select_workspace stores it: a Windows temp folder can
+        # carry an 8.3 short name that would not match the snapshot's root.
+        window.workspace = str(Path(root).resolve())
         window.refresh_workspace()
         self.assertTrue(self._wait_until(lambda: len((window.current_snapshot or {}).get("changes") or []) == 2))
 

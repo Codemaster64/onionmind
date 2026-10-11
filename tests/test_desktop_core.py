@@ -1079,6 +1079,16 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             read_only = dict(rules, readOnly=True)
             self.assertEqual(core.rule_decision(read_only, "write_file", write("tests/a.py"), tmp)[0], "deny")
 
+    def test_agent_paths_are_made_relative_on_any_platform(self) -> None:
+        self.assertEqual(core.describe_tool_request("write_file", {"file_path": "/work/demo/a/b.py"}, "/work/demo"),
+                         "edit a/b.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "C:\\proj\\src\\x.py"}, "C:\\proj"),
+                         "edit src/x.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "/elsewhere/x.py"}, "/work/demo"),
+                         "edit /elsewhere/x.py")
+        self.assertEqual(core.describe_tool_request("edit", {"file_path": "/work/demo-other/x.py"}, "/work/demo"),
+                         "edit /work/demo-other/x.py")
+
     def test_blocked_paths_become_agent_deny_rules_for_reads_and_edits(self) -> None:
         denials = core.agent_rule_denials({"blocked": ".env, config/credentials.yml.enc, ./x/"})
         self.assertIn("read_file(/.env)", denials)
