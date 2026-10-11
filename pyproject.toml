@@ -32,9 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tui = [
-    "textual>=1,<9",
-]
 desktop-build = [
     "Nuitka>=4.1,<5",
     "ordered-set>=4.1,<5",
@@ -47,4 +44,4 @@ Repository = "https://github.com/Codemaster64/onionmind"
 
 [tool.setuptools]
 include-package-data = false
-py-modules = ["onionmind", "onionmind_desktop", "onionmind_desktop_core", "onionmind_tui"]
+py-modules = ["onionmind", "onionmind_desktop", "onionmind_desktop_core"]

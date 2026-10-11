@@ -257,23 +257,6 @@ names are reserved. What each name stands for:
 - **PYRE** — **legacy / collector**: archived and special-edition models and
   older versions, for retro access and research archives. *“Rise.”*
 
-### In the terminal
-
-`onionmind_tui.py` is a terminal front end over the same core: sessions
-sidebar, streamed Markdown replies with the same reasoning filter, a model
-picker, one-turn Tor search, and the Nocturne palette in dark and light.
-Sessions live in the desktop's data folder, so either front end can open them.
-
-```bash
-pip install textual
-python onionmind_tui.py            # F1 for keys; ctrl+p for the command palette
-```
-
-Like the workbench, launch starts no network service; search is armed per turn
-(`ctrl+s` or `/search <question>`) and fails closed without a verified circuit.
-*Verified on Linux against a stub model server (`tests/test_tui.py` drives it
-headless); not yet run against a live model or on Windows/macOS.*
-
 ---
 
 ## Matchstick — the amnesic USB stick
