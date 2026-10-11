@@ -655,7 +655,9 @@ class DesktopUiTests(unittest.TestCase):
                 return_value=([str(attachment)], ""),
             ):
                 attach_button.click()
-            self.assertEqual(window.attachments, [str(attachment.resolve())])
+            # abspath, as add_attachments stores it: resolve() would expand a
+            # Windows 8.3 temp name (RUNNER~1) that the window keeps as given.
+            self.assertEqual(window.attachments, [os.path.abspath(attachment)])
             self.assertTrue(window.send_button.isEnabled())
             clear_button = next(
                 button

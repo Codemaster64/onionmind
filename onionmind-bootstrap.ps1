@@ -128,8 +128,13 @@ function Get-LocalOllamaModels {
 
     $Names = New-Object "System.Collections.Generic.List[string]"
     $Seen = @{}
-    foreach ($Root in $Roots) {
-        $ManifestRoot = Join-Path $Root "manifests"
+    # "manifests" before Ollama 0.40, "manifests-v2" from it on; both end in
+    # <name>\<tag>, which is all this reads.
+    $ManifestRoots = foreach ($Root in $Roots) {
+        Join-Path $Root "manifests"
+        Join-Path $Root "manifests-v2"
+    }
+    foreach ($ManifestRoot in $ManifestRoots) {
         if (-not (Test-Path -LiteralPath $ManifestRoot -PathType Container)) { continue }
         $Files = @(
             Get-ChildItem -LiteralPath $ManifestRoot -File -Recurse -ErrorAction SilentlyContinue |

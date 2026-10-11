@@ -9,6 +9,7 @@ malformed JSON-RPC on stdout.
 Run: python3 tests/test_coding_agent.py
 """
 import io
+import contextlib
 import json
 import os
 import pathlib
@@ -385,10 +386,11 @@ class HarnessAgentTests(unittest.TestCase):
         # The agent brings up the tor.exe this file owns - hidden, never
         # firefox.exe - and only then verifies the circuit.
         order = []
-        with mock.patch.object(onionmind, "start_tor_hidden",
+        with tempfile.TemporaryDirectory() as root, \
+             mock.patch.object(onionmind, "start_tor_hidden",
                                side_effect=lambda: order.append("hidden")),              mock.patch.object(onionmind, "tor_check",
-                               side_effect=lambda: order.append("check")),              mock.patch.object(onionmind, "start_tor_bridge", return_value=9999),              mock.patch.object(onionmind, "NET_LOG", os.devnull),              mock.patch("subprocess.call", return_value=0):
-            onionmind.run_agent("do a thing")
+                               side_effect=lambda: order.append("check")),              mock.patch.object(onionmind, "start_tor_bridge", return_value=9999),              mock.patch.object(onionmind, "NET_LOG", os.path.join(root, "agent-net.log")),              mock.patch("subprocess.call", return_value=0),              no_local_tools(root):
+            onionmind.run_agent("do a thing", workdir=root)
         self.assertEqual(order, ["hidden", "check"])
 
     def test_every_child_is_pointed_at_the_tor_bridge(self):
@@ -437,11 +439,28 @@ class HarnessAgentTests(unittest.TestCase):
                 os.environ.pop("ONIONMIND_DSH_PATCH", None)
                 if value is not None:
                     os.environ["ONIONMIND_DSH_PATCH"] = value
-                self.assertNotIn("--patch", onionmind.agent_argv("m", "t"))
+                with mock.patch.object(onionmind, "qwen_launcher", return_value=["qwen"]):
+                    self.assertNotIn("--patch", onionmind.agent_argv("m", "t"))
 
     def test_no_task_means_an_interactive_session(self):
-        argv = onionmind.agent_argv("some-model")
+        with mock.patch.object(onionmind, "qwen_launcher", return_value=["qwen"]):
+            argv = onionmind.agent_argv("some-model")
         self.assertNotIn("headless", argv)
+
+
+@contextlib.contextmanager
+def no_local_tools(root):
+    """Stand in for the model server and Qwen Code, which a CI runner lacks,
+    and keep qwen_setup's user settings inside root."""
+    home = os.path.join(root, "home")
+    os.makedirs(home, exist_ok=True)
+    with mock.patch.object(onionmind, "detect_backend"), \
+         mock.patch.object(onionmind, "BACKEND", "ollama"), \
+         mock.patch.object(onionmind, "_code_model", lambda ctx: onionmind.MODEL), \
+         mock.patch.object(onionmind, "code_ctx", return_value=onionmind.CODE_CTX), \
+         mock.patch.object(onionmind, "qwen_launcher", return_value=["qwen"]), \
+         mock.patch("os.path.expanduser", return_value=home):
+        yield
 
 
 def setup_into(root, **kwargs):
