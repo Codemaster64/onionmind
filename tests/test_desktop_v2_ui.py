@@ -74,10 +74,23 @@ class V2Base(unittest.TestCase):
         widget.close()
         widget.deleteLater()
         self.app.processEvents()
+        # Really destroy it: a window left alive is re-polished by every later
+        # application style sheet change and slows each following test.
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        self.app.processEvents()
 
     def _settings(self, window) -> "ui.SettingsDialog":
         dialog = ui.SettingsDialog(window.data_root, "limitation", None, window)
-        self.addCleanup(lambda: (dialog.done(0), dialog.deleteLater()))
+
+        def close() -> None:
+            try:
+                dialog.done(0)
+                dialog.deleteLater()
+            except RuntimeError:
+                pass                             # already gone with its window
+
+        self.addCleanup(close)
         return dialog
 
     @staticmethod
@@ -1200,6 +1213,272 @@ class PresetsTests(V2Base):
             window.set_mode("agent")
             self.assertTrue(window.preset_chip.isHidden())
         finally:
+            self._close(window)
+
+
+def _fault_card(window):
+    return window._fault_card
+
+
+class ErrorsTests(V2Base):
+    def test_off_failures_keep_the_retry_button_and_no_card(self) -> None:
+        window = self._window()
+        try:
+            window.active_kind = "chat"
+            window.stream_block = window.transcript.add_message("assistant", "")
+            window._chat_failed("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+            self.assertIsNone(window._fault)
+            self.assertFalse(window.retry_button.isHidden())
+            self.assertTrue(window.fault_host.isHidden())
+        finally:
+            self._close(window)
+
+    def test_on_each_real_failure_gets_its_card_and_blocks_sending(self) -> None:
+        window = self._window(errors=True)
+        try:
+            for message, kind, title in (
+                ("Ollama is not running on 127.0.0.1:11434. Start it, then retry.", "server", "The local model server stopped"),
+                ('Ollama returned 500: {"error":"CUDA error: out of memory"}', "oom", "Not enough GPU memory for INFERNO"),
+            ):
+                window.active_kind = "chat"
+                window.stream_block = window.transcript.add_message("assistant", "")
+                window._chat_failed(message)
+                self.assertEqual(window._fault, kind)
+                self.assertEqual(_fault_card(window).title_label.text(), title)
+                self.assertTrue(window.retry_button.isHidden())
+                window.composer.setPlainText("hello")
+                window.submit()
+                self.assertEqual(window.status_label.text(), window.FAULTS[kind]["status"])
+            window._report_error("x", "tor")
+            self.assertEqual(_fault_card(window).title_label.text(), "The Tor circuit failed")
+            window.set_mode("agent")
+            _button(_fault_card(window), "Continue without search").click()
+            self.assertIsNone(window._fault)
+            window._report_error("Agent runtime crashed", "node")
+            _button(_fault_card(window), "Switch to Chat").click()
+            self.assertEqual(window.mode, "chat")
+            self.assertTrue(window.fault_host.isHidden())
+        finally:
+            window.active_kind = None
+            self._close(window)
+
+    def test_restart_model_server_reprobes_for_real_and_clears(self) -> None:
+        probes: list[bool] = []
+        core = SimpleNamespace(MODEL="inferno", BACKEND="ollama", detect_backend=lambda: probes.append(True),
+                               installed_models=lambda: ["inferno"])
+        window = self._window(core=core, errors=True)
+        try:
+            window._report_error("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+            _button(_fault_card(window), "Restart model server").click()
+            self.assertTrue(self._wait_until(lambda: window._fault is None))
+            self.assertEqual(probes, [True])
+            self.assertEqual(window.status_label.text(), "Model server restarted. Onionmind is ready.")
+        finally:
+            self._close(window)
+
+    def test_out_of_memory_switches_to_a_lighter_installed_tier(self) -> None:
+        window = self._window(errors=True)
+        try:
+            window._model_power = {"sizes": {"inferno": 17, "blaze": 6, "ember": 3}}
+            window._report_error('Ollama returned 500: {"error":"out of memory"}')
+            card = _fault_card(window)
+            self.assertIn("Switch to BLAZE", [b.text() for b in card.findChildren(QPushButton)])
+            _button(card, "Switch to BLAZE").click()
+            self.assertEqual(window.current_model_id(), "blaze")
+            self.assertIsNone(window._fault)
+        finally:
+            self._close(window)
+
+
+class EmptyTests(V2Base):
+    def _fresh(self, window):
+        window.chat_messages = []
+        window.new_task(save_current=False)
+
+    def test_off_no_starters_banner_or_empty_texts(self) -> None:
+        window = self._window()
+        try:
+            self._fresh(window)
+            self.assertIsNone(window._starters)
+            window._model_probe_complete(("ollama", []))
+            self.assertTrue(window.fault_host.isHidden())
+            window.left_rail.set_sessions([])
+            self.assertTrue(window.left_rail.no_sessions.isHidden())
+        finally:
+            self._close(window)
+
+    def test_on_starters_send_and_no_model_banner_blocks(self) -> None:
+        window = self._window(empty=True)
+        try:
+            sent: list[str] = []
+            window.set_mode("chat")
+            window._start_chat = lambda allow_search=False: sent.append(window.chat_messages[-1]["content"])
+            window.set_feature("webAsk", False)
+            self._fresh(window)
+            self.assertIsNotNone(window._starters)
+            _button(window._starters, "Explain how this project is structured").click()
+            self.assertEqual(sent, ["Explain how this project is structured"])
+            window.left_rail.set_sessions([])
+            self.assertFalse(window.left_rail.no_sessions.isHidden())
+            window._model_probe_complete(("ollama", []))
+            self.assertFalse(window.fault_host.isHidden())
+            banner = window._no_model_banner
+            self.assertIn("No model is installed yet", banner.title_label.text())
+            window.active_kind = None
+            window.composer.setPlainText("hi")
+            window.submit()
+            self.assertEqual(window.status_label.text(), "No model is installed yet. Choose one in Models.")
+            window._model_probe_complete(("ollama", ["inferno"]))
+            self.assertTrue(window.fault_host.isHidden())
+            window.inspector.update_snapshot({"root": "/x", "is_git": True, "changes": [], "diff": ""})
+            self.assertTrue(window.inspector.diff_view.toPlainText().startswith("Nothing has changed in this project yet."))
+        finally:
+            self._close(window)
+
+
+class SetupTests(V2Base):
+    def test_off_run_setup_explains_and_nothing_opens(self) -> None:
+        window = self._window()
+        try:
+            window.open_setup()
+            self.assertTrue(window.setup_overlay.isHidden())
+            self.assertIn("First-launch setup", window.status_label.text())
+        finally:
+            self._close(window)
+
+    def test_on_five_real_steps_and_finish(self) -> None:
+        core = SimpleNamespace(MODEL="inferno", BACKEND="ollama", detect_backend=lambda: None,
+                               tor_proxy_port=lambda: None)
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(desktop_core, "gpu_memory_mb", return_value=(100, 4096)), \
+             mock.patch.object(desktop_core, "gpu_name", return_value="Test GPU"), \
+             mock.patch.object(desktop_core, "node_version", return_value="v24.1.0"):
+            window = self._window(core=core, setup=True)
+            try:
+                dialog = self._settings(window)
+                self.assertFalse(dialog._feature_sections["setup"].isHidden())
+                window.open_setup()
+                overlay = window.setup_overlay
+                self.assertFalse(overlay.isHidden())
+                self.assertEqual(overlay.title.text(), "Welcome to Onionmind")
+                overlay.next_button.click()
+                self.assertTrue(self._wait_until(lambda: len(overlay.checks) == 4))
+                texts = [row.text() for row in overlay.check_rows.values()]
+                self.assertIn("✓  Graphics memory    4 GB GPU · Test GPU", texts)
+                self.assertIn("✓  Agent runtime    Node.js 24.1.0 found", texts)
+                self.assertIn("·  Tor    Not running yet. That’s fine.", texts)
+                self.assertEqual(overlay.body.text(), "Everything Onionmind needs is on this machine.")
+                overlay.next_button.click()
+                self.assertEqual(overlay.title.text(), "Choose a model")
+                overlay.next_button.click()
+                self.assertEqual(overlay.next_button.text(), "Continue")   # demo Tor is verified
+                overlay.next_button.click()
+                self.assertEqual(overlay.title.text(), "Open a project")
+                overlay.set_project(tmp)
+                self.assertEqual(overlay.next_button.text(), f"Open {Path(tmp).name}")
+                opened: list[str] = []
+                window.select_workspace = opened.append
+                overlay.next_button.click()
+                self.assertEqual(opened, [tmp])
+                self.assertTrue(overlay.isHidden())
+                self.assertTrue(window.settings_data["setup_done"])
+                self.assertEqual(window.status_label.text(), "Setup finished. Onionmind is ready.")
+            finally:
+                self._close(window)
+
+
+class LockTests(V2Base):
+    def test_off_no_lock_button_section_or_lock(self) -> None:
+        window = self._window()
+        try:
+            window.resize(1440, 900)
+            self.app.processEvents()
+            self.assertTrue(window.lock_button.isHidden())
+            self.assertTrue(self._settings(window)._feature_sections["lock"].isHidden())
+            self.assertFalse(window.lock_now())
+        finally:
+            self._close(window)
+
+    def test_on_passphrase_lock_unlock_idle_and_auto_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(lock=True)
+            try:
+                window.resize(1440, 900)
+                self.app.processEvents()
+                self.assertFalse(window.lock_button.isHidden())
+                window.open_settings_tab = lambda label: None
+                self.assertFalse(window.lock_now())            # no passphrase yet: no lock
+                dialog = self._settings(window)
+                self.assertFalse(dialog._feature_sections["lock"].isHidden())
+                dialog.passphrase_field.setText("open sesame")
+                dialog.passphrase_button.click()
+                self.assertNotIn("open sesame", json.dumps(window.settings_data))
+                self.assertTrue(window.lock_now())
+                overlay = window.lock_overlay
+                self.assertFalse(overlay.isHidden())
+                overlay.unlock_button.click()
+                self.assertEqual(overlay.error.text(), "Enter your passphrase to unlock.")
+                overlay.passphrase.setText("wrong")
+                overlay.unlock_button.click()
+                self.assertFalse(overlay.isHidden())
+                overlay.passphrase.setText("open sesame")
+                overlay.unlock_button.click()
+                self.assertTrue(overlay.isHidden())
+                window.set_lock_setting("lock_after", 5)
+                self.assertTrue(window.idle_timer.isActive())
+                window._last_input -= 6 * 60
+                window._check_idle()
+                self.assertFalse(overlay.isHidden())
+                overlay.passphrase.setText("open sesame")
+                overlay.try_unlock()
+                store = desktop_core.SessionStore(Path(tmp))
+                old = store.create(title="Old", messages=[{"role": "user", "content": "x"}])
+                payload = json.loads((Path(tmp) / f"{old.id}.json").read_text())
+                payload["updated_at"] = "2020-01-01T00:00:00+00:00"
+                (Path(tmp) / f"{old.id}.json").write_text(json.dumps(payload))
+                store.create(title="New", messages=[{"role": "user", "content": "y"}])
+                window.session_bridge = ui.SessionBridge(desktop_core, Path(tmp))
+                dialog.auto_delete_combo.setCurrentIndex(dialog.auto_delete_combo.findData(7))
+                self.assertEqual(dialog.auto_delete_note.text(),
+                                 "1 conversation is older than 7 days and will be deleted.")
+                dialog.delete_now.click()
+                self.assertEqual([s.title for s in store.list()], ["New"])
+            finally:
+                window.set_lock_setting("lock_after", 0)
+                self._close(window)
+
+
+class AppearanceTests(V2Base):
+    def test_off_dark_100_percent_and_no_notifications(self) -> None:
+        window = self._window()
+        try:
+            self.assertEqual(ui.current_theme(), "dark")
+            self.assertTrue(self._settings(window)._feature_sections["appearance"].isHidden())
+            window._notify("Onionmind replied", "x")
+            self.assertIsNone(window.last_notification)
+        finally:
+            self._close(window)
+
+    def test_on_light_theme_size_and_a_real_notification(self) -> None:
+        window = self._window(appearance=True)
+        try:
+            dialog = self._settings(window)
+            self.assertFalse(dialog._feature_sections["appearance"].isHidden())
+            dialog.theme_combo.setCurrentIndex(dialog.theme_combo.findData("light"))
+            self.assertEqual(ui.current_theme(), "light")
+            self.assertIn(ui.NOCTURNE_LIGHT["bg"], self.app.styleSheet())
+            dialog.ui_scale_combo.setCurrentIndex(dialog.ui_scale_combo.findData(125))
+            self.assertEqual(window._ui_scale_factor(), 1.25)
+            dialog.notify_box.setChecked(True)
+            with mock.patch.object(window, "isActiveWindow", return_value=False):
+                window._notify("Agent run finished", "Task · demo")
+            self.assertEqual(window.last_notification, ("Agent run finished", "Task · demo"))
+            window.set_feature("appearance", False)
+            self.assertEqual(ui.current_theme(), "dark")
+            self.assertEqual(window._ui_scale_factor(), 1.0)
+            self.assertNotIn(ui.NOCTURNE_LIGHT["bg"], self.app.styleSheet())
+        finally:
+            ui.set_theme("dark")
             self._close(window)
 
 
