@@ -12,7 +12,7 @@ there is nothing to buy.
   python -m unittest discover -s tests -p "test_*.py"
   python -m pytest ollama-tor/tests
   (cd android && ./gradlew :core:test :app:testDebugUnitTest)  # Kotlin suites; needs a JDK 17
-  bash -n install-onionmind.sh install-onionmind-android.sh matchstick.sh usb/build.sh
+  bash -n install-onionmind.sh install-onionmind-android.sh matchstick.sh usb/build.sh onionmind-install.cmd
   ```
 - **The one rule:** `onionmind.py`, the icon and the logo payloads are
   single-sourced — never hand-edit the copies inside installers. Edit the

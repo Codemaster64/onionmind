@@ -51,6 +51,7 @@ class InstallerContractTests(unittest.TestCase):
         be attached to the rolling release AND linked from there.
         """
         downloadable = (
+            "onionmind-install.cmd",
             "onionmind-setup.cmd",
             "install-onionmind.sh",
             "install-onionmind-android.sh",
@@ -101,6 +102,51 @@ class InstallerContractTests(unittest.TestCase):
         for accepted in ("'AMD64'", "'ARM64'"):
             self.assertIn(accepted, setup)
         self.assertIn("there is no 32-bit version to install", setup)
+
+    def test_universal_installer_is_one_file_for_every_platform(self) -> None:
+        """onionmind-install.cmd is a batch file, a POSIX sh script and a
+        PowerShell script at once, and only a dispatcher.
+
+        cmd.exe sees the first line as a label and stops at `exit /b`; sh feeds
+        those lines to `:` as a heredoc; the PowerShell half sits after the sh
+        half's final exit. A single CR breaks sh, so the file must stay LF-only
+        (and .gitattributes must not turn it into CRLF like every other .cmd).
+        """
+        raw = (ROOT / "onionmind-install.cmd").read_bytes()
+        self.assertNotIn(b"\r", raw)
+        raw.decode("ascii")                     # no codepage surprises in cmd.exe
+        text = raw.decode("ascii")
+        self.assertTrue(text.startswith(":<<'BATCH'\n"))
+        batch = text[: text.index("\nBATCH\n")]
+        self.assertIn("exit /b %ERRORLEVEL%", batch)
+        code = [l for l in batch.lower().splitlines() if not l.startswith("rem")]
+        self.assertFalse([l for l in code if "goto" in l or "call :" in l],
+                         "label lookup misbehaves in LF-only batch files")
+        marker = "#__ONIONMIND_INSTALL_PS__"
+        self.assertEqual(text.count(marker), 1, "the PowerShell entry point must be unique")
+        self.assertIn("'#__ONIONMIND_'+'INSTALL_PS__'", batch)
+        self.assertIn("\nexit 0\n", text[: text.index(marker)])
+        self.assertIn("onionmind-install.cmd text eol=lf", self.text(".gitattributes"))
+
+        result = subprocess.run(["sh", "-n", str(ROOT / "onionmind-install.cmd")],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # It hands over rather than re-implementing installs, so every script it
+        # fetches must be a published asset, and the ONIONMIND_MODEL values it
+        # passes must be ones those installers accept.
+        workflow = self.text(".github/workflows/desktop-build.yml")
+        release = workflow[workflow.index("gh release create desktop-latest"):]
+        self.assertIn("onionmind-install.cmd", release)
+        for asset in ("install-onionmind.sh", "install-onionmind-android.sh", "matchstick.sh",
+                      "onionmind-setup.cmd", "matchstick.cmd"):
+            self.assertIn(asset, text)
+            self.assertIn(asset, release)
+        self.assertIn("must be auto, fast or 27b", self.text("install-onionmind.sh"))
+        self.assertIn("must be auto, fast, mobile or 27b", self.text("onionmind-setup.cmd"))
+        self.assertIn("must be auto, lfm, 4b or 9b", self.text("install-onionmind-android.sh"))
+        self.assertIn('MODELS="fast 27b"', text)
+        self.assertIn('MODELS="lfm 4b 9b"', text)
 
     def text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")

@@ -74,7 +74,7 @@ python tests/test_desktop_core.py       # onionmind_desktop_core.py logic
 Desktop UI: `.\tools\build-desktop.ps1 -Check -PythonExecutable python`, plus the
 `tests/test_desktop_*_ui.py` set. Android: the Kotlin `test/` suites under
 `android/**`. Shell scripts: `bash -n install-onionmind.sh
-install-onionmind-android.sh matchstick.sh usb/build.sh`. Full list:
+install-onionmind-android.sh matchstick.sh usb/build.sh onionmind-install.cmd`. Full list:
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **No test framework** — tests are `assert`-based scripts you run directly. Non-trivial
