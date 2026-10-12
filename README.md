@@ -17,6 +17,7 @@
 [![USB kit](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/usb-tests.yml)
 [![Ollama Tor plugin](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml/badge.svg?branch=main)](https://github.com/Codemaster64/onionmind/actions/workflows/ollama-tor.yml)
 
+[![One installer for every platform](https://img.shields.io/badge/All%20platforms-onionmind--install.cmd-7D4698?style=for-the-badge)](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/onionmind-install.cmd)
 [![Download for Windows](https://img.shields.io/badge/Windows-Onionmind--Setup.cmd-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/onionmind-setup.cmd)
 [![Download for Linux](https://img.shields.io/badge/Linux-install--onionmind.sh-333333?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/install-onionmind.sh)
 [![Download for Android](https://img.shields.io/badge/Android-releases%20page-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Codemaster64/onionmind/releases)
@@ -69,6 +70,50 @@ product code.
 ---
 
 ## Get Onionmind
+
+**One installer for every platform:**
+**[⬇ onionmind-install.cmd](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/onionmind-install.cmd)**
+— the same file on Windows, macOS, Linux and Android (Termux).
+
+| Where | How to run it |
+| --- | --- |
+| Windows | double-click `onionmind-install.cmd` |
+| macOS, Linux | `sh onionmind-install.cmd` (as your normal user) |
+| Android | in [Termux](https://f-droid.org): `sh onionmind-install.cmd` |
+
+It looks at the device first — OS, CPU architecture, RAM, GPU memory, free
+disk, and whether Python, Node, Ollama and Tor are already there — then lists
+what can be installed on it, marks the recommendation, and says why anything
+is unavailable (32-bit Windows, a Linux without systemd, no Homebrew, …):
+
+```text
+   What can be installed
+    [1] * Onionmind desktop app + local model   recommended
+         model: 27b - INFERNO 27B 3.69bpw + vision, 13.5 GB download; fits your 16.0 GB of GPU memory
+    [2]   Matchstick USB stick (amnesic live system)
+    [3]   ollama-tor (Tor routing for your own Ollama tools)
+```
+
+Pick numbers (Enter takes the recommendation), pick a model, review the plan
+and the hosts it will contact directly, confirm. It then hands over to the
+per-platform installer below — it does not install anything itself, so there
+is one install path per platform, not two. `--dry-run` shows the device,
+recommendation and plan without downloading or changing anything; `--yes`
+takes the recommendation without asking. Placed next to the other installers
+(a repo checkout), it uses those local copies instead of downloading them.
+
+On Android the recommendation is the APK (the installer opens the releases
+page; Android does not let a script install an app), with the Termux
+`onionmind` command as an option. A phone needs Termux to run the file at all.
+
+How this was verified: the sh half was run on Arch Linux (dry runs, bad-input
+re-prompts, and a real `ollama-tor` install from a lone copy of the file); the
+macOS and Android/Termux branches were exercised on Linux with stubbed
+`uname`/`sysctl`; the PowerShell half was run in dry-run mode under pwsh 7 on
+Linux and parse-checked. It has **not** yet been run by `cmd.exe` on real
+Windows, on Apple hardware, or on a phone.
+
+The per-platform installers, if you prefer to pick yourself:
 
 The shell installer provides **`onionmind`** and a desktop icon for the native
 workbench. **`onionmind-code "task"`** runs a one-shot repository-aware DeepSeek

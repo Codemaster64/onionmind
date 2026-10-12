@@ -2,6 +2,8 @@
 *.py text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
+# ...except the universal installer: it is also a sh script, and a CR breaks sh
+onionmind-install.cmd text eol=lf
 
 # the live-USB kit runs on Linux only - extensionless hooks, units and
 # helpers must never check out with CRLF, regardless of platform autocrlf

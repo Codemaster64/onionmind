@@ -34,6 +34,7 @@ Onionmind
 │   └── app shell (WebView + services) app/   (Server, ProcessManager, …)
 ├── Matchstick live USB              usb/     (Dockerfile, build.sh, tests/)
 ├── Installers (generated payloads)  install-*.{sh,ps1}, onionmind-setup.cmd
+├── Universal installer (dispatcher) onionmind-install.cmd  (cmd + sh + PowerShell in one file)
 ├── Build tooling                    build.py, tools/build-desktop.ps1
 └── Tests                            tests/ (Python), android/**/test (Kotlin)
 ```

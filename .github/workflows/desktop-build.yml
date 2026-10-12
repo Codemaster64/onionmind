@@ -178,6 +178,7 @@ jobs:
             --notes "Rolling build of main, republished on every push. The installers are attached here because a raw link renders in the browser instead of downloading; release assets are served as attachments. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip." \
             "${BUNDLE_ASSET}" \
             "${MANIFEST_ASSET}" \
+            onionmind-install.cmd \
             onionmind-setup.cmd \
             install-onionmind.sh \
             install-onionmind-android.sh \
