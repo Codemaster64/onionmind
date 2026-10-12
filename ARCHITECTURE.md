@@ -105,7 +105,8 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   (`parse_terminal_command`, `_split_windows_commandline`), the exact Harness
   command (`HarnessSpec`, `HarnessCommand`, `HarnessAvailability`), and the
   self-updater (`BundleUpdater`, `UpdateManifest`, `parse_update_manifest`,
-  `update_state`). **All of this is covered by `tests/test_desktop_core.py`** — if
+  `update_state`), and the remote-compute SSH tunnel (`SshTunnel`,
+  `parse_ssh_target`, `ssh_tunnel_argv`, `load_remote_settings`). **All of this is covered by `tests/test_desktop_core.py`** — if
   you add logic here, add a test; don't reach for Qt.
 
 - **`onionmind_desktop.py`** — the Qt widget tree and async workers. Model

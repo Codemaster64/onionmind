@@ -1,11 +1,37 @@
 #!/usr/bin/env bash
 # Qwen3.8-27B uncensored + Tor web search, on Ollama. Arch, Ubuntu/Debian, and
 # macOS (Homebrew). One paste.
-# Re-runnable: skips what is already done and resumes partial downloads.
+#
+#   bash install-onionmind.sh            this computer runs everything (default)
+#   bash install-onionmind.sh --client   the app here, the models on a server:
+#                                        also sets that server up over SSH
+#   bash install-onionmind.sh --server   only Ollama + models + SSH (a GPU box)
+#   ... --check                          print the plan - what is already done
+#                                        and would be skipped - and change nothing
+#   ... --host=user@server               the server for --client (else it asks)
+#
+# Re-runnable: every step checks first and skips what is already done, and
+# partial downloads resume.
 # ponytail: the macOS branch is syntax-checked (bash -n) and its Tor logic is
 # unit-tested offline in tests/test_privacy_contracts.py, but no installer run
 # has been observed on Apple hardware yet.
 set -euo pipefail
+
+# Absolute now: --client copies this very file to the server later on.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]:-$0}")"
+ROLE=full
+CHECK_ONLY=0
+SERVER_HOST="${ONIONMIND_SERVER:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --client) ROLE=client ;;
+    --server) ROLE=server ;;
+    --check|--dry-run) CHECK_ONLY=1 ;;
+    --host=*) SERVER_HOST="${arg#--host=}" ;;
+    -h|--help) sed -n '2,13p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf 'unknown option: %s (try --help)\n' "$arg" >&2; exit 2 ;;
+  esac
+done
 
 # Weights live outside $HOME deliberately. Ollama runs as User=ollama under systemd:
 #   - Arch's unit sets ProtectHome=yes, making /home structurally invisible to the
@@ -23,6 +49,7 @@ else
 fi
 say()  { printf '\033[36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
+skip() { printf '\033[32m    ✓ %s - skipping\033[0m\n' "$*"; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -ne 0 ] || die "run as your normal user, not root - it calls sudo where needed"
@@ -34,11 +61,55 @@ if [ "$OS_NAME" = Darwin ]; then DISTRO=mac
 elif command -v pacman  >/dev/null 2>&1; then DISTRO=arch
 elif command -v apt-get >/dev/null 2>&1; then DISTRO=debian
 else die "unsupported system - needs Homebrew (macOS), pacman, or apt-get"; fi
+[ "$ROLE" = server ] && [ "$DISTRO" = mac ] && die "--server is for Linux servers (Ubuntu/Debian or Arch)"
+case "$ROLE" in
+  full)   say "Setting up Onionmind on this computer: the app, Tor, Ollama and a model" ;;
+  client) say "Setting up Onionmind as a client: the app and Tor here, the models on a server" ;;
+  server) say "Setting up this machine as an Onionmind compute server: Ollama, a model and SSH" ;;
+esac
 say "Distro family: $DISTRO"
 
+# --- Checks: what is already here -------------------------------------------
+# Read-only probes, used twice: once for the plan printed below, and again
+# right before each step, because an earlier step can satisfy a later one.
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+pkg_installed() {
+  case "$DISTRO" in
+    debian) dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed" ;;
+    arch)   pacman -Qq "$1" >/dev/null 2>&1 ;;
+    mac)    brew list --formula "$1" >/dev/null 2>&1 ;;
+  esac
+}
+missing_pkgs() {   # prints the ones not installed; ollama counts as present if its command is
+  local p
+  for p in "$@"; do
+    case "$p" in ollama|ollama-cuda|ollama-rocm) have_cmd ollama && continue ;; esac
+    pkg_installed "$p" || printf '%s ' "$p"
+  done
+}
+service_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+ollama_up() { curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; }
+ollama_has() {     # is model $1 registered with the local ollama?
+  curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c '
+import json, sys
+names = [m.get("name", "").split(":")[0] for m in json.load(sys.stdin).get("models", [])]
+sys.exit(0 if sys.argv[1] in names else 1)' "$1" 2>/dev/null
+}
+tor_up() { (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null && { exec 3<&- 3>&-; return 0; }; return 1; }
+sshd_active() { service_active ssh || service_active ssh.socket || service_active sshd; }
+TUNING_DROPIN=/etc/systemd/system/ollama.service.d/10-tuning.conf
+TUNING='[Service]
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"'
+tuning_applied() { [ "$(cat "$TUNING_DROPIN" 2>/dev/null)" = "$TUNING" ] && service_active ollama; }
+
 # --- 1. GPU -----------------------------------------------------------------
+# Only a machine that runs models cares; a client's GPU is not used.
 VRAM=0
-if [ "$DISTRO" = mac ]; then
+GPU=none
+if [ "$ROLE" = client ]; then
+  :
+elif [ "$DISTRO" = mac ]; then
   GPU=metal
   # Unified memory is shared with macOS itself; treat ~5 GB as the OS+apps
   # floor so model picks are honest about what is actually free.
@@ -51,137 +122,14 @@ elif [ -d /sys/module/amdgpu ]; then
   GPU=amd
   command -v rocm-smi >/dev/null 2>&1 &&
     VRAM=$(rocm-smi --showmeminfo vram --csv 2>/dev/null | awk -F, 'NR==2{print int($2/1048576)}' || echo 0)
-else
-  GPU=none
 fi
 VRAM=${VRAM:-0}
-say "GPU: $GPU, ${VRAM} MiB VRAM"
-[ "$VRAM" -eq 0 ] && warn "no GPU VRAM detected - will run on CPU (slow). Check your drivers."
-
-# --- 2. Packages ------------------------------------------------------------
-# Python deps come from the distro, NOT pip: both Arch and Ubuntu 23.04+ mark the
-# system Python externally-managed (PEP 668) and `pip install` refuses outright.
-if [ "$DISTRO" = mac ]; then
-  command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS - install it from brew.sh, then rerun"
-  brew list --formula tor >/dev/null 2>&1 || { say "Installing tor (brew)"; brew install tor; }
-  command -v ollama >/dev/null 2>&1 || { say "Installing ollama (brew)"; brew install ollama; }
-  # No distro python packages here: CLT's python3 takes plain --user, brew's
-  # PEP 668 python needs the override flag. Both are user-local, no sudo.
-  if ! python3 -c 'import requests, socks' >/dev/null 2>&1; then
-    python3 -m pip install --user --quiet requests PySocks ||
-      python3 -m pip install --user --quiet --break-system-packages requests PySocks ||
-      warn "python deps failed - run 'python3 -m pip install --user requests PySocks' and rerun"
-  fi
-  # tkinter is only the classic-UI fallback here - the workbench runs PySide6
-  # out of its own venv - so this warns instead of installing. Xcode CLT's
-  # python3 already ships tkinter; brew's does not, and brew has no plain
-  # `python-tk`, only versioned formulae, so name the one matching the python3
-  # actually on PATH rather than guess a version that may not exist.
-  if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
-    PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3.13)
-    warn "tkinter missing from this python3 - the classic UI fallback will not start. Install it with: brew install python-tk@${PYVER}"
-  fi
-elif [ "$DISTRO" = arch ]; then
-  case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
-  # tkinter on Arch comes from `tk`, which `python` lists as an optional
-  # dependency ("tk: for tkinter"). There has never been a python-tk package
-  # here - asking for one aborts the whole transaction with "target not found",
-  # so nothing installed. Debian is the odd one out with python3-tk.
-  PKGS=(tor python-requests python-pysocks tk curl "$OLLAMA_PKG")
-  MISSING=()
-  for p in "${PKGS[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
-  if [ ${#MISSING[@]} -gt 0 ]; then
-    say "Installing: ${MISSING[*]}"
-    sudo pacman -S --needed --noconfirm "${MISSING[@]}"
-  fi
-else
-  # tor and python3-socks live in universe, which is not guaranteed enabled.
-  if ! grep -rqs "^deb.*universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null &&
-     ! grep -rqs "universe" /etc/apt/sources.list.d/*.sources 2>/dev/null; then
-    say "Enabling universe"
-    sudo apt-get install -y software-properties-common
-    sudo add-apt-repository -y universe
-  fi
-  say "Installing packages"
-  sudo apt-get update
-  sudo apt-get install -y tor python3-requests python3-socks python3-tk python3-venv curl ca-certificates \
-    libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
-  # Ollama is not in apt. This is upstream's documented installer; fetched to a file
-  # first so it can be read before it runs, rather than piped blind into a shell.
-  if ! command -v ollama >/dev/null 2>&1; then
-    # mktemp, not a fixed /tmp name: a predictable path in a world-writable
-    # directory can be pre-created as a symlink, and `curl -o` follows it, so
-    # another local user could redirect this write. The file is fetched rather
-    # than piped so it CAN be inspected - ONIONMIND_SHOW_OLLAMA_SCRIPT=1 prints
-    # it and waits, instead of only claiming that is possible.
-    oi=$(mktemp) || die "could not create a temp file"
-    trap 'rm -f "$oi"' EXIT
-    say "Installing Ollama (upstream script -> $oi)"
-    curl -fsSL https://ollama.com/install.sh -o "$oi"
-    if [ "${ONIONMIND_SHOW_OLLAMA_SCRIPT:-0}" = 1 ]; then
-      echo "--- ollama install.sh ---"; cat "$oi"; echo "--- end ---"
-      printf 'Run it? [y/N] '; read -r ok
-      case "$ok" in y|Y) ;; *) die "aborted before running the ollama installer" ;; esac
-    fi
-    sh "$oi"
-  fi
-fi
-command -v ollama >/dev/null || die "ollama not on PATH after install"
-
-# Resolve the configured location once before creating or changing it. Generated
-# launchers must never inherit a relative path, and broad existing directories
-# must never have their ownership or mode changed by this installer.
-DIR=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$DIR")
-HOME_REAL=$(python3 -c 'from pathlib import Path; print(Path.home().resolve())')
-case "$DIR" in
-  /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/var/lib|"$HOME_REAL")
-    die "refusing broad ONIONMIND_DIR: $DIR"
-    ;;
-esac
-
-# --- 3. Tor daemon ----------------------------------------------------------
-# The daemon (SOCKS on 9050) beats Tor Browser here: no GUI, no window to keep open,
-# and a service manager restarts it.
-if [ "$DISTRO" = mac ]; then
-  brew services start tor >/dev/null 2>&1 || warn "could not start the tor service - run 'brew services start tor'"
-else
-  systemctl is-active --quiet tor || { say "Starting tor"; sudo systemctl enable --now tor; }
-fi
-tor_up() { (exec 3<>/dev/tcp/127.0.0.1/9050) 2>/dev/null && { exec 3<&- 3>&-; return 0; }; return 1; }
-for _ in $(seq 1 40); do tor_up && break; sleep 2; done
-if tor_up; then say "Tor SOCKS up on 9050"
-else warn "tor not listening - start it ('brew services start tor' on macOS, 'sudo systemctl start tor' on Linux); search will refuse until it is"; fi
-
-# --- 4. Ollama tuning + service --------------------------------------------
-if [ "$DISTRO" = mac ]; then
-  # ponytail: brew services has no drop-in environment story, so the Linux
-  # flash-attention/KV-cache tuning below is skipped; ollama's Metal defaults
-  # apply. Revisit if brew grows per-service env config.
-  say "Starting ollama under brew services"
-  brew services start ollama >/dev/null 2>&1 || warn "could not start ollama - run 'brew services start ollama'"
-else
-  # Ollama runs as a systemd service under its own user, so exporting these in your shell
-  # does nothing - the server never sees them. They have to be a unit drop-in.
-  say "Applying ollama tuning (systemd drop-in)"
-  sudo mkdir -p /etc/systemd/system/ollama.service.d
-  sudo tee /etc/systemd/system/ollama.service.d/10-tuning.conf >/dev/null <<'UNIT'
-[Service]
-Environment="OLLAMA_FLASH_ATTENTION=1"
-Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
-UNIT
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now ollama
-  sudo systemctl restart ollama          # pick up the drop-in if it was already running
+if [ "$ROLE" != client ]; then
+  say "GPU: $GPU, ${VRAM} MiB VRAM"
+  [ "$VRAM" -eq 0 ] && warn "no GPU VRAM detected - will run on CPU (slow). Check your drivers."
 fi
 
-for _ in $(seq 1 40); do
-  curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null && break
-  sleep 2
-done
-curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null \
-  || die "ollama did not come up on 11434 ('brew services log ollama' on macOS, 'journalctl -u ollama -n50' on Linux)"
-
-# --- 5. Pick the build that fits -------------------------------------------
+# --- 2. Pick the build that fits -------------------------------------------
 # ONIONMIND_MODEL picks what gets installed:
 #   auto (default) - the 27B where it fits in VRAM, the fast small model where it does not
 #   fast           - always the small model, whatever the hardware
@@ -190,6 +138,11 @@ curl -sf --noproxy '*' -m 3 http://127.0.0.1:11434/api/version >/dev/null \
 # and no generation newer than 3.8 exists. Qwen3.5 is the newest line WITH small dense
 # models, so that is what "fast" means here.
 # MTP builds keep the multi-token-prediction head; ollama uses it for speculative decoding.
+# A client runs no model: the name only seeds the CLI default, and resolve_model()
+# swaps in whatever the server actually has.
+VISION=0
+MODEL_NAME=inferno
+if [ "$ROLE" != client ]; then
 WANT="${ONIONMIND_MODEL:-auto}"
 case "$WANT" in
   auto) [ "$VRAM" -ge 8000 ] && WANT=27b || WANT=fast ;;
@@ -197,7 +150,6 @@ case "$WANT" in
   *) die "ONIONMIND_MODEL must be auto, fast or 27b (got '$WANT')" ;;
 esac
 
-VISION=0
 if [ "$WANT" = 27b ]; then
   VISION=1                                   # the mmproj is built for the 27B architecture
   if   [ "$VRAM" -ge 17000 ]; then
@@ -223,8 +175,251 @@ else
   [ "$VRAM" -lt 8000 ] && warn "No small Qwen3.8 exists, so this is one generation back but far faster."
   warn "Vision skipped (27B-only). Set ONIONMIND_MODEL=27b for Qwen3.8-27B instead."
 fi
+fi
 
-# --- 6. Weights -------------------------------------------------------------
+# --- 3. The plan --------------------------------------------------------------
+# Python deps come from the distro, NOT pip: both Arch and Ubuntu 23.04+ mark the
+# system Python externally-managed (PEP 668) and `pip install` refuses outright.
+# tor and python3-socks live in universe on Ubuntu, which is not guaranteed enabled.
+# python3-tk is only the classic-UI fallback - the workbench runs PySide6 from
+# its own venv - and Debian is the odd one out that names it python3-tk.
+DEB_APP_PKGS=(tor python3-requests python3-socks python3-tk python3-venv curl ca-certificates
+  libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0)
+case "$ROLE" in
+  full)   DEB_PKGS=("${DEB_APP_PKGS[@]}") ;;
+  client) DEB_PKGS=("${DEB_APP_PKGS[@]}" openssh-client) ;;
+  server) DEB_PKGS=(curl ca-certificates python3 openssh-server) ;;
+esac
+if [ "$DISTRO" = arch ]; then
+  case $GPU in nvidia) OLLAMA_PKG=ollama-cuda ;; amd) OLLAMA_PKG=ollama-rocm ;; *) OLLAMA_PKG=ollama ;; esac
+  # tkinter on Arch comes from `tk`, which `python` lists as an optional
+  # dependency ("tk: for tkinter"). There has never been a python-tk package
+  # here - asking for one aborts the whole transaction with "target not found",
+  # so nothing installed. Debian is the odd one out with python3-tk.
+  PKGS=(tor python-requests python-pysocks tk curl "$OLLAMA_PKG")
+  # A client only needs ollama's command (Agent mode calls it); the service stays off.
+  [ "$ROLE" = client ] && PKGS=(tor python-requests python-pysocks tk curl openssh ollama)
+  [ "$ROLE" = server ] && PKGS=(curl python openssh "$OLLAMA_PKG")
+fi
+missing_now() {
+  case "$DISTRO" in
+    debian) missing_pkgs "${DEB_PKGS[@]}" ;;
+    arch)   missing_pkgs "${PKGS[@]}" ;;
+    mac)    missing_pkgs tor; [ "$ROLE" = client ] || have_cmd ollama || printf 'ollama ' ;;
+  esac
+}
+
+PLAN=()
+plan() { PLAN+=("$1|$2"); }      # plan ok|todo "what"
+MISSING_LIST=$(missing_now); MISSING_LIST=${MISSING_LIST% }
+[ -z "$MISSING_LIST" ] && plan ok "System packages" || plan todo "System packages: $MISSING_LIST"
+if [ "$ROLE" = client ]; then
+  have_cmd ollama && plan ok "ollama command (Agent mode)" || plan todo "ollama command for Agent mode (its background service stays off)"
+else
+  have_cmd ollama && plan ok "Ollama" || plan todo "Ollama"
+fi
+if [ "$ROLE" != server ]; then
+  if [ "$DISTRO" = mac ]; then tor_up && plan ok "Tor running" || plan todo "Start Tor"
+  else service_active tor && plan ok "Tor service running" || plan todo "Start the Tor service"; fi
+fi
+if [ "$ROLE" = server ]; then
+  sshd_active && plan ok "SSH server running" || plan todo "Start the SSH server"
+fi
+if [ "$ROLE" != client ]; then
+  if [ "$DISTRO" = mac ]; then ollama_up && plan ok "Ollama running" || plan todo "Start Ollama"
+  else tuning_applied && plan ok "Ollama service tuned and running" || plan todo "Tune and (re)start the Ollama service"; fi
+  if ollama_has "$MODEL_NAME"; then plan ok "Model $MODEL_NAME registered"
+  else plan todo "Download (~3-16 GB, resumable) and register model $MODEL_NAME"; fi
+  if [ "$VISION" = 1 ]; then
+    ollama_has "$MODEL_NAME-vision" && plan ok "Vision model" || plan todo "Download (885 MiB) and register $MODEL_NAME-vision"
+  fi
+fi
+if [ "$ROLE" != server ]; then
+  plan todo "Write the Onionmind program files (always refreshed)"
+  if [ -f "$DIR/desktop-env/.onionmind-desktop-ready" ] &&
+     "$DIR/desktop-env/bin/python" -c 'import requests, socks, PySide6.QtWidgets' >/dev/null 2>&1; then
+    plan ok "Native desktop runtime (PySide6)"
+  else
+    plan todo "Native desktop runtime (PySide6, ~50 MB from PyPI)"
+  fi
+  plan todo "Commands and desktop launcher (always refreshed)"
+fi
+if [ "$ROLE" = client ]; then
+  if [ -n "$SERVER_HOST" ]; then
+    plan todo "Server $SERVER_HOST: SSH key login, Ollama + model, app pointed at it (each checked first)"
+  else
+    plan todo "Server: asks for user@host, then SSH key login, Ollama + model, app pointed at it"
+  fi
+fi
+
+echo
+say "Plan"
+for entry in "${PLAN[@]}"; do
+  state=${entry%%|*}; what=${entry#*|}
+  if [ "$state" = ok ]; then printf '    \033[32m[ok]   \033[0m %s\n' "$what"
+  else printf '    \033[36m[todo] \033[0m %s\n' "$what"; fi
+done
+echo
+if [ "$CHECK_ONLY" = 1 ]; then
+  say "Check only - nothing was changed. Run without --check to apply."
+  exit 0
+fi
+
+# realpath -m first: a bare server may not have python3 until the package step.
+abs_path() { realpath -m -- "$1" 2>/dev/null ||
+  python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$1"; }
+DIR=$(abs_path "${DIR/#\~/$HOME}")
+HOME_REAL=$(abs_path "$HOME")
+case "$DIR" in
+  /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/var/lib|"$HOME_REAL")
+    die "refusing broad ONIONMIND_DIR: $DIR"
+    ;;
+esac
+
+# --- 4. Packages ------------------------------------------------------------
+OLLAMA_WAS_THERE=0
+have_cmd ollama && OLLAMA_WAS_THERE=1
+say "Step: system packages"
+if [ "$DISTRO" = mac ]; then
+  command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS - install it from brew.sh, then rerun"
+  if brew list --formula tor >/dev/null 2>&1; then skip "tor is installed"
+  else say "Installing tor (brew)"; brew install tor; fi
+  if have_cmd ollama; then skip "ollama is installed"
+  else say "Installing ollama (brew)"; brew install ollama; fi
+  # No distro python packages here: CLT's python3 takes plain --user, brew's
+  # PEP 668 python needs the override flag. Both are user-local, no sudo.
+  if python3 -c 'import requests, socks' >/dev/null 2>&1; then
+    skip "python requests + PySocks are installed"
+  else
+    python3 -m pip install --user --quiet requests PySocks ||
+      python3 -m pip install --user --quiet --break-system-packages requests PySocks ||
+      warn "python deps failed - run 'python3 -m pip install --user requests PySocks' and rerun"
+  fi
+  # tkinter is only the classic-UI fallback here - the workbench runs PySide6
+  # out of its own venv - so this warns instead of installing. Xcode CLT's
+  # python3 already ships tkinter; brew's does not, and brew has no plain
+  # `python-tk`, only versioned formulae, so name the one matching the python3
+  # actually on PATH rather than guess a version that may not exist.
+  if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
+    PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3.13)
+    warn "tkinter missing from this python3 - the classic UI fallback will not start. Install it with: brew install python-tk@${PYVER}"
+  fi
+elif [ "$DISTRO" = arch ]; then
+  read -r -a MISSING <<< "$(missing_pkgs "${PKGS[@]}")"
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    say "Installing: ${MISSING[*]}"
+    sudo pacman -S --needed --noconfirm "${MISSING[@]}"
+  else
+    skip "all packages are installed (${PKGS[*]})"
+  fi
+else
+  read -r -a MISSING <<< "$(missing_pkgs "${DEB_PKGS[@]}")"
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    if ! grep -rqs "^deb.*universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null &&
+       ! grep -rqs "universe" /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+      say "Enabling universe (tor and python3-socks live there)"
+      sudo apt-get install -y software-properties-common
+      sudo add-apt-repository -y universe
+    fi
+    say "Installing: ${MISSING[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${MISSING[@]}"
+  else
+    skip "all packages are installed"
+  fi
+  # Ollama is not in apt. This is upstream's documented installer; fetched to a file
+  # first so it can be read before it runs, rather than piped blind into a shell.
+  if have_cmd ollama; then
+    skip "ollama is installed ($(ollama --version 2>/dev/null | head -1))"
+  else
+    # mktemp, not a fixed /tmp name: a predictable path in a world-writable
+    # directory can be pre-created as a symlink, and `curl -o` follows it, so
+    # another local user could redirect this write. The file is fetched rather
+    # than piped so it CAN be inspected - ONIONMIND_SHOW_OLLAMA_SCRIPT=1 prints
+    # it and waits, instead of only claiming that is possible.
+    oi=$(mktemp) || die "could not create a temp file"
+    trap 'rm -f "$oi"' EXIT
+    say "Installing Ollama (upstream script -> $oi)"
+    curl -fsSL https://ollama.com/install.sh -o "$oi"
+    if [ "${ONIONMIND_SHOW_OLLAMA_SCRIPT:-0}" = 1 ]; then
+      echo "--- ollama install.sh ---"; cat "$oi"; echo "--- end ---"
+      printf 'Run it? [y/N] '; read -r ok
+      case "$ok" in y|Y) ;; *) die "aborted before running the ollama installer" ;; esac
+    fi
+    sh "$oi"
+  fi
+fi
+command -v ollama >/dev/null || die "ollama not on PATH after install"
+if [ "$ROLE" = client ] && [ "$OLLAMA_WAS_THERE" = 0 ] && [ "$DISTRO" != mac ] &&
+   systemctl is-enabled --quiet ollama 2>/dev/null; then
+  # Installed here only for its command; the models live on the server. An
+  # Ollama the user already had is left exactly as it was.
+  say "Turning off the local Ollama service this installer just added (models run on the server)"
+  sudo systemctl disable --now ollama
+fi
+
+# --- 5. Tor daemon ----------------------------------------------------------
+# The daemon (SOCKS on 9050) beats Tor Browser here: no GUI, no window to keep open,
+# and a service manager restarts it.
+if [ "$ROLE" != server ]; then
+  say "Step: Tor"
+  if [ "$DISTRO" = mac ]; then
+    if tor_up; then skip "Tor is running"
+    else brew services start tor >/dev/null 2>&1 || warn "could not start the tor service - run 'brew services start tor'"; fi
+  else
+    if service_active tor; then skip "the tor service is running"
+    else say "Starting tor"; sudo systemctl enable --now tor; fi
+  fi
+  for _ in $(seq 1 40); do tor_up && break; sleep 2; done
+  if tor_up; then say "Tor SOCKS up on 9050"
+  else warn "tor not listening - start it ('brew services start tor' on macOS, 'sudo systemctl start tor' on Linux); search will refuse until it is"; fi
+fi
+
+# --- 5b. SSH server (compute server only) -----------------------------------
+if [ "$ROLE" = server ]; then
+  say "Step: SSH server"
+  if sshd_active; then skip "the SSH server is running"
+  else
+    say "Starting the SSH server"
+    sudo systemctl enable --now ssh 2>/dev/null || sudo systemctl enable --now sshd
+  fi
+fi
+
+# --- 6. Ollama tuning + service --------------------------------------------
+if [ "$ROLE" != client ]; then
+say "Step: Ollama service"
+if [ "$DISTRO" = mac ]; then
+  # ponytail: brew services has no drop-in environment story, so the Linux
+  # flash-attention/KV-cache tuning below is skipped; ollama's Metal defaults
+  # apply. Revisit if brew grows per-service env config.
+  if ollama_up; then skip "ollama is running"
+  else
+    say "Starting ollama under brew services"
+    brew services start ollama >/dev/null 2>&1 || warn "could not start ollama - run 'brew services start ollama'"
+  fi
+elif tuning_applied; then
+  skip "ollama is tuned and running"
+else
+  # Ollama runs as a systemd service under its own user, so exporting these in your shell
+  # does nothing - the server never sees them. They have to be a unit drop-in.
+  # Ollama keeps its default 127.0.0.1 bind: a client reaches it through SSH,
+  # and an Ollama on the network would answer anyone - it has no password.
+  say "Applying ollama tuning (systemd drop-in) and restarting it"
+  sudo mkdir -p /etc/systemd/system/ollama.service.d
+  printf '%s\n' "$TUNING" | sudo tee "$TUNING_DROPIN" >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ollama
+  sudo systemctl restart ollama          # pick up the drop-in if it was already running
+fi
+
+for _ in $(seq 1 40); do
+  ollama_up && break
+  sleep 2
+done
+ollama_up || die "ollama did not come up on 11434 ('brew services log ollama' on macOS, 'journalctl -u ollama -n50' on Linux)"
+say "Ollama answers on 127.0.0.1:11434"
+
+# --- 7. Weights + model -----------------------------------------------------
 if [ "$DISTRO" = mac ]; then
   mkdir -p "$DIR"                      # ollama runs as this user; no service-user dance
 else
@@ -245,6 +440,7 @@ verify() {  # file url
   case "$want" in
     *[!0-9a-f]* | "") return 0 ;;      # nothing published; nothing to check
   esac
+  say "Checking the sha256 of $(basename "$1") (a minute for a big file)"
   if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$1" | cut -d' ' -f1)
   else got=$(shasum -a 256 "$1" | cut -d' ' -f1); fi
   if [ "$got" != "$want" ]; then
@@ -254,6 +450,10 @@ verify() {  # file url
   say "verified $(basename "$1")"
 }
 
+say "Step: model $MODEL_NAME"
+if ollama_has "$MODEL_NAME"; then
+  skip "model $MODEL_NAME is already registered with ollama (no download needed)"
+else
 say "Downloading $FILE (resumable, ~10-16GB)"
 # ponytail: curl -C - resumes a dropped download; no retry logic of our own
 WEIGHTS_URL="https://huggingface.co/$REPO/resolve/main/$FILE"
@@ -261,7 +461,6 @@ curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" "$WEIGHTS_URL"
 verify "$DIR/$FILE" "$WEIGHTS_URL"
 chmod 644 "$DIR/$FILE"
 
-# --- 7. Model ---------------------------------------------------------------
 # num_gpu 99 = all layers on GPU; ollama's auto-split is too conservative and silently
 # leaves VRAM unused. It needs desktop headroom too: if speed swings while a browser is
 # open, the model is spilling to shared memory - drop this to ~56.
@@ -284,9 +483,20 @@ TEMPLATE """{{ if .System }}<|im_start|>system
 MF
 say "Registering model"
 ollama create "$MODEL_NAME" -f "$DIR/Modelfile"
+fi
 
 # --- 7b. Vision (27B only - the mmproj is built for that architecture) -------
-if [ "$VISION" = 1 ]; then
+if [ "$VISION" = 1 ] && ollama_has "$MODEL_NAME-vision"; then
+  skip "vision model $MODEL_NAME-vision is already registered"
+elif [ "$VISION" = 1 ]; then
+# The weights may already be registered from an earlier run and absent on disk;
+# the vision Modelfile needs the GGUF itself.
+if [ ! -f "$DIR/$FILE" ]; then
+  WEIGHTS_URL="https://huggingface.co/$REPO/resolve/main/$FILE"
+  say "Downloading $FILE for the vision model (resumable)"
+  curl -L -C - --fail --noproxy '*' -o "$DIR/$FILE" "$WEIGHTS_URL"
+  verify "$DIR/$FILE" "$WEIGHTS_URL"
+fi
 # The mmproj is the vision tower in its own file - architecture-specific, not
 # quant-specific, so this one projector binds to any Qwen3.8-27B build (verified
 # against the 3.69bpw MTP model it is paired with here). Shares the base blob, so
@@ -319,6 +529,29 @@ say "Registering vision model"
 ollama create "$MODEL_NAME-vision" -f "$DIR/Modelfile.vision" ||
     warn "vision model failed to build - text model is fine"
 fi
+fi   # ROLE != client: models
+
+# --- A compute server is done here: no app, no Tor, no launchers ------------
+if [ "$ROLE" = server ]; then
+  echo
+  say "Server ready"
+  echo "  Ollama:  127.0.0.1:11434 on this machine (not exposed to the network)"
+  echo "  Models:  $(ollama list 2>/dev/null | awk 'NR>1{print $1}' | tr '\n' ' ')"
+  ADDRS=$(hostname -I 2>/dev/null || true)
+  have_cmd tailscale && ADDRS="$ADDRS $(tailscale ip -4 2>/dev/null || true)"
+  echo "  Connect: on your computer, Onionmind Settings -> Compute -> $(id -un)@<one of: ${ADDRS:-this host}>"
+  echo "           or run there: bash install-onionmind.sh --client --host=$(id -un)@<address>"
+  exit 0
+fi
+
+if [ "$DISTRO" = mac ]; then
+  mkdir -p "$DIR"
+else
+  sudo mkdir -p "$DIR"
+  sudo chown "$(id -u):$(id -g)" "$DIR"
+  sudo chmod 755 "$DIR"
+fi
+say "Step: Onionmind program files -> $DIR"
 
 # --- 8. Tor search tool -----------------------------------------------------
 cat > "$DIR/onionmind.py" <<'PYEOF'
@@ -336,11 +569,48 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
     except Exception: pass
 
+OLLAMA_PORT = 11434
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
 OLLAMA_GENERATE = "http://127.0.0.1:11434/api/generate"
+_USER_OLLAMA_HOST = os.environ.get("OLLAMA_HOST")   # restored when the tunnel goes
+
+
+def use_ollama_port(port=None):
+    """Point every Ollama call at 127.0.0.1:<port>; None means the default 11434.
+
+    Remote compute is an SSH tunnel landing on a local loopback port, so only
+    the port moves - the address stays 127.0.0.1 and nothing here ever talks
+    to another host. The variables are exported so the children follow too:
+    `onionmind.py --agent` reads ONIONMIND_OLLAMA_PORT, and the `ollama` CLI
+    the agent calls reads OLLAMA_HOST.
+    """
+    global OLLAMA_PORT, OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE
+    port = int(port) if port else 11434
+    if not 0 < port < 65536:
+        raise ValueError(f"not a port: {port}")
+    base = f"http://127.0.0.1:{port}/api/"
+    OLLAMA_PORT = port
+    OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE = (
+        base + "chat", base + "tags", base + "pull", base + "ps", base + "generate")
+    if port == 11434:
+        os.environ.pop("ONIONMIND_OLLAMA_PORT", None)
+        if _USER_OLLAMA_HOST is None:
+            os.environ.pop("OLLAMA_HOST", None)
+        else:
+            os.environ["OLLAMA_HOST"] = _USER_OLLAMA_HOST
+    else:
+        os.environ["ONIONMIND_OLLAMA_PORT"] = str(port)
+        os.environ["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+
+
+try:
+    if os.environ.get("ONIONMIND_OLLAMA_PORT"):
+        use_ollama_port(os.environ["ONIONMIND_OLLAMA_PORT"])
+except ValueError:
+    pass                                     # junk in the variable: keep the default
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
 MODEL  = "inferno"
@@ -825,7 +1095,7 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -872,7 +1142,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -941,7 +1211,7 @@ def detect_backend():
     """Prefer ollama; fall back to llama.cpp's llama-server. Ollama has no
     Android build, so phones run llama-server with the same GGUFs."""
     global BACKEND
-    for url, name in (("http://127.0.0.1:11434/api/version", "ollama"),
+    for url, name in ((f"http://127.0.0.1:{OLLAMA_PORT}/api/version", "ollama"),
                       ("http://127.0.0.1:8080/health", "llama-server")):
         try:
             if requests.get(url, proxies=NOPROXY, timeout=3).ok:
@@ -950,7 +1220,7 @@ def detect_backend():
                 return
         except Exception:
             pass
-    sys.exit("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+    sys.exit(f"No model server on {OLLAMA_PORT} (ollama) or 8080 (llama-server). Start one.")
 
 
 def resolve_model():
@@ -2641,6 +2911,13 @@ __all__ = [
     "model_fit",
     "node_version",
     "node_supports_agent",
+    "REMOTE_OLLAMA_PORT",
+    "SshTarget",
+    "parse_ssh_target",
+    "ssh_tunnel_argv",
+    "describe_ssh_failure",
+    "load_remote_settings",
+    "SshTunnel",
 ]
 
 
@@ -5721,6 +5998,233 @@ def node_supports_agent(version: Optional[str]) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     return major >= 24 or (major == 22 and minor >= 19) or major == 23
+
+
+# --- Remote compute over SSH -------------------------------------------
+#
+# The model runs on another machine the user can SSH into; everything else -
+# files, agent, terminal, Tor - stays here. An `ssh -L` tunnel lands that
+# machine's Ollama on a free loopback port, so the core still only ever talks
+# to 127.0.0.1 and the agent's loopback-only socket shims need no exception.
+# The SSH connection itself is direct, not Tor: it is the user's own server,
+# opened only when they press Connect (or opted into connecting at launch).
+
+REMOTE_OLLAMA_PORT = 11434
+
+_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+(?::(\d{1,5}))?")
+
+
+@dataclass(frozen=True)
+class SshTarget:
+    destination: str              # user@host or a ~/.ssh/config alias
+    port: Optional[int] = None
+
+    @property
+    def label(self) -> str:
+        return self.destination if self.port is None else f"{self.destination}:{self.port}"
+
+
+def parse_ssh_target(value: Any) -> Optional[SshTarget]:
+    """`user@host`, `host`, an ssh-config alias, optionally `:port`; else None.
+
+    Deliberately narrow: no spaces, no leading dash (it would be read as an
+    ssh option), nothing a shell or ssh would interpret.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith("-"):
+        return None
+    match = _SSH_TARGET.fullmatch(text)
+    if match is None:
+        return None
+    if match.group(1) is None:
+        return SshTarget(text)
+    port = int(match.group(1))
+    if not 0 < port < 65536:
+        return None
+    return SshTarget(text.rsplit(":", 1)[0], port)
+
+
+def ssh_tunnel_argv(target: SshTarget, local_port: int,
+                    remote_port: int = REMOTE_OLLAMA_PORT,
+                    executable: str = "ssh") -> list[str]:
+    """The exact `ssh` command: a forward only, no shell, no prompts."""
+    argv = [
+        executable, "-N", "-T",
+        # A GUI has nowhere to type a password or accept a host key, so ssh
+        # must fail fast instead of waiting on a prompt nobody sees.
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-L", f"127.0.0.1:{int(local_port)}:127.0.0.1:{int(remote_port)}",
+    ]
+    if target.port is not None:
+        argv += ["-p", str(target.port)]
+    return argv + ["--", target.destination]
+
+
+def describe_ssh_failure(stderr: str, target_label: str = "the server") -> str:
+    """ssh's last words, turned into the step that fixes them."""
+    text = _as_text_core(stderr)
+    lowered = text.lower()
+    if "permission denied" in lowered:
+        return (f"{target_label} refused the login. Onionmind cannot type a password: "
+                f"set up key login once with `ssh-copy-id {target_label}` "
+                "(or load your key into ssh-agent), then connect again.")
+    if "host key verification failed" in lowered or "no matching host key" in lowered:
+        return (f"{target_label}'s host key is not trusted yet. Run `ssh {target_label}` "
+                "once in a terminal to check and accept it, then connect again.")
+    if "could not resolve hostname" in lowered:
+        return f"Could not find {target_label}. Check the name, or your VPN/Tailscale."
+    if "connection refused" in lowered and "channel" not in lowered:
+        return f"{target_label} refused the SSH connection. Is sshd running there?"
+    if "timed out" in lowered:
+        return f"{target_label} did not answer in time."
+    if "forwarding" in lowered and ("failed" in lowered or "denied" in lowered):
+        return f"{target_label} does not allow port forwarding (AllowTcpForwarding)."
+    last = [line.strip() for line in text.splitlines() if line.strip()]
+    return last[-1] if last else f"ssh to {target_label} exited without saying why."
+
+
+def load_remote_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The `remote_compute` block of settings.json, validated; junk is dropped."""
+    stored = settings.get("remote_compute") if isinstance(settings, Mapping) else None
+    stored = stored if isinstance(stored, Mapping) else {}
+    target = parse_ssh_target(stored.get("host"))
+    return {
+        "host": target.label if target else "",
+        "autoconnect": bool(stored.get("autoconnect")) and target is not None,
+    }
+
+
+def _free_loopback_port() -> int:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _ollama_version(port: int, timeout: float = 5.0) -> Optional[str]:
+    """The Ollama version answering on 127.0.0.1:<port>, or None."""
+    import urllib.request
+    # No proxy handler: this is loopback, and an HTTP(S)_PROXY in the
+    # environment must not carry it anywhere else.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{int(port)}/api/version", timeout=timeout) as reply:
+            data = json.loads(reply.read().decode("utf-8", errors="replace") or "{}")
+    except Exception:
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version else None
+
+
+class SshTunnel:
+    """One `ssh -L` child forwarding a remote Ollama to a local loopback port.
+
+    `start()` blocks until Ollama answers through the tunnel (or raises with
+    an actionable message), so callers run it off the UI thread.
+    """
+
+    def __init__(self, target: SshTarget, *, remote_port: int = REMOTE_OLLAMA_PORT,
+                 executable: str = "ssh", ready_timeout: float = 25.0,
+                 popen: Callable[..., Any] = subprocess.Popen,
+                 which: Callable[[str], Optional[str]] = shutil.which) -> None:
+        self.target = target
+        self.remote_port = remote_port
+        self.executable = executable
+        self.ready_timeout = ready_timeout
+        self._popen = popen
+        self._which = which
+        self.process: Any = None
+        self.local_port: Optional[int] = None
+        self.version: Optional[str] = None
+        self.cancelled = False
+        self._stderr_tail: list[str] = []
+
+    @property
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def _drain(self, stream: Any) -> None:
+        # ssh keeps a pipe it may write to for hours; reading it forever means
+        # a chatty server can never fill the pipe and stall the tunnel.
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line:
+                self._stderr_tail = (self._stderr_tail + [line])[-20:]
+
+    def last_error(self) -> str:
+        return describe_ssh_failure("\n".join(self._stderr_tail), self.target.label)
+
+    def start(self) -> int:
+        import threading
+        import time
+
+        executable = self._which(self.executable)
+        if executable is None:
+            raise RuntimeError(
+                "No `ssh` command found. Install the OpenSSH client "
+                "(Windows: Settings > Optional features > OpenSSH Client)."
+            )
+        self.stop()
+        port = _free_loopback_port()
+        process = self._popen(
+            ssh_tunnel_argv(self.target, port, self.remote_port, executable),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_NO_WINDOW,
+        )
+        self.process = process
+        self._stderr_tail = []
+        if getattr(process, "stderr", None) is not None:
+            threading.Thread(target=self._drain, args=(process.stderr,), daemon=True).start()
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            if self.cancelled:
+                self.process = process
+                self.stop()
+                raise RuntimeError("Cancelled.")
+            if process.poll() is not None:
+                time.sleep(0.1)          # let the drain thread catch ssh's last line
+                self.process = None
+                raise RuntimeError(self.last_error())
+            version = _ollama_version(port, timeout=2.0)
+            if version:
+                self.local_port, self.version = port, version
+                return port
+            # ssh logs "channel N: open failed: connect failed" when the login
+            # worked but nothing listens on the far side - no need to wait out
+            # the whole timeout to say so.
+            if any("open failed" in line for line in self._stderr_tail):
+                break
+            time.sleep(0.4)
+        connected = self.alive
+        self.stop()
+        if connected:
+            raise RuntimeError(
+                f"Connected to {self.target.label}, but no Ollama answered on its "
+                f"127.0.0.1:{self.remote_port}. Start it there (`systemctl status ollama`)."
+            )
+        raise RuntimeError(self.last_error())
+
+    def cancel(self) -> None:
+        """Stop from another thread, including mid-`start()` - nothing is left running."""
+        self.cancelled = True
+        self.stop()
+
+    def stop(self) -> None:
+        process, self.process = self.process, None
+        self.local_port = self.version = None
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
 DESKTOPCOREEOF
 cat > "$DIR/onionmind_desktop.py" <<'DESKTOPUIEOF'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
@@ -10469,6 +10973,7 @@ class SettingsDialog(QDialog):
         tabs.setAccessibleName("Onionmind settings sections")
         self.tabs = tabs
         tabs.addTab(self._page(self._general_page(preferences)), "General")
+        tabs.addTab(self._page(self._compute_page()), "Compute")
         tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
         tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
         tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
@@ -11064,6 +11569,111 @@ class SettingsDialog(QDialog):
         outer.addStretch(1)
         return page
 
+    def _compute_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Remote compute")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        intro = QLabel(
+            "Run the models on another computer you can reach over SSH - a GPU "
+            "server, say. Your projects, edits, the agent, the terminal and Tor "
+            "stay on this machine; only prompts and replies travel, through an "
+            "encrypted SSH tunnel to that computer's Ollama."
+        )
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        window = self._window()
+        settings = window.remote_settings() if window is not None else {"host": "", "autoconnect": False}
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        self.remote_host_field = QLineEdit(settings["host"])
+        self.remote_host_field.setPlaceholderText("user@server, server:2222, or an ~/.ssh/config alias")
+        self.remote_host_field.setAccessibleName("Remote compute server for SSH")
+        self.remote_connect_button = QPushButton("Connect")
+        host_row = QHBoxLayout()
+        host_row.addWidget(self.remote_host_field, 1)
+        host_row.addWidget(self.remote_connect_button)
+        form.addRow("Server", host_row)
+        self.remote_autoconnect_box = QCheckBox("Connect automatically when Onionmind opens")
+        self.remote_autoconnect_box.setToolTip(
+            "Off by default. While off, opening Onionmind contacts nothing; while on, "
+            "it opens the SSH connection to this server at every launch."
+        )
+        self.remote_autoconnect_box.setChecked(bool(settings["autoconnect"]))
+        form.addRow("", self.remote_autoconnect_box)
+        outer.addLayout(form)
+        self.remote_feedback = QLabel()
+        self.remote_feedback.setWordWrap(True)
+        self.remote_feedback.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self.remote_feedback)
+        needs = QLabel(
+            "Needs: key-based SSH login (Onionmind cannot type a password - run "
+            "`ssh-copy-id user@server` once), and Ollama with your models running on "
+            "the server. Keep its Ollama on 127.0.0.1 - the tunnel reaches it there, "
+            "and it has no password of its own. The SSH connection goes direct, not "
+            "over Tor: it is your own server, and it is opened only when you connect."
+        )
+        needs.setObjectName("meta")
+        needs.setWordWrap(True)
+        outer.addWidget(needs)
+        outer.addStretch(1)
+        if window is not None:
+            self.remote_connect_button.clicked.connect(self._remote_connect_clicked)
+            self.remote_host_field.returnPressed.connect(self._remote_connect_clicked)
+            self.remote_host_field.editingFinished.connect(self._remote_host_edited)
+            self.remote_autoconnect_box.toggled.connect(self._remote_autoconnect_toggled)
+            window.remoteChanged.connect(self._sync_remote)
+        else:
+            self.remote_connect_button.setEnabled(False)
+        self._sync_remote()
+        return page
+
+    def _remote_host_edited(self) -> None:
+        window = self._window()
+        dc = getattr(window, "desktop_core", None)
+        text = self.remote_host_field.text().strip()
+        if window is None or dc is None:
+            return
+        target = dc.parse_ssh_target(text)
+        if text and target is None:
+            self.remote_feedback.setText("Enter a server as user@host, host:port, or an ~/.ssh/config alias.")
+            return
+        window.set_remote_setting("host", target.label if target else "")
+        if target is None and self.remote_autoconnect_box.isChecked():
+            self.remote_autoconnect_box.setChecked(False)
+
+    def _remote_autoconnect_toggled(self, checked: bool) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_remote_setting("autoconnect", checked)
+
+    def _remote_connect_clicked(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if window.remote_phase in ("on", "connecting"):
+            window.disconnect_remote()
+            return
+        self._remote_host_edited()
+        window.connect_remote(self.remote_host_field.text().strip())
+
+    def _sync_remote(self) -> None:
+        window = self._window()
+        if window is None:
+            self.remote_feedback.setText("Remote compute is unavailable in this view.")
+            return
+        phase = window.remote_phase
+        self.remote_connect_button.setText(
+            {"on": "Disconnect", "connecting": "Cancel"}.get(phase, "Connect"))
+        self.remote_connect_button.setAccessibleName(
+            {"on": "Disconnect remote compute", "connecting": "Cancel connecting"}.get(
+                phase, "Connect to the remote compute server"))
+        self.remote_host_field.setEnabled(phase not in ("on", "connecting"))
+        text = window.remote_message or "Not connected - models run on this machine."
+        prefix = {"on": "● ", "connecting": "… ", "error": "⚠ "}.get(phase, "")
+        self.remote_feedback.setText(prefix + text)
+
     def _privacy_page(self, preferences: dict[str, Any], agent_limitation: str) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -11072,7 +11682,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(heading)
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
+        window = self._window()
+        where = window.inference_location() if window is not None else "on this machine"
+        form.addRow("Inference", QLabel(f"Onionmind inference {where}"))
         tor = QLabel(
             "Chat search and the coding agent both leave over Tor; a failed Tor "
             "check never falls back to a direct request."
@@ -11553,6 +12165,7 @@ class SettingsDialog(QDialog):
 
 class OnionmindWindow(QMainWindow):
     featuresChanged = Signal(object)
+    remoteChanged = Signal()
 
     def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
         super().__init__()
@@ -11588,6 +12201,12 @@ class OnionmindWindow(QMainWindow):
         self.tor_phase = "off"
         self.tor_stop_event: Optional[threading.Event] = None
         self.tor_in_use = False
+        # Remote compute: the live `ssh -L` tunnel, and its phase for the UI
+        # ("off" | "connecting" | "on" | "error").
+        self.remote_tunnel: Any = None
+        self._remote_pending: Any = None
+        self.remote_phase = "off"
+        self.remote_message = ""
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
         self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
@@ -11658,10 +12277,16 @@ class OnionmindWindow(QMainWindow):
                 self.show_update_ready()
             if self.update_permission_enabled():
                 self._start_update_timer()
-            self._probe_services()
+            # Connecting at launch is an opt-in the user ticked in Settings;
+            # without it, opening Onionmind still contacts nothing.
+            autoconnect = self.remote_settings()["autoconnect"]
+            self._probe_services(models=not autoconnect)
+            if autoconnect:
+                self.connect_remote()
             self.tor_liveness_timer = QTimer(self)
             self.tor_liveness_timer.setInterval(2500)
             self.tor_liveness_timer.timeout.connect(self._poll_tor_liveness)
+            self.tor_liveness_timer.timeout.connect(self._poll_remote_liveness)
             self.tor_liveness_timer.start()
 
     def _build_window(self) -> None:
@@ -12186,7 +12811,12 @@ class OnionmindWindow(QMainWindow):
         else:
             self.new_task(save_current=False)
 
-    def _probe_services(self) -> None:
+    def _probe_services(self, models: bool = True) -> None:
+        if models:
+            self._probe_models()
+        self._probe_tor()
+
+    def _probe_models(self) -> None:
         def model_probe(signals: WorkerSignals) -> tuple[str, list[str]]:
             del signals
             detector = getattr(self.core, "detect_backend", None)
@@ -12201,6 +12831,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.result.connect(self._model_probe_complete)
         worker.signals.error.connect(lambda message: self._model_probe_failed(message))
 
+    def _probe_tor(self) -> None:
         checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
             self.tor_phase = "error"
@@ -12279,8 +12910,9 @@ class OnionmindWindow(QMainWindow):
         current = self.current_model_id()
         self.set_model_options(models or [current], current)
         self.model_status.set_status("Ready", "good")
-        self.model_status.setToolTip("Onionmind inference is ready on this machine")
-        self.inspector.append_activity("Onionmind inference ready")
+        where = self.inference_location()
+        self.model_status.setToolTip(f"Onionmind inference is ready {where}")
+        self.inspector.append_activity(f"Onionmind inference ready {where}")
 
     def _model_probe_failed(self, message: str) -> None:
         self._report_error(message, "server")
@@ -16118,6 +16750,107 @@ class OnionmindWindow(QMainWindow):
             return
         self.setup_overlay.open()
 
+    # --- Remote compute over SSH ---------------------------------------------
+
+    def remote_settings(self) -> dict[str, Any]:
+        loader = getattr(self.desktop_core, "load_remote_settings", None)
+        if not callable(loader):
+            return {"host": "", "autoconnect": False}
+        return loader(self.settings_data)
+
+    def set_remote_setting(self, key: str, value: Any) -> None:
+        stored = self.settings_data.get("remote_compute")
+        settings = dict(stored) if isinstance(stored, dict) else {}
+        settings[key] = value
+        self.settings_data["remote_compute"] = settings
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def inference_location(self) -> str:
+        tunnel = self.remote_tunnel
+        if self.remote_phase == "on" and tunnel is not None:
+            return f"on {tunnel.target.label} (over SSH)"
+        return "on this machine"
+
+    def _set_remote_phase(self, phase: str, message: str = "") -> None:
+        self.remote_phase, self.remote_message = phase, message
+        self.remoteChanged.emit()
+
+    def connect_remote(self, host: Optional[str] = None) -> None:
+        """Open the SSH tunnel to `host` (default: the saved one) off the UI thread."""
+        dc = self.desktop_core
+        if dc is None or not hasattr(dc, "SshTunnel") or not callable(getattr(self.core, "use_ollama_port", None)):
+            self._set_remote_phase("error", "This Onionmind build cannot use remote compute.")
+            return
+        target = dc.parse_ssh_target(host if host is not None else self.remote_settings()["host"])
+        if target is None:
+            self._set_remote_phase("error", "Enter a server as user@host, host, or an ~/.ssh/config alias.")
+            return
+        if self.remote_phase == "connecting":
+            return
+        self.disconnect_remote(reprobe=False)
+        tunnel = dc.SshTunnel(target)
+        self._remote_pending = tunnel
+        self._set_remote_phase("connecting", f"Connecting to {target.label} over SSH…")
+        self.model_status.set_status("Connecting", "busy")
+        self.inspector.append_activity(f"Remote compute: opening SSH tunnel to {target.label} (direct, not Tor)")
+
+        def open_tunnel(signals: WorkerSignals) -> Any:
+            del signals
+            tunnel.start()
+            return tunnel
+
+        worker = self._start_worker(open_tunnel)
+        worker.signals.result.connect(self._remote_connected)
+        worker.signals.error.connect(lambda message: self._remote_failed(message))
+
+    def _remote_connected(self, tunnel: Any) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            tunnel.stop()                  # disconnected (or closed) while connecting
+            return
+        self.remote_tunnel = tunnel
+        self.core.use_ollama_port(tunnel.local_port)
+        label = tunnel.target.label
+        self._set_remote_phase("on", f"Connected to {label} · Ollama {tunnel.version}")
+        self.set_status(f"Models now run on {label}")
+        self.inspector.append_activity(f"Remote compute on: models run on {label}")
+        self._probe_models()
+
+    def _remote_failed(self, message: str) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            return
+        self._set_remote_phase("error", message)
+        self.set_status(f"Remote compute: {message}")
+        self.inspector.append_activity(f"Remote compute failed: {message}")
+        self._probe_models()               # show what this machine can still do
+
+    def disconnect_remote(self, reprobe: bool = True, message: str = "") -> None:
+        tunnel, self.remote_tunnel = self.remote_tunnel, None
+        pending, self._remote_pending = self._remote_pending, None
+        was_on = tunnel is not None or self.remote_phase == "connecting"
+        if tunnel is not None:
+            tunnel.stop()
+        if pending is not None:
+            pending.cancel()
+        use_port = getattr(self.core, "use_ollama_port", None)
+        if callable(use_port):
+            use_port(None)
+        self._set_remote_phase("error" if message else "off", message)
+        if was_on and reprobe:
+            self.inspector.append_activity("Remote compute off: models run on this machine")
+            self._probe_models()
+
+    def _poll_remote_liveness(self) -> None:
+        tunnel = self.remote_tunnel
+        if self.remote_phase != "on" or tunnel is None or tunnel.alive:
+            return
+        detail = tunnel.last_error()
+        message = f"Lost the SSH tunnel to {tunnel.target.label}: {detail}"
+        self.set_status(message + " Models run on this machine again.")
+        self.disconnect_remote(message=message)
+
     # --- v2: auto-delete and app lock ----------------------------------------
 
     def _lock_settings(self) -> dict[str, Any]:
@@ -16473,6 +17206,9 @@ class OnionmindWindow(QMainWindow):
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        for tunnel in (self.remote_tunnel, self._remote_pending):
+            if tunnel is not None:
+                tunnel.cancel()
         if self.preferences.get("clear_on_exit", False):
             # Last, so it takes what this very close just wrote with it.
             self.wipe_machine_data()
@@ -16552,8 +17288,13 @@ chmod 644 "$DIR/onionmind_desktop_core.py" "$DIR/onionmind_desktop.py"
 
 DESKTOP_ENV="$DIR/desktop-env"
 DESKTOP_MARKER="$DESKTOP_ENV/.onionmind-desktop-ready"
+say "Step: native desktop runtime"
+if [ -f "$DESKTOP_MARKER" ] &&
+   "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets' >/dev/null 2>&1; then
+  skip "the PySide6 runtime is installed and imports cleanly"
+else
 rm -f -- "$DESKTOP_MARKER"
-say "Preparing native desktop runtime"
+say "Preparing native desktop runtime (PySide6 from PyPI)"
 if python3 -m venv "$DESKTOP_ENV"; then
   if ! "$DESKTOP_ENV/bin/python" -m pip install --quiet --disable-pip-version-check \
       requests PySocks PySide6-Essentials==6.11.1; then
@@ -16566,6 +17307,7 @@ if python3 -m venv "$DESKTOP_ENV"; then
   fi
 else
   warn "could not create the native desktop environment; the classic UI remains available"
+fi
 fi
 
 # --- 9. Desktop launcher -----------------------------------------------------
@@ -16707,12 +17449,118 @@ DESK
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 fi
 
+# --- 10. Client: the compute server -----------------------------------------
+# Everything the workbench's Settings -> Compute needs, done once from here:
+# key login, the server's Ollama + model (by running this same script there
+# with --server), and the saved server address. Each part checks first.
+if [ "$ROLE" = client ]; then
+  say "Step: compute server"
+  # Passwords (the server account's, its sudo) can only be typed into a terminal.
+  HAVE_TTY=0; { : < /dev/tty; } 2>/dev/null && HAVE_TTY=1
+  if [ -z "$SERVER_HOST" ]; then
+    if [ "$HAVE_TTY" = 1 ]; then
+      printf '    Server to run the models on (user@host, host:port or an ssh alias; Enter to skip): ' > /dev/tty
+      read -r SERVER_HOST < /dev/tty || SERVER_HOST=""
+    fi
+  fi
+  SERVER_HOST=$(printf '%s' "$SERVER_HOST" | tr -d '[:space:]')
+  if [ -z "$SERVER_HOST" ]; then
+    warn "no server given - set one later in Onionmind: Settings -> Compute, or rerun with --host=user@server"
+  else
+    # Same narrow rule as the app: no spaces, no leading dash, optional :port.
+    [[ "$SERVER_HOST" =~ ^([A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+(:[0-9]{1,5})?$ && "$SERVER_HOST" != -* ]] ||
+      die "not a server address: $SERVER_HOST (use user@host, host:port or an ssh alias)"
+    SSH_DEST=$SERVER_HOST; SSH_PORT=()
+    if [[ "$SERVER_HOST" =~ ^(.+):([0-9]+)$ ]]; then
+      SSH_DEST=${BASH_REMATCH[1]}; SSH_PORT=(-p "${BASH_REMATCH[2]}")
+    fi
+    remote() { ssh -o BatchMode=yes -o ConnectTimeout=15 ${SSH_PORT[@]+"${SSH_PORT[@]}"} -- "$SSH_DEST" "$@"; }
+
+    # 10a. Key login - the app cannot type a password, so this must work first.
+    if remote true 2>/dev/null; then
+      skip "key login to $SSH_DEST works"
+    else
+      [ "$HAVE_TTY" = 1 ] || die "key login to $SSH_DEST does not work yet, and without a terminal there is nowhere to type its password - run this installer in a terminal (or run ssh-copy-id $SSH_DEST yourself first)"
+      if ! ls "$HOME"/.ssh/id_*.pub >/dev/null 2>&1; then
+        # No passphrase: Onionmind opens the tunnel unattended. Use ssh-agent and
+        # your own passphrase-protected key instead if you prefer - this step is
+        # skipped whenever a key already exists.
+        say "Creating an SSH key (~/.ssh/id_ed25519, no passphrase)"
+        mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+        ssh-keygen -q -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "onionmind@$(hostname)"
+      fi
+      say "Copying your SSH key to $SSH_DEST - it asks for that account's password once (and to trust its host key the first time)"
+      ssh-copy-id ${SSH_PORT[@]+"${SSH_PORT[@]}"} "$SSH_DEST" < /dev/tty || die "could not install the key on $SSH_DEST"
+      remote true || die "key login to $SSH_DEST still fails. If your key has a passphrase, load it first (ssh-add) - Onionmind connects without prompting; otherwise check ~/.ssh/authorized_keys there"
+      say "Key login to $SSH_DEST works"
+    fi
+
+    # 10b. The server's Ollama and a model.
+    REMOTE_MODELS=$(remote "curl -sf --noproxy '*' -m 5 http://127.0.0.1:11434/api/tags" 2>/dev/null |
+      python3 -c 'import json,sys; print(" ".join(m["name"] for m in json.load(sys.stdin).get("models", [])))' 2>/dev/null || true)
+    if [ -n "$REMOTE_MODELS" ]; then
+      skip "$SSH_DEST already runs Ollama with: $REMOTE_MODELS"
+    else
+      [ -f "$SELF" ] || die "cannot copy this installer to the server (was it piped into bash?) - download it, then run: bash install-onionmind.sh --client"
+      [ "$HAVE_TTY" = 1 ] || die "$SSH_DEST needs its server setup, which asks for a sudo password there - run this installer in a terminal"
+      say "Setting up $SSH_DEST as the compute server (runs this installer there with --server)"
+      warn "it may ask for your sudo password on $SSH_DEST"
+      REMOTE_TMP=$(remote 'mktemp') || die "could not create a temp file on $SSH_DEST"
+      remote "cat > '$REMOTE_TMP'" < "$SELF"
+      ssh -t ${SSH_PORT[@]+"${SSH_PORT[@]}"} -- "$SSH_DEST" \
+        "ONIONMIND_MODEL='${ONIONMIND_MODEL:-auto}' bash '$REMOTE_TMP' --server; rc=\$?; rm -f '$REMOTE_TMP'; exit \$rc" < /dev/tty ||
+        die "the server setup on $SSH_DEST failed - see its output above; rerun to continue where it stopped"
+    fi
+
+    # 10c. Point the app at it: the same settings Settings -> Compute writes.
+    # Connecting at launch is the point of a client install; ONIONMIND_AUTOCONNECT=0
+    # leaves it to the Connect button instead.
+    AUTOCONNECT=true; [ "${ONIONMIND_AUTOCONNECT:-1}" = 0 ] && AUTOCONNECT=false
+    if [ -f "$DESKTOP_MARKER" ]; then
+      SAVED=$(QT_QPA_PLATFORM=offscreen "$DESKTOP_ENV/bin/python" - "$DIR" "$SERVER_HOST" "$AUTOCONNECT" <<'SETPY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from PySide6.QtCore import QCoreApplication, QStandardPaths
+import onionmind_desktop_core as core
+from onionmind_desktop import APP_ID, APP_NAME
+app = QCoreApplication([])
+app.setOrganizationName(APP_NAME)
+app.setApplicationName(APP_ID)
+root = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation) or Path.home() / ".onionmind") / "desktop"
+store = core.SettingsStore(root / "settings.json", defaults={})
+settings = store.load()
+wanted = {"host": sys.argv[2], "autoconnect": sys.argv[3] == "true"}
+if core.load_remote_settings(settings) == wanted:
+    print("same")
+else:
+    settings["remote_compute"] = wanted
+    root.mkdir(parents=True, exist_ok=True)
+    store.save(settings)
+    print("saved")
+SETPY
+) || SAVED=failed
+      case "$SAVED" in
+        same)  skip "Onionmind already uses $SERVER_HOST" ;;
+        saved) say "Onionmind will run models on $SERVER_HOST (connect at launch: $AUTOCONNECT)" ;;
+        *)     warn "could not save the server in Onionmind's settings - set it in Settings -> Compute" ;;
+      esac
+    else
+      warn "the native workbench is not ready, so set the server later in Settings -> Compute"
+    fi
+  fi
+fi
+
 echo
 say "Ready"
 echo "  Desktop:     onionmind   (native local workbench)"
 echo "  Coding:      onionmind-code \"task\"   (headless agent; web over Tor only)"
 echo "  Updates:     onionmind-update   (code only, model untouched)"
 [ "$VISION" = 1 ] && echo "  Images:      ollama run $MODEL_NAME-vision   (then give it an image path)"
+if [ "$ROLE" = client ]; then
+  echo "  Models:      on ${SERVER_HOST:-the server you set in Settings -> Compute}, through an SSH tunnel the workbench opens"
+  echo "               (the terminal commands below still use a local model server)"
+fi
 echo "  Web search:  $DIR/onionmind.py \"your question\""
 if [ "$DISTRO" = mac ]; then
   echo "  Launcher:    Spotlight -> onionmind   (no .app bundle yet; command first)"

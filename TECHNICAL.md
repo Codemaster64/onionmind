@@ -292,6 +292,56 @@ used), `git restore`/`git diff --numstat` (undo), `node --version` (setup),
 feature), and `ollama serve` when the errors feature's Restart button finds
 the model server down and its program installed.
 
+### Remote compute over SSH
+
+Settings → **Compute** runs the models on another machine — a GPU server — while
+projects, edits, the agent, the terminal and Tor stay on this one. Onionmind
+starts `ssh -N -L 127.0.0.1:<free port>:127.0.0.1:11434 -- <server>` with
+`BatchMode=yes` and `ExitOnForwardFailure=yes` (`SshTunnel` in
+`onionmind_desktop_core.py`), waits until that server's Ollama answers
+`/api/version` through the tunnel, then calls `onionmind.use_ollama_port()`.
+Only the **port** changes: every model call still goes to `127.0.0.1`, so the
+agent's loopback-only socket shims need no exception, and the exported
+`ONIONMIND_OLLAMA_PORT`/`OLLAMA_HOST` make `onionmind.py --agent` and the
+`ollama` CLI it calls follow the tunnel. Model pulls from the workbench then
+download on the server.
+
+- **The SSH connection is direct, not Tor.** It is the user's own server and
+  carries prompts and replies, encrypted by SSH. It opens only when the user
+  presses Connect, or at launch if they ticked *Connect automatically* (off by
+  default) — with that box ticked, opening Onionmind is no longer contact-free.
+- **Key login only.** `BatchMode` means ssh never waits on a password or
+  host-key prompt nobody can see; it fails with a message naming the fix
+  (`ssh-copy-id`, accept the host key once in a terminal).
+- **A dropped tunnel is noticed** by the 2.5 s liveness timer; the workbench
+  says so and points model calls back at this machine.
+- Settings: `remote_compute: {host, autoconnect}` in `settings.json`. The host
+  is validated narrowly (no spaces, no leading `-`, passed after `--`).
+- ponytail: the GPU/VRAM figures in the model manager still come from this
+  machine's `nvidia-smi`, not the server's.
+
+**Installer roles.** `install-onionmind.sh --server` installs only what a
+compute server needs (Ollama with its default 127.0.0.1 bind, the model that
+fits its GPU, `openssh-server`) and stops before the app payloads.
+`--client` installs the app and Tor with no models — `ollama` only for its
+command, which Agent mode calls, with the service it adds disabled (an Ollama
+that was already there is left alone) — then, for the server: key login
+(`ssh-keygen` only if no key exists, `ssh-copy-id` only if key login fails),
+`--server` run there over `ssh -t` only if its Ollama lists no models, and the
+`remote_compute` settings written only if they differ. Both print a plan from
+read-only probes first; `--check` exits there, before the first `sudo`
+(pinned by `tests/test_installer_contracts.py`).
+
+Verified: `tests/test_desktop_core.py` (`RemoteComputeTests`) drives
+`SshTunnel` against a fake ssh that serves `/api/version` — ready only once
+Ollama answers, a refused login raises the `ssh-copy-id` hint, a login with no
+Ollama behind it fails fast, cancel mid-connect leaves no process — and
+`tests/test_backends.py` checks that `use_ollama_port` moves only the loopback
+port, that a child `onionmind.py` inherits it, and that reset restores 11434.
+Real OpenSSH was run with the exact argv against an unresolvable host (clean
+error in 0.5 s). **Not yet verified:** a full chat or agent run through a live
+tunnel to a real Ollama server, and Windows' bundled OpenSSH client.
+
 ## Which build you get
 
 The installer reads your VRAM and picks accordingly. All three are the same abliterated
@@ -398,6 +448,11 @@ answers, project snapshots, and session files remain local. Search queries go to
 DuckDuckGo through Tor. Model pulls and the source-install `onionmind-update`
 command are explicit direct downloads; the native desktop updater fetches its
 manifest and bundle through Tor.
+
+**Remote compute is the one exception, and only when you turn it on.** With
+Settings → Compute connected, prompts and replies travel to your own server over
+a direct SSH tunnel instead of staying on this machine; search and agent egress
+still use Tor. See [Remote compute over SSH](#remote-compute-over-ssh).
 
 **Agent mode's supported web path leaves over Tor or does not leave.** Every
 agent launcher—the workbench, `onionmind-code`, and launchers installed by the

@@ -161,6 +161,28 @@ run as your normal user). Same deal — the right model for your hardware, an
 and honestly labelled: its Tor logic is unit-tested offline and the installer
 is syntax-checked, but it has not been run on Apple hardware yet.
 
+**Models on a server, the app on your computer** — one command on your
+computer sets up both:
+
+```bash
+bash install-onionmind.sh --client --host=you@your-server   # leave --host out and it asks
+```
+
+It installs the app and Tor here (no local models), makes sure your SSH key logs
+in to the server (asking that account's password once), then copies itself to
+the server and runs `--server` there (asking for sudo there): Ollama, the model
+that fits that server's GPU, and SSH — nothing else. Finally it points
+Onionmind's Settings → Compute at the server, set to connect at launch
+(`ONIONMIND_AUTOCONNECT=0` leaves it to the Connect button). On the server alone:
+`bash install-onionmind.sh --server`.
+
+Every mode prints its plan first — `[ok]` for what is already there and will be
+skipped, `[todo]` for what it will do — and every step checks again before it
+runs, so a rerun only does what is missing. `--check` prints the plan and
+changes nothing. *Verified on Arch: the plan in all three modes, the skip
+detection against a stub Ollama, and the client's server steps against a stub
+`ssh`; not yet run end to end on a real Ubuntu server.*
+
 Already set up and want the newest native Windows build directly? Download the
 rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip),
 rebuilt from `main` after every successful desktop workflow.
@@ -244,6 +266,15 @@ export a conversation; the classic CLI still supports `/save notes.txt`.
 - Inspect the bounded project tree, Git status and diff, and recent activity beside the conversation.
 - Discover installed Ollama models, see their Onionmind tier names, switch models, and confirm a direct-network pull for another model.
 - Run Qwen Code non-interactively in **Agent** mode after confirming its direct-network boundary; no browser window or embedded web UI is involved.
+
+**Remote compute.** Have a GPU server? Settings → **Compute** → enter
+`user@server` → **Connect**. Onionmind opens an SSH tunnel to that server's
+Ollama, so the model runs there while your files, edits, agent, terminal and Tor
+stay on this computer. It needs key-based SSH login (`ssh-copy-id user@server`)
+and Ollama running on the server, bound to `127.0.0.1` as it is by default. The SSH
+connection is direct, not Tor, and opens only when you press Connect (or at
+launch, if you tick that box). *Checked against a fake ssh in the test suite; not
+yet run end to end against a live server.*
 
 Stop requests terminate the managed shell or agent launcher process. A command
 that deliberately starts detached or background child processes may require
