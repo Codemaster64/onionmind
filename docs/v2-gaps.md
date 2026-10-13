@@ -41,5 +41,5 @@ run** = not exercised.
 
 ## Flagged, not changed
 
-- **The Agent warning dialog.** Before every Agent run (pre-existing, `submit`), a dialog says the agent and its commands "are not confined to Tor" and "may contact arbitrary hosts directly". `TECHNICAL.md` and the in-app privacy card say agent traffic is Tor-only, fails closed, and is limited only by the documented proxy-ignoring-command gap. `DESIGN.md`'s Separate Boundaries Rule also says never to imply agent traffic is Tor-confined. These statements disagree; which wording is right is a product decision, so the dialog is left as it was.
+- **The Agent warning dialog** (resolved). It used to say the agent is "not confined to Tor" and "may contact arbitrary hosts directly", while the docs said Tor-only and fail-closed. Now everything says the same accurate thing: proxy-aware agent traffic goes through Tor, direct Python and Node sockets are blocked, and a command that ignores proxies can still connect directly. This affects the dialog, the run-panel meta line, the "Agent network" row, the privacy card and TECHNICAL.md.
 - **Retry with YOLO.** The checklist's baseline lists a stop card with "Retry with YOLO". That button does not exist in the current app (only "Retry last turn" for failed Chat turns), so it was not added.

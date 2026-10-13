@@ -1634,8 +1634,9 @@ HARNESS_LIMITATION = (
     "there is nobody to ask it stops instead of continuing. Ticking YOLO lets it "
     "edit files and run commands unattended - that widens what it may do to this "
     "machine, and moves the network boundary not at all. "
-    "The agent reaches the web only through Tor: it verifies "
-    "a circuit before it starts and refuses to run without one.\n\n"
+    "The agent's web traffic goes through Tor: it verifies a circuit before it "
+    "starts and refuses to run without one. That covers proxy-aware traffic, not "
+    "every command it may run - see below.\n\n"
     + TOR_CONTAINMENT_CEILING
 )
 
