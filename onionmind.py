@@ -1503,7 +1503,10 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable=None, stream=False):
+AGENT_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def agent_argv(model=None, task=None, executable=None, stream=False, resume=None):
     """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
     This used to be `ollama launch dsh -- --profile headless <task>`. The
@@ -1521,6 +1524,11 @@ def agent_argv(model=None, task=None, executable=None, stream=False):
     argv = list(executable) if executable else qwen_launcher()
     if model:
         argv += ["--model", model]
+    if resume:
+        # Pick up a stopped run: same qwen session, same context, new turn.
+        if not AGENT_SESSION_ID.fullmatch(resume):
+            raise ValueError(f"not an agent session id: {resume!r}")
+        argv += ["--resume", resume]
     if stream:
         # The desktop's structured mode: qwen reads the task and the person's
         # approvals as JSON lines on stdin and reports every step as JSON on
@@ -1562,7 +1570,7 @@ def agent_env(env=None):
 
 
 def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
-              extra_deny=(), no_network=False):
+              extra_deny=(), no_network=False, resume=None):
     """Run the coding agent over Tor and return its exit code.
 
     qwen_setup() writes the settings the agent reads (deny list, approval mode,
@@ -1601,7 +1609,8 @@ def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
     # Piped stdout is block-buffered, so without this the desktop's process
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
-    return subprocess.call(agent_argv(model, None if stream else task, stream=stream),
+    extra = {"resume": resume} if resume else {}
+    return subprocess.call(agent_argv(model, None if stream else task, stream=stream, **extra),
                            env=env, cwd=workdir)
 
 
@@ -2163,6 +2172,11 @@ if __name__ == "__main__":
             i = args.index("--deny")
             deny.append(args.pop(i + 1))
             args.pop(i)
+        resume = None
+        if "--resume" in args[:-1]:              # --resume SESSION_ID
+            i = args.index("--resume")
+            resume = args.pop(i + 1)
+            args.pop(i)
         model = None
         workdir = None
         if len(args) >= 2 and args[0] == "--model":
@@ -2174,7 +2188,8 @@ if __name__ == "__main__":
                                        yolo=yolo, workdir=workdir,
                                        stream="--stream-json" in sys.argv,
                                        extra_deny=deny,
-                                       no_network="--no-network" in sys.argv))
+                                       no_network="--no-network" in sys.argv,
+                                       resume=resume))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:

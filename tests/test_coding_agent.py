@@ -429,6 +429,17 @@ class HarnessAgentTests(unittest.TestCase):
                                               executable=["qwen"]),
                          ["qwen", "--model", "some-model"])
 
+    def test_a_stopped_run_resumes_its_own_session_and_nothing_else(self):
+        argv = onionmind.agent_argv("m", None, executable=["qwen"], stream=True,
+                                    resume="46d34087-9e08-4a2d-af1d-1551019a8e3d")
+        self.assertEqual(argv[:5], ["qwen", "--model", "m", "--resume",
+                                    "46d34087-9e08-4a2d-af1d-1551019a8e3d"])
+        self.assertIn("stream-json", argv)
+        for bad in ("--yolo", "a b", "../x", ""):
+            if bad:
+                with self.assertRaises(ValueError):
+                    onionmind.agent_argv("m", None, executable=["qwen"], resume=bad)
+
     def test_the_search_patch_escape_hatch_is_gone(self):
         # ollama's launcher rejects the patch profile today, and an environment
         # variable that smuggles it past agent_argv would be a silent boundary
