@@ -12,8 +12,6 @@ listener is already up (to verify it) or when a turn is armed for search.
 """
 from __future__ import annotations
 
-import asyncio
-
 import argparse
 import os
 import sys
@@ -225,15 +223,12 @@ class BotMessage(Vertical):
             body.display = True
             if self._phase == "Thinking":
                 self._phase = "Writing"
-        # The live render (12 Hz timer) and the final render can both be
-        # awaiting Markdown.update; overlapping updates of one Markdown widget
-        # left the reply blank on macOS, so they take turns.
-        if not hasattr(self, "_update_lock"):
-            self._update_lock = asyncio.Lock()
-        async with self._update_lock:
-            await body.update(text)
+        await body.update(text)
 
     def done(self, meta: str = "") -> None:
+        # A fast turn can finish before on_mount runs; without this, on_mount
+        # would then start the spinner and hide the finished reply.
+        self._pending = False
         if getattr(self, "_ticker", None):
             self._ticker.stop()
         self.query_one(".thinking").display = False
