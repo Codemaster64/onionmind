@@ -2904,6 +2904,9 @@ __all__ = [
     "agent_task_message",
     "agent_permission_response",
     "agent_interrupt_message",
+    "AGENT_CONTEXT_REQUEST",
+    "agent_context_usage_message",
+    "agent_context_usage",
     "describe_tool_request",
     "edit_size",
     "estimate_tokens",
@@ -5490,9 +5493,11 @@ def parse_agent_line(line: str) -> dict[str, Any]:
                 "request_id": _as_text_core(message.get("request_id"))}
     if kind == "control_response":
         response = message.get("response") or {}
+        payload = response.get("response")
         return {"kind": "control_response",
                 "request_id": _as_text_core(response.get("request_id")),
-                "ok": response.get("subtype") == "success"}
+                "ok": response.get("subtype") == "success",
+                "payload": payload if isinstance(payload, dict) else {}}
     if kind == "system":
         return {"kind": "system", "subtype": _as_text_core(message.get("subtype")),
                 "session_id": _as_text_core(message.get("session_id"))}
@@ -5550,6 +5555,39 @@ def agent_permission_response(
         response["message"] = message or "Denied by the person running Onionmind."
     return json.dumps({"type": "control_response", "response": {
         "subtype": "success", "request_id": request_id, "response": response}}) + "\n"
+
+
+AGENT_CONTEXT_REQUEST = "onionmind-ctx"
+
+
+def agent_context_usage_message(request_id: str = AGENT_CONTEXT_REQUEST) -> str:
+    """Ask qwen how full its context is (it advertises can_get_context_usage)."""
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "get_context_usage"}}) + "\n"
+
+
+def agent_context_usage(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """{used, window, overhead, estimated} from a get_context_usage answer, else None.
+
+    overhead is what qwen itself adds to every run - its system prompt, tool
+    schemas and skills - and so is missing from an estimate made before a run.
+    Memory files (AGENTS.md) are left out of it: the estimate counts those already.
+    """
+    if not isinstance(payload, Mapping) or payload.get("subtype") != "get_context_usage":
+        return None
+    try:
+        used, window = int(payload["totalTokens"]), int(payload["contextWindowSize"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    breakdown = payload.get("breakdown") if isinstance(payload.get("breakdown"), Mapping) else {}
+    overhead = 0
+    for key in ("systemPrompt", "builtinTools", "mcpTools", "skills"):
+        try:
+            overhead += max(0, int(breakdown.get(key) or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"used": max(0, used), "window": max(1, window), "overhead": overhead,
+            "estimated": bool(payload.get("isEstimated"))}
 
 
 def agent_interrupt_message(request_id: str = "onionmind-stop") -> str:
@@ -12495,6 +12533,12 @@ class OnionmindWindow(QMainWindow):
         self._agent_outcome: Optional[str] = None
         self._agent_session_id: Optional[str] = None
         self._resume_cards: list[Any] = []
+        # qwen's own context figures: live during a run, and the overhead it
+        # adds to every run, learnt from the last one.
+        self._agent_ctx_live: Optional[tuple[int, int]] = None
+        self._agent_overhead: Optional[int] = None
+        self._agent_ctx_pending = False
+        self._agent_closing = False
         self._run_allow_all = False
         self._open_steps: dict[str, Any] = {}
         # v2 model power and live numbers - only ever filled from real probes.
@@ -15188,6 +15232,9 @@ class OnionmindWindow(QMainWindow):
         self._run_allow_all = allow_all
         self._agent_session_id = resume or None
         self._clear_resume_cards()
+        self._agent_ctx_live = None
+        self._agent_ctx_pending = False
+        self._agent_closing = False
         self._agent_buffer = b""
         self._agent_yolo = yolo
         self._last_agent_task = task
@@ -15279,6 +15326,7 @@ class OnionmindWindow(QMainWindow):
                 self.desktop_core.agent_initialize_message()
                 + self.desktop_core.agent_task_message(self._agent_task_text)
             )
+            self._request_agent_context()
         if self.feature("runPanel"):
             self.inspector.run_panel.start(self._run_meta())
             self.toggle_inspector(True)
@@ -15827,11 +15875,43 @@ class OnionmindWindow(QMainWindow):
         elif kind == "system" and event.get("session_id"):
             # qwen's own session id: what "Continue this run" resumes.
             self._agent_session_id = _as_text(event.get("session_id"))
+        elif kind == "control_response" and event.get("request_id") == getattr(
+                self.desktop_core, "AGENT_CONTEXT_REQUEST", None):
+            self._agent_context_answer(event)
         elif kind == "result":
-            # The turn is over; closing stdin lets qwen exit on its own.
-            if self.harness_process is not None:
-                self.harness_process.closeWriteChannel()
+            # The turn is over; closing stdin lets qwen exit on its own - after
+            # one last context reading, or a moment's wait if it never comes.
+            self._agent_closing = True
+            self._request_agent_context()
+            if not self._agent_ctx_pending:
+                self._close_agent_input()
+            else:
+                QTimer.singleShot(3000, self._close_agent_input)
         self.transcript._scroll_later()
+
+    def _request_agent_context(self) -> None:
+        ask = getattr(self.desktop_core, "agent_context_usage_message", None)
+        if not callable(ask) or self._agent_ctx_pending:
+            return
+        self._agent_ctx_pending = True
+        self._agent_write(ask())
+
+    def _agent_context_answer(self, event: dict[str, Any]) -> None:
+        self._agent_ctx_pending = False
+        read = getattr(self.desktop_core, "agent_context_usage", None)
+        usage = read(event.get("payload") or {}) if callable(read) and event.get("ok") else None
+        if usage:
+            self._agent_ctx_live = (usage["used"], usage["window"])
+            if usage["overhead"]:
+                self._agent_overhead = usage["overhead"]
+            self._update_context_meter()
+        if self._agent_closing:
+            self._close_agent_input()
+
+    def _close_agent_input(self) -> None:
+        process = self.harness_process
+        if process is not None and process.state() != QProcess.ProcessState.NotRunning:
+            process.closeWriteChannel()
 
     def _agent_tool_use(self, item: dict[str, Any]) -> None:
         tool = _as_text(item.get("tool"))
@@ -15862,6 +15942,7 @@ class OnionmindWindow(QMainWindow):
         if state == "done" and step.get("tool") in ("edit", "write_file", "replace"):
             summary = "Written · check Changes for what is on disk"
         self.inspector.run_panel.set_step(key, state, None, summary)
+        self._request_agent_context()
         first = text.strip().splitlines()[0][:160] if text.strip() else summary
         self._agent_log(f"  {first}")
         self._tool_finished(step["label"], step["detail"], summary, ok=state == "done", key=key, state=state)
@@ -16260,8 +16341,12 @@ class OnionmindWindow(QMainWindow):
         else:
             limit = int(getattr(self.core, "NUM_CTX", 0) or self.preferences.get("context_window", 16384))
         parts: list[Any] = []
+        if self.mode == "agent" and self.active_kind == "agent" and self._agent_ctx_live:
+            return self._agent_ctx_live           # qwen's own count for the run in progress
         if self._context_used_real is not None and self.mode == "chat":
             used = self._context_used_real
+        elif self.mode == "agent" and self._agent_overhead:
+            used = self._agent_overhead           # qwen's prompt + tools, from the last run
         else:
             used = 0
             parts.append(self.chat_messages if self.mode == "chat" else "")
@@ -16313,7 +16398,14 @@ class OnionmindWindow(QMainWindow):
             self.context_meter.style().polish(self.context_meter)
         self.context_meter_label.setText(f"{fmt(used)} / {fmt(limit)}")
         files = len(self.inspector.selected_context_files())
-        agent_note = " The agent adds its own instructions on top of this." if self.mode == "agent" else ""
+        if self.mode != "agent":
+            agent_note = ""
+        elif self.active_kind == "agent" and self._agent_ctx_live:
+            agent_note = " Reported by the agent for the run in progress."
+        elif self._agent_overhead:
+            agent_note = f" Includes the agent's own instructions and tools ({fmt(self._agent_overhead)}), as it reported last run."
+        else:
+            agent_note = " The agent adds its own instructions on top of this; the first run measures them."
         self.context_box.setToolTip(
             f"Context: {used:,} of {limit:,} tokens. "
             + ("System prompt, " if self.feature("presets") and self.mode == "chat" else "")

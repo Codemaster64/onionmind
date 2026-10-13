@@ -201,6 +201,14 @@ class _FakeProcess:
         self.terminated = True
 
 
+def _context_answer(used: int, window: int, overhead: int = 0) -> str:
+    return json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": desktop_core.AGENT_CONTEXT_REQUEST, "response": {
+            "subtype": "get_context_usage", "totalTokens": used, "contextWindowSize": window,
+            "isEstimated": False, "breakdown": {"systemPrompt": overhead // 2, "builtinTools": overhead // 2,
+                                                "memoryFiles": 500, "messages": used - overhead}}}})
+
+
 def _cards(window, title_part: str) -> list:
     return [card for card in window.transcript.content.findChildren(ui.NoticeCard)
             if title_part in card.title_label.text() and card.isVisibleTo(window)]
@@ -347,7 +355,11 @@ class ApprovalTests(AgentStreamBase):
             self.app.processEvents()
             self.assertEqual(_cards(window, "wants to edit a file"), [])
             self._feed(window, FIXTURE_LINES[4:])
-            self.assertTrue(process.closed)                # result: stdin closed so qwen exits
+            # result: one last context reading first, then stdin closes so qwen exits.
+            self.assertEqual(process.written[-1]["request"]["subtype"], "get_context_usage")
+            self.assertFalse(process.closed)
+            self._feed(window, [_context_answer(9_000, 32_768, overhead=6_000)])
+            self.assertTrue(process.closed)
             self.assertIn("Done.", window.stream_block.text)
         finally:
             self._close(window)
@@ -439,6 +451,28 @@ class ResumeTests(AgentStreamBase):
             window._finish_run_panel(True)
             self.app.processEvents()
             self.assertEqual(_cards(window, "Continue this run?"), [])
+        finally:
+            self._close(window)
+
+
+class AgentContextTests(AgentStreamBase):
+    def test_the_meter_shows_qwens_count_live_and_its_overhead_afterwards(self) -> None:
+        window, process = self._agent_window(contextMeter=True, runPanel=True)
+        try:
+            window.set_mode("agent")
+            window.active_kind = "agent"
+            self._feed(window, [_context_answer(12_000, 65_536, overhead=7_000)])
+            self.assertEqual(window._context_numbers(), (12_000, 65_536))
+            self.assertIn("Reported by the agent", window.context_box.toolTip())
+            window.active_kind = None                    # run over: estimate + measured overhead
+            used, _limit = window._context_numbers()
+            self.assertGreaterEqual(used, 7_000)
+            self.assertLess(used, 12_000)
+            # A failed answer changes nothing and never raises.
+            window.active_kind = "agent"
+            self._feed(window, [json.dumps({"type": "control_response", "response": {
+                "subtype": "error", "request_id": desktop_core.AGENT_CONTEXT_REQUEST}})])
+            self.assertEqual(window._context_numbers(), (12_000, 65_536))
         finally:
             self._close(window)
 
