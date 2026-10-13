@@ -81,7 +81,7 @@ async def chat_round_trip(data: Path) -> None:
         assert "secret plan" not in screen, "private reasoning reached the screen"
         import html, re
         visible = html.unescape(re.sub(r"<[^>]+>", "", screen))
-        assert "Hello" in screen, visible[-1500:]
+        assert "Hello" in screen, " ".join(visible.split())[:3000]
 
         # Search is armed for exactly one turn, and starts Tor only then.
         await pilot.press("ctrl+s")
