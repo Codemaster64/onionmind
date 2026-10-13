@@ -8206,9 +8206,11 @@ class OnionmindWindow(QMainWindow):
         if self.mode == "agent":
             answer = QMessageBox.warning(
                 self,
-                "Run Onionmind Agent directly?",
-                "Onionmind Agent and commands it runs are not confined to Tor. They may "
-                "contact arbitrary hosts directly and expose this machine's network address. Continue?",
+                "Run Onionmind Agent?",
+                "Onionmind Agent sends proxy-aware traffic through Tor and blocks direct "
+                "Python and Node connections, but it is not fully confined to Tor: a "
+                "command that ignores proxy settings can contact hosts directly and expose "
+                "this machine's network address. Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -9270,7 +9272,7 @@ class OnionmindWindow(QMainWindow):
                 tier = _as_text(_field(display(self.current_model_id()), "tier", "")) or ""
             except Exception:
                 tier = ""
-        network = "no network (project rule)" if self._agent_rules and self._agent_rules.get("noNetwork") else "Tor-only network"
+        network = "no network (project rule)" if self._agent_rules and self._agent_rules.get("noNetwork") else "Tor for proxy-aware traffic"
         approvals = (
             "YOLO" if getattr(self, "_agent_yolo", False)
             else "asks before edits" if self.feature("approvals")
@@ -9872,7 +9874,7 @@ class OnionmindWindow(QMainWindow):
             out["Chat search"].setText("Not allowed this turn")
         rules = self._project_rules() if self.feature("rules") else None
         out["Agent network"].setText("Closed by this project’s rules" if rules and rules.get("noNetwork")
-                                     else "Tor-only bridge · fails closed")
+                                     else "Tor bridge · proxy-ignoring commands not covered")
         out["Downloads"].setText(f"Downloading {self._pulling} directly…" if self._pulling
                                  else "Direct, only after you confirm")
         out["Updates"].setText("Over Tor, checked automatically while Tor is up" if self.update_permission_enabled()

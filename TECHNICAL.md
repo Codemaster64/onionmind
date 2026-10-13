@@ -254,8 +254,9 @@ are switched in the toolbar's sparkle popover or Settings → Features. The
 known gaps are listed in [docs/v2-gaps.md](docs/v2-gaps.md).
 
 **The privacy boundary does not move.** Inference stays local, Chat search
-goes over Tor only on a turn where it is allowed, the agent keeps the
-Tor-only funnel, and downloads stay direct and confirmed. The only new
+goes over Tor only on a turn where it is allowed, the agent keeps its Tor
+bridge for proxy-aware traffic (commands that ignore proxies are still not
+covered), and downloads stay direct and confirmed. The only new
 network calls are to the local model server on `127.0.0.1:11434`
 (`/api/ps` for what is loaded, `/api/generate` to load or unload a model),
 never through a proxy.

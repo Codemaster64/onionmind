@@ -405,7 +405,7 @@ class RunPanelTests(AgentStreamBase):
             self.assertEqual(tabs.tabText(tabs.count() - 1), "Run")
             panel = window.inspector.run_panel
             panel.start(window._run_meta())
-            self.assertIn("Tor-only network · asks before edits", panel.meta_label.text())
+            self.assertIn("Tor for proxy-aware traffic · asks before edits", panel.meta_label.text())
             self._feed(window, FIXTURE_LINES[:3])
             self.assertIn("edit hello.txt", panel.plan.item(0).text())
             self.assertIn("Working…", panel.plan.item(0).text())
