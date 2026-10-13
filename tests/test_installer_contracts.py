@@ -213,6 +213,19 @@ class InstallerContractTests(unittest.TestCase):
                     self.assertGreaterEqual(updater.count(module), 2, name)
         self.assertEqual(self.text("install-onionmind.sh").count('"$DIR/onionmind_desktop'), len(modules) * 2)
 
+    def test_every_desktop_runtime_gets_the_encryption_library(self) -> None:
+        """Encryption at rest needs cryptography wherever the desktop runs; a
+        runtime without it cannot open an already encrypted data folder."""
+        for name in ("install-onionmind.sh", "onionmind-setup.cmd", "update-onionmind.sh",
+                     "update-onionmind.ps1", "requirements-desktop.txt", "pyproject.toml",
+                     ".github/workflows/desktop-build.yml"):
+            with self.subTest(file=name):
+                self.assertIn("cryptography>=42,<51", self.text(name))
+        for name in ("install-onionmind.sh", "onionmind-setup.cmd", "update-onionmind.sh",
+                     "update-onionmind.ps1", "tools/build-desktop.ps1"):
+            with self.subTest(import_check=name):
+                self.assertIn("cryptography.hazmat.primitives.ciphers.aead", self.text(name))
+
     def test_desktop_runtime_is_used_only_after_an_import_check(self) -> None:
         for name in (
             "onionmind-setup.cmd",

@@ -60,6 +60,13 @@ the dynamically linked community wheel and does not modify Qt. Full license and
 third-party attribution details:
 https://doc.qt.io/qtforpython-6/licenses.html
 
+## pyca/cryptography (Apache-2.0 OR BSD-3-Clause)
+
+https://github.com/pyca/cryptography — AES-256-GCM for Onionmind's encryption
+at rest, installed into the desktop runtime from PyPI and bundled in the
+Windows build. Copyright (c) Individual contributors. Full text:
+https://github.com/pyca/cryptography/blob/main/LICENSE
+
 ## DeepSeek Harness (MIT)
 
 https://github.com/deepseek-ai/deepseek-harness — the optional repository-aware

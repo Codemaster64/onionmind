@@ -139,6 +139,22 @@ __all__ = [
     "describe_ssh_failure",
     "load_remote_settings",
     "SshTunnel",
+    "VAULT_FILE",
+    "Vault",
+    "VaultError",
+    "WrongPassword",
+    "KeystoreUnavailable",
+    "encryption_available",
+    "open_vault",
+    "vault_header",
+    "vault_needs_password",
+    "encrypt_data_folder",
+    "erase_data_folder",
+    "keystore_for",
+    "is_encrypted",
+    "read_data_file",
+    "write_data_file",
+    "absorb_agent_net_log",
 ]
 
 
@@ -293,9 +309,22 @@ def _utc_now() -> str:
     )
 
 
-def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
-    """Write a JSON object next to its destination, then atomically replace it."""
+def _atomic_write_json(path: Path, value: Mapping[str, Any], vault: Any = None) -> None:
+    """Write a JSON object next to its destination, then atomically replace it.
 
+    With a vault the file is written encrypted. Without one, an encrypted file
+    is never overwritten with plaintext: that would be a silent downgrade."""
+
+    if vault is not None:
+        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        _atomic_write_bytes(path, vault.encrypt(text.encode("utf-8")))
+        return
+    try:
+        with path.open("rb") as existing:
+            if is_encrypted(existing.read(len(_ENC_MAGIC))):
+                raise VaultError(f"{path.name} is encrypted; it can only be written through the open vault")
+    except OSError:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     handle = None
@@ -359,12 +388,21 @@ def _quarantine_corrupt(path: Path) -> Path | None:
     return destination
 
 
-def _read_json_object(path: Path) -> dict[str, Any] | None:
+def _read_json_object(path: Path, vault: Any = None) -> dict[str, Any] | None:
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except FileNotFoundError:
+        raw = path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError):
         return None
+    if is_encrypted(raw):
+        # Without the right key the file is unreadable, not corrupt: leave it.
+        if vault is None:
+            return None
+        try:
+            raw = vault.decrypt(raw)
+        except VaultError:
+            return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
         _quarantine_corrupt(path)
         return None
@@ -382,14 +420,16 @@ class SettingsStore:
         self,
         path: PathInput,
         defaults: Mapping[str, Any] | None = None,
+        vault: Any = None,
     ) -> None:
         self.path = Path(path).expanduser()
+        self.vault = vault
         if defaults is not None and not isinstance(defaults, Mapping):
             raise TypeError("settings defaults must be a mapping")
         self._defaults = copy.deepcopy(dict(defaults or {}))
 
     def load(self) -> dict[str, Any]:
-        loaded = _read_json_object(self.path)
+        loaded = _read_json_object(self.path, self.vault)
         result = copy.deepcopy(self._defaults)
         if loaded is not None:
             result.update(loaded)
@@ -400,7 +440,7 @@ class SettingsStore:
             raise TypeError("settings must be a mapping")
         result = copy.deepcopy(self._defaults)
         result.update(copy.deepcopy(dict(settings)))
-        _atomic_write_json(self.path, result)
+        _atomic_write_json(self.path, result, self.vault)
         return copy.deepcopy(result)
 
 
@@ -1033,9 +1073,10 @@ def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
 class SessionStore:
     """Own creation, persistence, discovery, and archiving of local sessions."""
 
-    def __init__(self, root: PathInput) -> None:
+    def __init__(self, root: PathInput, vault: Any = None) -> None:
         self.root = Path(root).expanduser()
         self.archive_root = self.root / "archive"
+        self.vault = vault
 
     @staticmethod
     def _validate_id(session_id: str) -> str:
@@ -1114,12 +1155,12 @@ class SessionStore:
             created_at=now,
             updated_at=now,
         )
-        _atomic_write_json(self._path(session.id), session.to_dict())
+        _atomic_write_json(self._path(session.id), session.to_dict(), self.vault)
         return session
 
     def load(self, session_id: str, *, archived: bool = False) -> ChatSession | None:
         path = self._path(session_id, archived=archived)
-        value = _read_json_object(path)
+        value = _read_json_object(path, self.vault)
         if value is None:
             return None
         try:
@@ -1153,7 +1194,7 @@ class SessionStore:
         )
         target = self._path(normalized.id, archived=normalized.archived_at is not None)
         payload = normalized.to_dict()
-        stored = _read_json_object(target)
+        stored = _read_json_object(target, self.vault)
         if stored is not None and stored.get("messages") == payload["messages"]:
             # Sessions list newest-conversation-first, so a write that adds no
             # history - a rename, a model swap, re-saving one just opened -
@@ -1162,7 +1203,7 @@ class SessionStore:
             if isinstance(kept, str) and kept:
                 normalized = replace(normalized, updated_at=kept)
                 payload["updated_at"] = kept
-        _atomic_write_json(target, payload)
+        _atomic_write_json(target, payload, self.vault)
 
         # Keep the mutable value object useful to callers that retain it.
         session.title = normalized.title
@@ -1198,7 +1239,7 @@ class SessionStore:
         session.updated_at = now
         session.archived_at = now
         destination = self._path(session.id, archived=True)
-        _atomic_write_json(destination, session.to_dict())
+        _atomic_write_json(destination, session.to_dict(), self.vault)
         try:
             self._path(session.id).unlink()
         except FileNotFoundError:
@@ -2965,14 +3006,544 @@ def verify_passphrase(passphrase: str, record: Mapping[str, Any]) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+# --- Encryption at rest --------------------------------------------------
+#
+# Everything under the desktop data folder (settings, sessions, the network
+# log, revert backups) is AES-256-GCM encrypted with one random data key.
+# vault.json beside it is the only plaintext file and holds no secret: which
+# key store keeps the data key, or - once the person sets a password - the
+# data key wrapped with a key derived from that password (scrypt). A password
+# is optional; without one the operating system's key store releases the key
+# to this user account, so a copied disk or another account reads nothing,
+# but programs running as this same user could ask for it. With a password the
+# key is nowhere on disk in usable form, and a forgotten password means the
+# data is gone: there is no recovery, by design.
+
+VAULT_FILE = "vault.json"
+_ENC_MAGIC = b"OMENC1\n"
+_ENC_LINE = "enc1:"
+_ENC_AAD = b"onionmind/v1"
+_NONCE_BYTES = 12
+_SCRYPT = {"n": 2 ** 15, "r": 8, "p": 1}
+
+
+class VaultError(RuntimeError):
+    """The data folder's encryption could not be opened or changed."""
+
+
+class WrongPassword(VaultError):
+    pass
+
+
+class KeystoreUnavailable(VaultError):
+    pass
+
+
+def encryption_available() -> bool:
+    """True when the `cryptography` package (AES-GCM) can be imported."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _aesgcm(key: bytes) -> Any:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    return AESGCM(key)
+
+
+def _key_tag(root: Path) -> str:
+    """A stable, non-identifying name for one data folder's key."""
+    return hashlib.sha256(str(Path(root).expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+class FileKeystore:
+    """Fallback: a key file only this user can read, kept outside the data folder.
+
+    It stops another account and a copied data folder, not a program running as
+    this user - the settings say so and recommend a password."""
+
+    name = "file"
+    label = "a key file only your user account can read"
+    strong = False
+
+    def __init__(self, tag: str, directory: Optional[Path] = None) -> None:
+        base = directory or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "onionmind" / "keys"
+        self.path = base / f"{tag}.key"
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = bytes.fromhex(self.path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.path.parent, 0o700)
+        except OSError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(key.hex())
+        os.chmod(self.path, 0o600)
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class SecretServiceKeystore:
+    """Linux desktops: GNOME Keyring / KWallet through `secret-tool` (libsecret).
+    The key goes in on stdin, never on a command line."""
+
+    name = "secret-service"
+    label = "your desktop keyring (Secret Service)"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.attributes = ["service", "onionmind", "key", tag]
+
+    def _run(self, *args: str, data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["secret-tool", *args, *self.attributes], input=data, capture_output=True,
+                                  text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"secret-tool failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run("lookup")
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        result = self._run("store", "--label=Onionmind data key", data=key.hex())
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the keyring did not keep the key")
+
+    def delete(self) -> None:
+        self._run("clear")
+
+
+class MacKeychain:
+    """macOS: the login keychain through `security`. Commands go in on stdin
+    (`security -i`), so the key never appears in a process listing."""
+
+    name = "keychain"
+    label = "the macOS Keychain"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.service, self.account = "Onionmind", f"data-key-{tag}"
+
+    def _run(self, args: list[str], data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["security", *args], input=data, capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"security failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run(["find-generic-password", "-s", self.service, "-a", self.account, "-w"])
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        command = (f"add-generic-password -U -s {self.service} -a {self.account} "
+                   f"-l \"Onionmind data key\" -w {key.hex()}\n")
+        result = self._run(["-i"], data=command)
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the Keychain did not keep the key")
+
+    def delete(self) -> None:
+        self._run(["delete-generic-password", "-s", self.service, "-a", self.account])
+
+
+class DpapiKeystore:
+    """Windows: the key sealed with DPAPI (CryptProtectData) for this user
+    account, stored beside vault.json. The sealed blob is useless to another
+    account or on another machine."""
+
+    name = "dpapi"
+    label = "Windows Data Protection (DPAPI) for your account"
+    strong = True
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    @staticmethod
+    def _call(function_name: str, data: bytes) -> bytes:
+        import ctypes
+        from ctypes import wintypes
+
+        class Blob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = getattr(crypt32, function_name)
+        function.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+        function.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        buffer = ctypes.create_string_buffer(data, len(data))
+        source = Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        result = Blob()
+        # 0x1 = CRYPTPROTECT_UI_FORBIDDEN: never show a prompt.
+        if not function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result)):
+            raise KeystoreUnavailable(f"{function_name} failed ({ctypes.get_last_error()})")
+        try:
+            return ctypes.string_at(result.pbData, result.cbData)
+        finally:
+            kernel32.LocalFree(result.pbData)
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = self._call("CryptUnprotectData", self.path.read_bytes())
+        except (OSError, KeystoreUnavailable):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        sealed = self._call("CryptProtectData", key)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_bytes(sealed)
+        os.replace(temporary, self.path)
+        if self.get() != key:
+            raise KeystoreUnavailable("DPAPI did not return the key it sealed")
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def keystore_for(root: PathInput, name: Optional[str] = None) -> Any:
+    """The key store a vault uses: `name` from its header, else this platform's best."""
+    root = Path(root).expanduser()
+    tag = _key_tag(root)
+    choice = name or ("dpapi" if os.name == "nt" else
+                      "keychain" if sys.platform == "darwin" else
+                      "secret-service" if shutil.which("secret-tool") else "file")
+    if choice == "dpapi":
+        return DpapiKeystore(root / "device-key.dpapi")
+    if choice == "keychain":
+        return MacKeychain(tag)
+    if choice == "secret-service":
+        return SecretServiceKeystore(tag)
+    return FileKeystore(tag)
+
+
+def _wrap_key(key: bytes, password: str) -> dict[str, Any]:
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=128 * 1024 * 1024, **_SCRYPT)
+    wrapped = _aesgcm(kek).encrypt(nonce, key, b"onionmind/key")
+    return {"kdf": "scrypt", **_SCRYPT, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped": wrapped.hex()}
+
+
+def _unwrap_key(record: Mapping[str, Any], password: str) -> bytes:
+    from cryptography.exceptions import InvalidTag
+
+    try:
+        salt, nonce = bytes.fromhex(record["salt"]), bytes.fromhex(record["nonce"])
+        wrapped = bytes.fromhex(record["wrapped"])
+        params = {key: int(record[key]) for key in ("n", "r", "p")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VaultError("vault.json is damaged") from exc
+    if record.get("kdf") != "scrypt":
+        raise VaultError("vault.json names an unknown key derivation")
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=256 * 1024 * 1024, **params)
+    try:
+        return _aesgcm(kek).decrypt(nonce, wrapped, b"onionmind/key")
+    except InvalidTag:
+        raise WrongPassword("That password is not right.") from None
+
+
+class Vault:
+    """An open vault: the data key in memory, and the header describing it."""
+
+    def __init__(self, root: PathInput, key: bytes, header: Mapping[str, Any], keystore: Any = None) -> None:
+        self.root = Path(root).expanduser()
+        self._key = key
+        self._cipher = _aesgcm(key)
+        self.header = dict(header)
+        self.keystore = keystore
+
+    # data
+
+    def encrypt(self, data: bytes) -> bytes:
+        nonce = os.urandom(_NONCE_BYTES)
+        return _ENC_MAGIC + nonce + self._cipher.encrypt(nonce, data, _ENC_AAD)
+
+    def decrypt(self, blob: bytes) -> bytes:
+        from cryptography.exceptions import InvalidTag
+
+        if not is_encrypted(blob):
+            raise VaultError("not an Onionmind encrypted file")
+        start = len(_ENC_MAGIC)
+        try:
+            return self._cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
+        except InvalidTag:
+            raise VaultError("the file was not encrypted with this data key, or it was changed") from None
+
+    def encrypt_line(self, text: str) -> str:
+        import base64
+
+        return _ENC_LINE + base64.b64encode(self.encrypt(text.encode("utf-8"))).decode("ascii")
+
+    def decrypt_line(self, line: str) -> str:
+        import base64
+
+        if not line.startswith(_ENC_LINE):
+            return line
+        return self.decrypt(base64.b64decode(line[len(_ENC_LINE):])).decode("utf-8")
+
+    # password
+
+    @property
+    def mode(self) -> str:
+        return "password" if isinstance(self.header.get("password"), dict) else "device"
+
+    @property
+    def has_password(self) -> bool:
+        return self.mode == "password"
+
+    def describe(self) -> str:
+        if self.has_password:
+            return "Encrypted (AES-256-GCM). The key is unlocked by your password, which is never stored."
+        store = self.keystore or keystore_for(self.root, self.header.get("keystore"))
+        text = f"Encrypted (AES-256-GCM). The key is kept in {store.label}."
+        if not store.strong:
+            text += " Set a password for full protection: without one, programs running as you could read that file."
+        return text
+
+    def check_password(self, password: str) -> bool:
+        record = self.header.get("password")
+        if not isinstance(record, dict):
+            return False
+        try:
+            return _unwrap_key(record, password) == self._key
+        except VaultError:
+            return False
+
+    def set_password(self, password: str, current: Optional[str] = None) -> None:
+        """Set or change the password. Changing needs the current one."""
+        if not password:
+            raise VaultError("The password cannot be empty.")
+        if self.has_password and not self.check_password(current or ""):
+            raise WrongPassword("The current password is not right.")
+        header = {**self.header, "mode": "password", "password": _wrap_key(self._key, password)}
+        header.pop("keystore", None)
+        _write_header(self.root, header)            # the wrapped key first...
+        old = self.header.get("keystore")
+        self.header = header
+        if old:                                     # ...then the unwrapped copy goes
+            try:
+                keystore_for(self.root, old).delete()
+            except KeystoreUnavailable:
+                pass
+        self.keystore = None
+
+    def remove_password(self, current: str) -> None:
+        """Back to the key store: the data stays encrypted, no login needed."""
+        if not self.check_password(current):
+            raise WrongPassword("That password is not right.")
+        store = keystore_for(self.root)
+        store.put(self._key)                        # the key store first...
+        header = {key: value for key, value in self.header.items() if key != "password"}
+        header.update(mode="device", keystore=store.name)
+        _write_header(self.root, header)            # ...then the header stops asking
+        self.header, self.keystore = header, store
+
+
+def is_encrypted(blob: bytes) -> bool:
+    return blob[:len(_ENC_MAGIC)] == _ENC_MAGIC
+
+
+def _write_header(root: Path, header: Mapping[str, Any]) -> None:
+    _atomic_write_json(Path(root) / VAULT_FILE, header)
+
+
+def vault_header(root: PathInput) -> Optional[dict[str, Any]]:
+    """The plaintext header, or None when this data folder was never encrypted."""
+    path = Path(root).expanduser() / VAULT_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise VaultError(f"{path} is unreadable") from exc
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise VaultError(f"{path} is not a vault header this version understands")
+    return value
+
+
+def vault_needs_password(root: PathInput) -> bool:
+    header = vault_header(root)
+    return bool(header and isinstance(header.get("password"), dict))
+
+
+def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = None) -> Vault:
+    """Open (or, the first time, create) the vault of a data folder.
+
+    First run: a new random data key goes into the platform key store and every
+    plaintext file already in the folder is encrypted in place. Afterwards the
+    key comes from the key store, or from `password` once one is set. Raises
+    WrongPassword, KeystoreUnavailable or VaultError - never falls back to
+    plaintext on its own."""
+    if not encryption_available():
+        raise VaultError("The cryptography package is missing; run the updater to install it.")
+    root = Path(root).expanduser()
+    header = vault_header(root)
+    if header is None:
+        key = os.urandom(32)
+        store = keystore or keystore_for(root)
+        try:
+            store.put(key)
+        except KeystoreUnavailable:
+            if store.name == "file":
+                raise
+            store = FileKeystore(_key_tag(root))
+            store.put(key)
+        header = {"version": 1, "cipher": "AES-256-GCM", "mode": "device", "keystore": store.name,
+                  "created_at": _utc_now()}
+        _write_header(root, header)
+        vault = Vault(root, key, header, store)
+        encrypt_data_folder(root, vault)
+        return vault
+    if isinstance(header.get("password"), dict):
+        if password is None:
+            raise WrongPassword("A password is needed to open Onionmind's data.")
+        return Vault(root, _unwrap_key(header["password"], password), header)
+    store = keystore or keystore_for(root, header.get("keystore"))
+    key = store.get()
+    if key is None:
+        raise KeystoreUnavailable(
+            f"The data key is missing from {store.label}. Without it the encrypted data cannot be read.")
+    vault = Vault(root, key, header, store)
+    encrypt_data_folder(root, vault)                # anything an older version left in plaintext
+    return vault
+
+
+_VAULT_OWN_FILES = {VAULT_FILE, "device-key.dpapi"}
+
+
+def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
+    """Encrypt in place every plaintext file under the data folder. Returns the count."""
+    root = Path(root).expanduser()
+    done = 0
+    if not root.is_dir():
+        return done
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink() or path.name in _VAULT_OWN_FILES and path.parent == root:
+            continue
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            with path.open("rb") as handle:
+                if is_encrypted(handle.read(len(_ENC_MAGIC))) and path.suffix != ".jsonl":
+                    continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if path.suffix == ".jsonl":
+            lines = raw.decode("utf-8", "replace").splitlines()
+            if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
+                continue
+            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
+            _atomic_write_bytes(path, body.encode("ascii"))
+        elif is_encrypted(raw):
+            continue
+        else:
+            _atomic_write_bytes(path.with_name(f".{path.name}.migrating.tmp"), vault.encrypt(raw))
+            # Overwrite the plaintext bytes before the encrypted copy takes the
+            # name, so they do not simply linger in freed blocks (same limits as
+            # shred_file: SSDs and copy-on-write filesystems may keep a copy).
+            try:
+                with open(path, "r+b", buffering=0) as handle:
+                    handle.write(os.urandom(len(raw)))
+                    os.fsync(handle.fileno())
+            except OSError:
+                pass
+            os.replace(path.with_name(f".{path.name}.migrating.tmp"), path)
+        done += 1
+    return done
+
+
+def erase_data_folder(root: PathInput) -> None:
+    """Forgotten password: delete the encrypted data, its header and the key."""
+    root = Path(root).expanduser()
+    if not (root / VAULT_FILE).is_file():
+        raise VaultError(f"{root} is not an Onionmind data folder")
+    try:
+        header = vault_header(root) or {}
+    except VaultError:
+        header = {}
+    if header.get("keystore"):
+        try:
+            keystore_for(root, header["keystore"]).delete()
+        except KeystoreUnavailable:
+            pass
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_data_file(path: PathInput, vault: Optional[Vault]) -> bytes:
+    """A file from the data folder, decrypted when it is encrypted."""
+    raw = Path(path).read_bytes()
+    if is_encrypted(raw):
+        if vault is None:
+            raise VaultError("this file is encrypted and the vault is not open")
+        return vault.decrypt(raw)
+    return raw
+
+
+def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> None:
+    """Write a file into the data folder, encrypted when a vault is open."""
+    _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
+
+
 # netlog: what left this machine, written by the desktop when it happens.
 # Times and destinations only - a prompt or a search query is never stored.
 
 class EgressLog:
     ROUTES = ("Tor", "Direct", "Refused")
 
-    def __init__(self, path: PathInput) -> None:
+    def __init__(self, path: PathInput, vault: Any = None) -> None:
         self.path = Path(path).expanduser()
+        self.vault = vault
 
     def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
         """Record one connection. Never raises: logging must not break the action."""
@@ -2983,8 +3554,11 @@ class EgressLog:
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry, ensure_ascii=False)
+            if self.vault is not None:
+                line = self.vault.encrypt_line(line)
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                handle.write(line + "\n")
         except OSError:
             pass
 
@@ -2997,8 +3571,12 @@ class EgressLog:
         rows = []
         for line in lines:
             try:
+                if line.startswith(_ENC_LINE):
+                    if self.vault is None:
+                        continue
+                    line = self.vault.decrypt_line(line)
                 entry = json.loads(line)
-            except ValueError:
+            except (ValueError, VaultError):
                 continue
             if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
                 continue
@@ -3045,6 +3623,28 @@ def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[s
     return rows
 
 
+def absorb_agent_net_log(path: PathInput, egress: Optional["EgressLog"]) -> int:
+    """Move the agent's plaintext network log into the encrypted one, then shred it.
+
+    The agent runs in its own process without the data key, so it can only
+    write plaintext; the desktop takes the lines over after each run. With
+    logging off (`egress` None) the lines are dropped - no log unless asked.
+    Returns the rows moved."""
+    target = Path(path)
+    if not target.is_file():
+        return 0
+    rows = agent_net_entries(target)
+    if egress is not None:
+        for row in rows:
+            try:
+                when = datetime.fromisoformat(row["time"])
+            except ValueError:
+                when = None
+            egress.append(row["route"], row["what"], when)
+    shred_file(target)
+    return len(rows) if egress is not None else 0
+
+
 def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
     import csv
     import io
@@ -3080,8 +3680,24 @@ def _safe_relative(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _backup_copy(source: Path, target: Path, vault: Any) -> None:
+    """copy2, encrypted when a vault is open; the file mode rides on the backup."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if vault is None:
+        shutil.copy2(source, target)
+        return
+    write_data_file(target, source.read_bytes(), vault)
+    shutil.copystat(source, target)
+
+
+def _restore_copy(source: Path, target: Path, vault: Any) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(read_data_file(source, vault))
+    shutil.copystat(source, target)
+
+
 def revert_changes(
-    selected: PathInput, changes: Iterable[Any], backup_root: PathInput
+    selected: PathInput, changes: Iterable[Any], backup_root: PathInput, vault: Any = None
 ) -> RevertRecord:
     """Back up each changed file, then restore it from HEAD (or remove it when untracked).
 
@@ -3100,9 +3716,7 @@ def revert_changes(
         source = _safe_relative(root, relative)
         (untracked if status == "??" else tracked).append(relative)
         if source.is_file():
-            target = backup / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            _backup_copy(source, backup / relative, vault)
     if tracked:
         result = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--staged", "--worktree", "--", *tracked)
         if result.returncode != 0:
@@ -3123,14 +3737,13 @@ def revert_changes(
             target.unlink()
     (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
     record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
-    (backup / ".onionmind-revert.json").write_text(
-        json.dumps({"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)}),
-        encoding="utf-8",
-    )
+    _atomic_write_json(backup / ".onionmind-revert.json",
+                       {"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)},
+                       vault)
     return record
 
 
-def undo_revert(record: RevertRecord) -> int:
+def undo_revert(record: RevertRecord, vault: Any = None) -> int:
     """Copy the backed-up files back into the project. Returns files restored."""
     root = Path(record.root)
     backup = Path(record.backup)
@@ -3139,9 +3752,7 @@ def undo_revert(record: RevertRecord) -> int:
         source = backup / relative
         if not source.is_file():
             continue
-        target = _safe_relative(root, relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _restore_copy(source, _safe_relative(root, relative), vault)
         restored += 1
     return restored
 
@@ -3199,7 +3810,7 @@ def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
 
 
 def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
-                 backup_root: PathInput) -> RevertRecord:
+                 backup_root: PathInput, vault: Any = None) -> RevertRecord:
     """Revert only the chosen hunks of one file (git apply -R), with the same
     whole-file backup as revert_changes so Undo puts back exactly what was there.
 
@@ -3215,9 +3826,9 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
     backup = Path(backup_root).expanduser() / uuid4().hex
     backup.mkdir(parents=True, exist_ok=True)
     if source.is_file():
-        target = backup / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _backup_copy(source, backup / relative, vault)
+    # The patch is the project's own diff, already in plaintext in the project;
+    # it exists only for the git apply below.
     patch = backup / ".onionmind-hunks.patch"
     body = header + "".join(hunks[i].header + "\n" + "".join(hunks[i].lines) for i in wanted)
     patch.write_bytes(body.encode("utf-8", "surrogateescape"))
@@ -3228,10 +3839,8 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
             raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git apply failed")
     patch.unlink()
     record = RevertRecord(str(root), str(backup), (relative,), ())
-    (backup / ".onionmind-revert.json").write_text(
-        json.dumps({"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}),
-        encoding="utf-8",
-    )
+    _atomic_write_json(backup / ".onionmind-revert.json",
+                       {"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}, vault)
     return record
 
 

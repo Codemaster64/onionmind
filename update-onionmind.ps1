@@ -37,6 +37,7 @@ requirements = {
     'PySide6-Essentials': lambda value: (6, 11) <= value < (6, 12),
     'requests': lambda value: (2, 32) <= value < (3,),
     'PySocks': lambda value: (1, 7) <= value < (2,),
+    'cryptography': lambda value: (42,) <= value < (51,),
 }
 
 issues = []
@@ -59,6 +60,7 @@ try:
     import requests
     import socks
     import PySide6.QtWidgets
+    import cryptography.hazmat.primitives.ciphers.aead
 except Exception as error:
     print(f'[OUTDATED] Native desktop imports failed: {error}')
     issues.append(('native desktop imports', 'OUTDATED', '-'))
@@ -246,7 +248,7 @@ if (-not $desktopDependenciesReady -and $nativePythonSupported) {
     & $py -m venv $desktopEnv
   }
   if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $desktopPython -PathType Leaf)) {
-    & $desktopPython -m pip install --quiet --disable-pip-version-check 'requests>=2.32,<3' 'PySocks>=1.7,<2' 'PySide6-Essentials>=6.11,<6.12'
+    & $desktopPython -m pip install --quiet --disable-pip-version-check 'requests>=2.32,<3' 'PySocks>=1.7,<2' 'PySide6-Essentials>=6.11,<6.12' 'cryptography>=42,<51'
   }
   $desktopPipSucceeded = ($LASTEXITCODE -eq 0)
   if (-not $desktopPipSucceeded) {

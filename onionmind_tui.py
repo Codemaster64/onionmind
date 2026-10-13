@@ -449,10 +449,11 @@ class OnionmindTUI(App):
     #model-options > .option-list--option { padding: 0 1; }
     """
 
-    def __init__(self, core: Any, data_root: Optional[Path] = None, model: Optional[str] = None) -> None:
+    def __init__(self, core: Any, data_root: Optional[Path] = None, model: Optional[str] = None,
+                 vault: Any = None) -> None:
         super().__init__()
         self.core = core
-        self.store = desktop_core.SessionStore((data_root or default_data_root()) / "sessions")
+        self.store = desktop_core.SessionStore((data_root or default_data_root()) / "sessions", vault)
         self.wanted_model = model
         self.session: Optional[desktop_core.ChatSession] = None
         self.models: list[dict] = []
@@ -929,6 +930,37 @@ class OnionmindTUI(App):
             pass
 
 
+def open_vault(root: Path, ask: Any = None) -> tuple[Any, str]:
+    """The desktop's encrypted data folder, opened before the TUI starts.
+
+    Returns (vault, problem): the vault, or None with the reason not to start.
+    A folder that was never encrypted is encrypted now, as the desktop does;
+    a missing cryptography package only runs unencrypted when nothing is
+    encrypted yet."""
+    import getpass
+
+    ask = ask or (lambda prompt: getpass.getpass(prompt))
+    root.mkdir(parents=True, exist_ok=True)
+    if not desktop_core.encryption_available():
+        if (root / desktop_core.VAULT_FILE).is_file():
+            return None, "Onionmind's data is encrypted, but the cryptography package is missing; run the updater."
+        print("Warning: not encrypted - the cryptography package is missing; run the updater.", file=sys.stderr)
+        return None, ""
+    try:
+        if not desktop_core.vault_needs_password(root):
+            return desktop_core.open_vault(root), ""
+        for _attempt in range(3):
+            try:
+                return desktop_core.open_vault(root, password=ask("Onionmind password: ")), ""
+            except desktop_core.WrongPassword:
+                print("That password is not right.", file=sys.stderr)
+        return None, "Three wrong passwords. Forgot it? Erase the data from the desktop app's unlock screen."
+    except (EOFError, KeyboardInterrupt):
+        return None, "Cancelled."
+    except desktop_core.VaultError as exc:
+        return None, str(exc)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Onionmind in the terminal.")
     parser.add_argument("--model", help="installed model to start with (raw name)")
@@ -936,7 +968,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="session folder root (default: the desktop's data folder)")
     args = parser.parse_args(argv)
     import onionmind as core
-    OnionmindTUI(core, data_root=args.data_dir, model=args.model).run()
+    root = args.data_dir or default_data_root()
+    vault, problem = open_vault(root)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
+    OnionmindTUI(core, data_root=root, model=args.model, vault=vault).run()
     return 0
 
 

@@ -63,13 +63,14 @@ from onionmind_desktop_widgets import RunPanel
 class SessionBridge:
     """Use onionmind_desktop_core when present; keep a small QSettings fallback."""
 
-    def __init__(self, desktop_core: Any, root: Path) -> None:
+    def __init__(self, desktop_core: Any, root: Path, vault: Any = None) -> None:
         self.desktop_core = desktop_core
         self.root = root
         self.store = None
         if desktop_core is not None and hasattr(desktop_core, "SessionStore"):
             try:
-                self.store = desktop_core.SessionStore(root)
+                self.store = (desktop_core.SessionStore(root, vault) if vault is not None
+                              else desktop_core.SessionStore(root))
             except Exception:
                 self.store = None
         self.fallback = QSettings(APP_NAME, APP_ID)
@@ -203,12 +204,14 @@ class SessionBridge:
 
 
 class SettingsBridge:
-    def __init__(self, desktop_core: Any, root: Path) -> None:
+    def __init__(self, desktop_core: Any, root: Path, vault: Any = None) -> None:
         self.store = None
+        self.vault = vault
         self.fallback = QSettings(APP_NAME, APP_ID)
         if desktop_core is not None and hasattr(desktop_core, "SettingsStore"):
             try:
-                self.store = desktop_core.SettingsStore(root / "settings.json", defaults={})
+                self.store = desktop_core.SettingsStore(root / "settings.json", defaults={},
+                                                        **({"vault": vault} if vault is not None else {}))
             except Exception:
                 self.store = None
 
@@ -229,7 +232,9 @@ class SettingsBridge:
                 self.store.save(settings)
                 return
             except Exception:
-                pass
+                # Encrypted data never falls back to Qt's plaintext settings file.
+                if self.vault is not None:
+                    return
         self.fallback.setValue("settings_json", json.dumps(settings))
 
 

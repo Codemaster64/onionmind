@@ -43,7 +43,7 @@ jobs:
           sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
 
       - name: Install the app's dependencies
-        run: python -m pip install "requests>=2.32,<3" "PySocks>=1.7,<2" "PySide6-Essentials>=6.11,<6.12" "textual>=1,<9"
+        run: python -m pip install "requests>=2.32,<3" "PySocks>=1.7,<2" "PySide6-Essentials>=6.11,<6.12" "cryptography>=42,<51" "textual>=1,<9"
 
       - name: Generated payloads are current
         run: python build.py --check
@@ -56,7 +56,7 @@ jobs:
                        tests/test_desktop_core.py tests/test_installer_contracts.py \
                        tests/test_release_version_contracts.py tests/test_desktop_ui.py \
                        tests/test_desktop_thinking_ui.py tests/test_desktop_tor_ui.py \
-                       tests/test_desktop_v2_ui.py tests/test_e2e_smoke.py; do
+                       tests/test_desktop_v2_ui.py tests/test_e2e_smoke.py tests/test_vault.py; do
             echo "::group::$suite"
             python -m unittest "$suite" || failed+=("$suite")
             echo "::endgroup::"
@@ -101,7 +101,7 @@ jobs:
       - name: Run core unit tests
         shell: powershell
         run: |
-          python -m pip install "requests>=2.32,<3" "PySocks>=1.7,<2" "PySide6-Essentials>=6.11,<6.12"
+          python -m pip install "requests>=2.32,<3" "PySocks>=1.7,<2" "PySide6-Essentials>=6.11,<6.12" "cryptography>=42,<51"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # PowerShell takes a step's result from its LAST command only, so a
           # failing suite earlier in a plain list passed silently. Run every
@@ -120,7 +120,8 @@ jobs:
             "tests/test_desktop_thinking_ui.py",
             "tests/test_desktop_tor_ui.py",
             "tests/test_desktop_v2_ui.py",
-            "tests/test_e2e_smoke.py"
+            "tests/test_e2e_smoke.py",
+            "tests/test_vault.py"
           )
           $failed = @()
           foreach ($suite in $suites) {
@@ -163,6 +164,10 @@ jobs:
               throw "Standalone bundle is missing $Name"
             }
           }
+          # Encryption at rest needs cryptography's compiled core in the bundle.
+          $Rust = Get-ChildItem -LiteralPath $Bundle -Recurse -Filter "_rust*.pyd" |
+            Where-Object { $_.FullName -like "*cryptography*" }
+          if (-not $Rust) { throw "Standalone bundle is missing cryptography's native module" }
           $Revision = (Get-Content -LiteralPath (Join-Path $Bundle ".onionmind-source-revision") -Raw).Trim()
           if ($Revision -ne "${{ github.sha }}") {
             throw "Bundle revision $Revision does not match the built commit ${{ github.sha }}"

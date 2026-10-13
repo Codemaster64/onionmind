@@ -184,6 +184,7 @@ for name, specs in pins.items():
 
 try:
     import PySide6.QtWidgets
+    import cryptography.hazmat.primitives.ciphers.aead
 except Exception as error:
     print(f"[OUTDATED] Native desktop imports failed: {error}")
     issues.append("native desktop imports")
@@ -273,6 +274,8 @@ $NuitkaArguments = @(
     "--include-module=onionmind_desktop_widgets",
     "--include-module=onionmind_desktop_panes",
     "--include-module=onionmind_desktop_dialogs",
+    "--include-module=cryptography.hazmat.primitives.ciphers.aead",
+    "--include-module=cryptography.exceptions",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor-search.js')=dsh-onionmind-tor-search.js",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor.patch.yml')=dsh-onionmind-tor.patch.yml",
     "--include-data-files=$(Join-Path $RepoRoot 'onionmind.ico')=onionmind.ico",
