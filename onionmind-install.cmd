@@ -333,12 +333,30 @@ if [ $YES = 0 ]; then
 fi
 
 # --- 7. Hand over -----------------------------------------------------------
+download() {  # url, file
+  if have curl; then curl -fL --progress-bar -o "$2" "$1" >&2
+  elif have wget; then wget -q -O "$2" "$1"
+  else warn "needs curl or wget to download $(basename "$2")"; return 1; fi
+}
+sha256_of() {
+  if have sha256sum; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 fetch() {  # script name, target dir -> path on stdout
   if [ -f "$HERE/$1" ]; then echo "$HERE/$1"; return 0; fi
   mkdir -p "$2" || return 1
-  if have curl; then curl -fL --progress-bar -o "$2/$1" "$BASE/$1" >&2 || return 1
-  elif have wget; then wget -q -O "$2/$1" "$BASE/$1" || return 1
-  else warn "needs curl or wget to download $1"; return 1; fi
+  download "$BASE/$1" "$2/$1" || return 1
+  # Check it against the release's SHA256SUMS: catches a truncated or swapped
+  # download. Releases from before the sums existed have none - say so, go on.
+  [ -f "$TMP/SHA256SUMS" ] || download "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null ||
+    rm -f "$TMP/SHA256SUMS"
+  if [ -f "$TMP/SHA256SUMS" ]; then
+    want=$(awk -v f="$1" '$2 == f || $2 == "*" f { print $1 }' "$TMP/SHA256SUMS")
+    if [ -z "$want" ]; then warn "$1 is not listed in SHA256SUMS - not checked"
+    elif [ "$(sha256_of "$2/$1")" != "$want" ]; then
+      rm -f "$2/$1"; warn "$1 does not match the release's SHA256SUMS - deleted, not run"; return 1
+    fi
+  else warn "this release has no SHA256SUMS - $1 not checked"; fi
   echo "$2/$1"
 }
 TMP=$(mktemp -d 2>/dev/null || mktemp -d -t onionmind) || die "could not create a temp directory"
@@ -604,6 +622,21 @@ function Fetch($name, $dir) {
   Say "Downloading $name"
   $ProgressPreference = 'SilentlyContinue'   # 5.1's progress bar slows the download itself ~10x
   Invoke-WebRequest -UseBasicParsing -Uri "$Base/$name" -OutFile $out
+  # Check it against the release's SHA256SUMS: catches a truncated or swapped
+  # download. Releases from before the sums existed have none - say so, go on.
+  $sums = Join-Path $Tmp 'SHA256SUMS'
+  if (-not (Test-Path $sums)) {
+    New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
+    try { Invoke-WebRequest -UseBasicParsing -Uri "$Base/SHA256SUMS" -OutFile $sums } catch { Remove-Item $sums -ErrorAction SilentlyContinue }
+  }
+  if (Test-Path $sums) {
+    $want = Get-Content $sums | ForEach-Object { $p = $_ -split '\s+\*?', 2; if ($p[1] -eq $name) { $p[0] } } | Select-Object -First 1
+    if (-not $want) { Warn "$name is not listed in SHA256SUMS - not checked" }
+    elseif ((Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash -ne $want) {
+      Remove-Item -LiteralPath $out -Force
+      throw "$name does not match the release's SHA256SUMS - deleted, not run"
+    }
+  } else { Warn "this release has no SHA256SUMS - $name not checked" }
   $out
 }
 $Done = @(); $Failed = @()
