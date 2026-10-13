@@ -19606,7 +19606,21 @@ if ($UI -or ($args.Count -eq 0)) {
 # `onionmind` is the way in: same engine, callable from any terminal. ollama
 # stays underneath as the server - it stops being something you type.
 # Repository-aware coding agent, kept separate from Onionmind's local Tor chat.
-$dshRevision = [string](Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/Codemaster64/onionmind/commits/main').sha
+function Resolve-MainRevision {
+  # api.github.com answers 403 after 60 unauthenticated calls an hour from one
+  # address (a shared NAT, a CI runner); git's own ref advertisement has no
+  # such limit and names the same commit.
+  try {
+    return [string](Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/Codemaster64/onionmind/commits/main').sha
+  } catch {
+    $refs = (Invoke-WebRequest -UseBasicParsing 'https://github.com/Codemaster64/onionmind.git/info/refs?service=git-upload-pack').Content
+    if ($refs -is [byte[]]) { $refs = [Text.Encoding]::ASCII.GetString($refs) }
+    $found = [regex]::Match([string]$refs, '([0-9a-f]{40}) refs/heads/main(?![-/\w])')
+    if ($found.Success) { return $found.Groups[1].Value }
+    return ''
+  }
+}
+$dshRevision = Resolve-MainRevision
 if ($dshRevision -notmatch '^[0-9a-fA-F]{40}$') { throw 'Could not resolve a fixed DSH asset revision.' }
 $dshBase = "https://raw.githubusercontent.com/Codemaster64/onionmind/$dshRevision"
 $dshPluginPath = Join-Path $Dir 'dsh-onionmind-tor-search.js'
