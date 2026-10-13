@@ -1110,8 +1110,10 @@ class GpuMemoryProbeTests(unittest.TestCase):
         # An integrated GPU borrows RAM: the shared size, no "used" of its own.
         self.assertEqual(core._pick_dxgi_adapter([basic, iris]),
                          (None, 8_028, "Intel(R) Iris(R) Xe Graphics (shared memory)"))
-        # The software rasterizer alone (a VM, a CI runner) is no GPU.
+        # The software rasterizer alone (a VM, a CI runner) is no GPU - also
+        # without the software flag, as Windows CI really reports it.
         self.assertIsNone(core._pick_dxgi_adapter([basic]))
+        self.assertIsNone(core._pick_dxgi_adapter([dict(basic, software=False)]))
         self.assertIsNone(core._pick_dxgi_adapter([]))
 
     @unittest.skipUnless(os.name == "nt", "DXGI exists only on Windows")
@@ -1125,6 +1127,8 @@ class GpuMemoryProbeTests(unittest.TestCase):
             self.assertIn("dedicated_mb", adapter)
             self.assertIsInstance(adapter["software"], bool)
         print("DXGI adapters:", adapters)
+        if all(a["vendor"] == 0x1414 for a in adapters):   # a runner: no GPU at all
+            self.assertIsNone(core._pick_dxgi_adapter(adapters))
 
     def test_off_windows_dxgi_reports_nothing(self) -> None:
         if os.name != "nt":

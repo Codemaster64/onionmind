@@ -6609,7 +6609,12 @@ def _pick_dxgi_adapter(adapters: Iterable[Mapping[str, Any]]) -> Optional[tuple[
     with the most dedicated memory. A discrete card (1 GB or more of its own)
     reports its real use; an integrated GPU, which borrows system RAM, reports
     the shared size with used=None, as Apple unified memory does."""
-    hardware = [a for a in adapters if not a.get("software") and (a.get("dedicated_mb") or a.get("shared_mb"))]
+    # Microsoft's Basic Render Driver (vendor 0x1414) is the CPU rasterizer of a
+    # VM or a machine without a GPU driver; on a Windows CI runner it does NOT
+    # carry the software flag, and would otherwise pass for 8 GB of shared VRAM.
+    hardware = [a for a in adapters
+                if not a.get("software") and int(a.get("vendor") or 0) != _DXGI_MICROSOFT
+                and (a.get("dedicated_mb") or a.get("shared_mb"))]
     if not hardware:
         return None
     best = max(hardware, key=lambda a: (int(a.get("dedicated_mb") or 0), int(a.get("shared_mb") or 0)))
@@ -6626,6 +6631,7 @@ def _pick_dxgi_adapter(adapters: Iterable[Mapping[str, Any]]) -> Optional[tuple[
 
 
 _DXGI_VENDORS = {0x10DE: "NVIDIA GPU", 0x1002: "AMD GPU", 0x1022: "AMD GPU", 0x8086: "Intel GPU"}
+_DXGI_MICROSOFT = 0x1414
 
 
 def _windows_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
