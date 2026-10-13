@@ -78,7 +78,7 @@ means running it again.
 | Model weights | 10–16GB GGUF, picked to fit your GPU |
 | Vision projector | 885 MiB `mmproj`, registered as a second model sharing the same base |
 | `onionmind.py` | local chat/search engine and compatibility CLI, written next to the weights |
-| `onionmind_desktop.py` | native PySide6 presentation and process orchestration |
+| `onionmind_desktop.py` + `onionmind_desktop_{theme,widgets,panes,dialogs}.py` | native PySide6 presentation and process orchestration |
 | `onionmind_desktop_core.py` | persistence, model naming, workspace inspection, and Harness command construction |
 | `onionmind` + desktop icon | native project/session workbench |
 | `onionmind-chat` | compatibility alias for the same native workbench |
@@ -101,7 +101,8 @@ The desktop rewrite keeps three deliberately narrow seams:
   and sessions, Onionmind tier/display names, bounded workspace and Git snapshots,
   terminal parsing, and the exact DeepSeek Harness command. This layer is covered
   by unit tests without starting a GUI.
-- `onionmind_desktop.py` owns the Qt widget tree and asynchronous workers. Model
+- `onionmind_desktop.py` and its four parts (theme, widgets, panes, dialogs) own
+  the Qt widget tree and asynchronous workers. Model
   generation, terminal commands, Git refreshes, model pulls, and Harness tasks
   stay off the UI thread; cancel actions terminate the corresponding operation.
 
@@ -847,7 +848,11 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 |---|---|
 | `onionmind-setup.cmd` | The Windows installer: one file, batch header plus the full PowerShell installer. Double-click or run it. Refuses 32-bit Windows. |
 | `onionmind.py` | Local inference/search core, compatibility CLI, and legacy-UI fallback. |
-| `onionmind_desktop.py` | Native PySide6 workbench and asynchronous process/UI adapters. |
+| `onionmind_desktop.py` | Native PySide6 workbench window and entry point; re-exports its parts. |
+| `onionmind_desktop_theme.py` | Palette, style sheet, text helpers, icons, fonts, workers, motion, title bar. |
+| `onionmind_desktop_widgets.py` | Reusable widgets: status controls, transcript, timeline, run panel, palette, overlays. |
+| `onionmind_desktop_panes.py` | Bridges to the core module, left rail, terminal drawer, inspector. |
+| `onionmind_desktop_dialogs.py` | Model manager, feature toggles, settings dialog. |
 | `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |

@@ -53,7 +53,9 @@ of things you must not get wrong here, and the checks that prove you didn't.
    crosses those seams. Don't pass a label to a backend.
 
 5. **Respect the seams.** Logic goes in `onionmind_desktop_core.py` (no Qt import,
-   unit-tested); Qt-only code in `onionmind_desktop.py`; inference stays in
+   unit-tested); Qt-only code in `onionmind_desktop.py` and its parts
+   (`onionmind_desktop_theme/widgets/panes/dialogs.py`, which import only
+   leftwards in that order); inference stays in
    `onionmind.py`. Don't import Qt into the core, and don't reimplement inference
    in a front end. On Android, platform-free logic goes in `android/core`, the
    shell in `android/app`.

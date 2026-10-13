@@ -25,11 +25,19 @@ ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "onionmind.py"
 
 AUXILIARY_SOURCES = [
-    # source,                      path,                    opening delimiter,            closing delimiter, newline
-    ("onionmind_desktop_core.py", "onionmind-setup.cmd", "$desktopCore = @'\n",        "\n'@\n",           "\r\n"),
-    ("onionmind_desktop_core.py", "install-onionmind.sh",  "<<'DESKTOPCOREEOF'\n",       "\nDESKTOPCOREEOF\n", "\n"),
-    ("onionmind_desktop.py",      "onionmind-setup.cmd", "$desktopUi = @'\n",          "\n'@\n",           "\r\n"),
-    ("onionmind_desktop.py",      "install-onionmind.sh",  "<<'DESKTOPUIEOF'\n",         "\nDESKTOPUIEOF\n",   "\n"),
+    # source,                         path,                   opening delimiter,          closing delimiter,       newline
+    ("onionmind_desktop_core.py",    "onionmind-setup.cmd",  "$desktopCore = @'\n",     "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_core.py",    "install-onionmind.sh", "<<'DESKTOPCOREEOF'\n",    "\nDESKTOPCOREEOF\n",    "\n"),
+    ("onionmind_desktop.py",         "onionmind-setup.cmd",  "$desktopUi = @'\n",       "\n'@\n",                "\r\n"),
+    ("onionmind_desktop.py",         "install-onionmind.sh", "<<'DESKTOPUIEOF'\n",      "\nDESKTOPUIEOF\n",      "\n"),
+    ("onionmind_desktop_theme.py",   "onionmind-setup.cmd",  "$desktopTheme = @'\n",    "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_theme.py",   "install-onionmind.sh", "<<'DESKTOPTHEMEEOF'\n",   "\nDESKTOPTHEMEEOF\n",   "\n"),
+    ("onionmind_desktop_widgets.py", "onionmind-setup.cmd",  "$desktopWidgets = @'\n",  "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_widgets.py", "install-onionmind.sh", "<<'DESKTOPWIDGETSEOF'\n", "\nDESKTOPWIDGETSEOF\n", "\n"),
+    ("onionmind_desktop_panes.py",   "onionmind-setup.cmd",  "$desktopPanes = @'\n",    "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_panes.py",   "install-onionmind.sh", "<<'DESKTOPPANESEOF'\n",   "\nDESKTOPPANESEOF\n",   "\n"),
+    ("onionmind_desktop_dialogs.py", "onionmind-setup.cmd",  "$desktopDialogs = @'\n",  "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_dialogs.py", "install-onionmind.sh", "<<'DESKTOPDIALOGSEOF'\n", "\nDESKTOPDIALOGSEOF\n", "\n"),
 ]
 
 # The only intentional per-platform differences. Everything else is identical by

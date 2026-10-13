@@ -146,7 +146,7 @@ The interface is quiet and operational: a cool blue-black Nocturne ground, one-p
 
 ## Colors
 
-The palette is **Nocturne**: a cool blue-black ground, one surface step above it, near-white text, and a single blurple accent. The stylesheet never names a hex value directly; `theme_tokens()` in `onionmind_desktop.py` derives every semantic role (pane, card, field, line, muted text, accent hover, status tints) from the palette, so the light theme is the same sheet over a different palette.
+The palette is **Nocturne**: a cool blue-black ground, one surface step above it, near-white text, and a single blurple accent. The stylesheet never names a hex value directly; `theme_tokens()` in `onionmind_desktop_theme.py` derives every semantic role (pane, card, field, line, muted text, accent hover, status tints) from the palette, so the light theme is the same sheet over a different palette.
 
 ### Roles
 

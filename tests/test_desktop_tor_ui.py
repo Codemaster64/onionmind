@@ -15,10 +15,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication, QCheckBox
     import onionmind_desktop as desktop
+    import onionmind_desktop_widgets as widgets
 except ModuleNotFoundError:
     QApplication = None
     QCheckBox = None
     desktop = None
+    widgets = None
 
 
 class ActivityRecorder:
@@ -108,7 +110,7 @@ class TorIndicatorStateTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(*point).alpha(), 0)
 
     def test_connecting_state_animates_the_circular_target_then_stops(self) -> None:
-        with mock.patch.object(desktop, "_ui_animations_enabled", return_value=True):
+        with mock.patch.object(widgets, "_ui_animations_enabled", return_value=True):
             control = desktop.StatusActionButton("Tor", "Off", "idle", "Turn on")
             control.show()
             self.app.processEvents()
@@ -121,7 +123,7 @@ class TorIndicatorStateTests(unittest.TestCase):
             self.assertFalse(control._spinner_timer.isActive())
             control.close()
 
-        with mock.patch.object(desktop, "_ui_animations_enabled", return_value=False):
+        with mock.patch.object(widgets, "_ui_animations_enabled", return_value=False):
             control = desktop.StatusActionButton("Tor", "Off", "idle", "Turn on")
             control.show()
             self.app.processEvents()
