@@ -25,7 +25,7 @@ run** = not exercised.
 | errors | **Starting a model server we don't own.** Restart re-probes, and runs `ollama serve` when the program is on PATH. A Windows tray Ollama, a systemd service or llama-server is not restarted. | Platform service control (systemd user unit, Windows service). |
 | errors | **Out of memory is matched by text.** It is recognised from Ollama's error body ("out of memory", CUDA). Other wordings show the generic failure. | Structured error codes from the engine. |
 | errors | **Tor start on Linux.** As before, Linux needs a system Tor ("start the service"), so "Try a new circuit" can only verify, not start one. | Ship a managed Tor on Linux as on Windows and macOS. |
-| undo | **Whole files only.** Revert restores whole files from HEAD; there is no per-hunk revert. | `git apply -R` on selected hunks. |
+| undo | **Only modified files can be split.** A modified file's "Parts…" button reverts only the ticked hunks (`git apply -R`, re-read and `--check`ed first). New, deleted, renamed and binary files still revert whole. Undo restores the whole file as it was before the revert. | Line-level picking inside a hunk. |
 | rules | **Blocked paths through the shell.** Blocked paths are hard qwen deny rules for read and edit tools. A shell command touching one is refused only when it names the path and goes through an approval (not under YOLO). | qwen shell-command path rules, or an OS sandbox. |
 | lock | **The lock hides the window; it is not encryption.** Data on disk stays as readable as before. | Encrypt sessions with a key derived from the passphrase. |
 | appearance | **The native title bar stays dark** in the light theme on Windows (it is pinned dark). | Follow the theme in `_apply_native_dark_title_bar`. |

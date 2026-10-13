@@ -1133,6 +1133,65 @@ class UndoTests(V2Base):
                 self._close(window)
 
 
+class HunkRevertTests(V2Base):
+    def test_the_dialog_returns_only_ticked_hunks(self) -> None:
+        hunks = [desktop_core.DiffHunk(0, "@@ -1,3 +1,3 @@", ("-a\n", "+b\n"), 1, 1),
+                 desktop_core.DiffHunk(1, "@@ -9,3 +9,3 @@", ("-c\n", "+d\n"), 1, 1)]
+        dialog = ui.HunkDialog("f.txt", hunks)
+        try:
+            self.assertFalse(dialog.revert_button.isEnabled())
+            dialog.list.item(1).setCheckState(Qt.CheckState.Checked)
+            self.assertEqual(dialog.selected(), [1])
+            self.assertEqual(dialog.revert_button.text(), "Revert 1 change(s)")
+            self.assertIn("+d", dialog.list.item(1).text())
+        finally:
+            dialog.deleteLater()
+
+    def test_reverting_hunks_shows_undo_like_a_file_revert(self) -> None:
+        record = desktop_core.RevertRecord("/w", "/nonexistent-backup", ("f.txt",), ())
+        window = self._window(undo=True)
+        try:
+            window.workspace = "/w"
+            calls = []
+            window.desktop_core = SimpleNamespace(
+                revert_hunks=lambda *a: calls.append(a[1:3]) or record)
+            window.refresh_workspace = lambda: None
+            window._revert_hunks("f.txt", [0, 2])
+            self.assertTrue(self._wait_until(lambda: not window.inspector.undo_bar.isHidden()))
+            self.assertEqual(calls, [("f.txt", [0, 2])])
+            self.assertEqual(window.inspector.undo_label.text(), "Reverted 2 change(s) in f.txt")
+        finally:
+            window.workspace = None
+            window.desktop_core = desktop_core
+            self._close(window)
+
+
+    def test_parts_reads_the_hunks_then_reverts_the_ticked_ones(self) -> None:
+        hunks = [desktop_core.DiffHunk(0, "@@ -1 +1 @@", ("-a\n", "+b\n"), 1, 1)]
+        window = self._window(undo=True)
+        try:
+            window.workspace = "/w"
+            window.desktop_core = SimpleNamespace(diff_hunks=lambda root, path: hunks)
+            chosen = []
+            window._revert_hunks = lambda path, indices: chosen.append((path, indices))
+
+            class Picked:
+                def __init__(self, path, given, parent):
+                    self.given = given
+                def exec(self):
+                    return ui.QDialog.DialogCode.Accepted
+                def selected(self):
+                    return [h.index for h in self.given]
+
+            with mock.patch.object(ui, "HunkDialog", Picked):
+                window._choose_hunks("f.txt")
+                self.assertTrue(self._wait_until(lambda: chosen == [("f.txt", [0])]), chosen)
+        finally:
+            window.workspace = None
+            window.desktop_core = desktop_core
+            self._close(window)
+
+
 class RulesTests(AgentStreamBase):
     def test_off_no_rules_tab_and_no_rule_decisions(self) -> None:
         window = self._window()
