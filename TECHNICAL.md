@@ -331,8 +331,9 @@ secret: the key store's name, or the password-wrapped key. Where the key lives:
   start. Without encryption the agent keeps using `~/.qwen` and
   `~/.onionmind/agent-net.log` as before.
 - **Outside the vault:** `~/.qwen/settings.json` (Onionmind's own settings for
-  qwen, no conversation) and anything qwen's `save_memory` tool writes to
-  `~/.qwen/memory.md`. Models, project folders, Tor's state and the
+  qwen, no conversation), `~/.qwen/usage_record.jsonl` (qwen's per-run token
+  counts with the session id and project path, no content), and anything
+  qwen's `save_memory` tool writes to `~/.qwen/memory.md`. Models, project folders, Tor's state and the
   context-size number in `~/.onionmind/code-ctx` are not encrypted either.
   Full-disk encryption covers all of those.
 
