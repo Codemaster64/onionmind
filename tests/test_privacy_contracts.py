@@ -180,6 +180,36 @@ class BackgroundTorTests(unittest.TestCase):
         self.assertIn("brew install tor", str(raised.exception))
         popen.assert_not_called()
 
+    def test_linux_launches_the_distro_tor_under_an_owned_torrc(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(onionmind.os, "name", "posix"), \
+                 mock.patch.object(onionmind.sys, "platform", "linux"), \
+                 mock.patch.object(onionmind.os.path, "expanduser", return_value=temporary), \
+                 mock.patch.object(onionmind, "_linux_tor_binary", return_value="/usr/bin/tor"), \
+                 mock.patch.object(onionmind, "tor_proxy_port", side_effect=[None, 9050]), \
+                 mock.patch.object(onionmind.subprocess, "Popen", return_value=process) as popen:
+                self.assertEqual(onionmind.start_tor_hidden(timeout=2), 9050)
+            argv = popen.call_args.args[0]
+            self.assertEqual(argv[0], "/usr/bin/tor")
+            torrc = Path(argv[2]).read_text(encoding="utf-8")
+            self.assertIn("SocksPort 9050", torrc)
+            self.assertIn("CookieAuthentication 0", torrc)
+        self.assertIs(onionmind._managed_tor_process, process)
+        onionmind._managed_tor_process = None
+
+    def test_linux_without_tor_fails_closed_with_an_install_hint(self) -> None:
+        with mock.patch.object(onionmind.os, "name", "posix"), \
+             mock.patch.object(onionmind.sys, "platform", "linux"), \
+             mock.patch.object(onionmind, "tor_proxy_port", return_value=None), \
+             mock.patch.object(onionmind, "_linux_tor_binary", return_value=None), \
+             mock.patch.object(onionmind.subprocess, "Popen") as popen, \
+             self.assertRaises(RuntimeError) as raised:
+            onionmind.start_tor_hidden()
+        self.assertIn("tor package", str(raised.exception))
+        popen.assert_not_called()
+
     def test_failed_reverification_clears_a_previously_verified_port(self) -> None:
         response = mock.Mock()
         response.json.return_value = {"IsTor": False}

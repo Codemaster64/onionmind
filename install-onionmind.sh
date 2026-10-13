@@ -760,22 +760,51 @@ def _darwin_tor_binary():
     return found
 
 
+def _linux_tor_binary():
+    """Return the distribution's tor binary, which Onionmind may launch and own, or None."""
+    return shutil.which("tor") or next(
+        (candidate for candidate in ("/usr/bin/tor", "/usr/sbin/tor", "/usr/local/bin/tor")
+         if os.path.isfile(candidate)),
+        None,
+    )
+
+
 def _start_darwin_tor(stop_event=None, timeout=30):
     """Launch Homebrew's tor with a generated torrc this session owns (macOS).
 
     The Tor Browser bundle layout is deliberately not parsed here; `brew
     install tor` is the documented path, and the installer normally runs it as
-    a brew service - this is the fallback when nothing is listening. The torrc
-    mirrors Android's ProcessManager (SOCKS on 9050, a private data dir, no
-    control cookie), and stop_managed_tor() still only ever touches the
-    process started below.
+    a brew service - this is the fallback when nothing is listening.
     """
+    return _start_owned_tor(
+        _darwin_tor_binary(),
+        "Install it with 'brew install tor' (or start your Tor service)",
+        stop_event, timeout)
+
+
+def _start_linux_tor(stop_event=None, timeout=30):
+    """Launch the distribution's tor as this user, under a torrc this session owns.
+
+    The system service (tor.service) is still preferred: when it listens,
+    start_tor_hidden() reuses it and never gets here. This is for a tor that is
+    installed but not running - no root, no systemctl, and stop_managed_tor()
+    ends it with the session.
+    """
+    return _start_owned_tor(
+        _linux_tor_binary(),
+        "Install your distribution's tor package (pacman -S tor, or apt install tor) "
+        "or start the Tor service",
+        stop_event, timeout)
+
+
+def _start_owned_tor(tor, install_hint, stop_event=None, timeout=30):
+    """Run `tor` under a generated torrc. It mirrors Android's ProcessManager
+    (SOCKS on 9050, a private data dir, no control cookie), and
+    stop_managed_tor() still only ever touches the process started here."""
     global _managed_tor_process
-    tor = _darwin_tor_binary()
     if tor is None:
         raise RuntimeError(
-            "No tor binary found. Install it with 'brew install tor' (or start "
-            "your Tor service), then enable Tor search again."
+            f"No tor binary found. {install_hint}, then enable Tor search again."
         )
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("Background Tor start was stopped.")
@@ -802,9 +831,9 @@ def start_tor_hidden(timeout=30, stop_event=None):
     """Start Tor Browser's Tor daemon without opening a browser or console window.
 
     Called only after the user opts into Tor search. Existing Tor proxies are
-    reused and never adopted or stopped by Onionmind. On macOS there is no
-    Tor Browser bundle to mine; Homebrew's tor is launched under a torrc we
-    own instead.
+    reused and never adopted or stopped by Onionmind. On macOS and Linux there
+    is no Tor Browser bundle to mine; Homebrew's or the distribution's tor is
+    launched under a torrc we own instead.
     """
     global _managed_tor_process
     if not _tor_enabled:
@@ -819,7 +848,7 @@ def start_tor_hidden(timeout=30, stop_event=None):
     if os.name != "nt":
         if sys.platform == "darwin":
             return _start_darwin_tor(stop_event=stop_event, timeout=timeout)
-        raise RuntimeError("Start the local Tor service, then enable Tor search again.")
+        return _start_linux_tor(stop_event=stop_event, timeout=timeout)
 
     for root in _tor_browser_roots():
         browser = os.path.join(root, "Browser")
