@@ -1062,13 +1062,14 @@ class GpuMemoryProbeTests(unittest.TestCase):
                 self.assertEqual(core._apple_memory(), (None, 21_845, "Apple GPU (unified memory)"))
 
     def test_first_vendor_found_wins_and_absence_is_none(self) -> None:
+        # Intel is probed on every platform (AMD and Apple only off Windows).
         with mock.patch.object(core, "_nvidia_memory", return_value=None), \
-             mock.patch.object(core, "_amd_memory", return_value=(1, 8_192, "AMD GPU")), \
-             mock.patch.object(core, "_intel_memory", return_value=None), \
+             mock.patch.object(core, "_amd_memory", return_value=None), \
+             mock.patch.object(core, "_intel_memory", return_value=(1, 8_192, "Intel GPU")), \
              mock.patch.object(core, "_apple_memory", return_value=None):
             self.assertEqual(core.gpu_memory_mb(), (1, 8_192))
             self.assertEqual(core.gpu_vram_mb(), 8_192)
-            self.assertEqual(core.gpu_name(), "AMD GPU")
+            self.assertEqual(core.gpu_name(), "Intel GPU")
         with mock.patch.object(core, "_gpu_memory", return_value=None):
             self.assertEqual(core.gpu_memory_mb(), (None, None))
             self.assertIsNone(core.gpu_name())
