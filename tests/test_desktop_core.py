@@ -1020,6 +1020,60 @@ class ModelDiscoveryTests(unittest.TestCase):
 
 
 
+class GpuMemoryProbeTests(unittest.TestCase):
+    """Each vendor probe against canned tool output or a fake sysfs tree."""
+
+    def probe(self, outputs: dict[str, str]):
+        return mock.patch.object(core, "_run_probe",
+                                 side_effect=lambda argv: outputs.get(" ".join(argv[:2])))
+
+    def test_nvidia_is_parsed_with_its_name(self) -> None:
+        with self.probe({"nvidia-smi --query-gpu=memory.used,memory.total,name":
+                         "1200, 4096, NVIDIA GeForce GTX 1650\n"}):
+            self.assertEqual(core._nvidia_memory(), (1200, 4096, "NVIDIA GeForce GTX 1650"))
+
+    def test_amd_reads_amdgpu_sysfs_and_skips_small_carveouts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for card, vendor, total, used in (("card0", "0x1002", 512, 100),
+                                              ("card1", "0x1002", 16_368, 2_048),
+                                              ("card2", "0x10de", 24_000, 0)):
+                device = root / card / "device"
+                device.mkdir(parents=True)
+                (device / "vendor").write_text(vendor + "\n")
+                (device / "mem_info_vram_total").write_text(str(total * 1024 * 1024))
+                (device / "mem_info_vram_used").write_text(str(used * 1024 * 1024))
+            (root / "card1" / "device" / "product_name").write_text("Radeon RX 7800 XT\n")
+            with mock.patch.object(core, "_DRM_ROOT", root):
+                self.assertEqual(core._amd_memory(), (2_048, 16_368, "Radeon RX 7800 XT"))
+
+    def test_intel_reads_xpu_smi_json(self) -> None:
+        discovery = json.dumps({"device_name": "Intel(R) Arc(TM) A770 Graphics",
+                                "memory_physical_size_byte": str(16 * 1024 ** 3)})
+        stats = json.dumps({"device_level": [{"metrics_type": "XPUM_STATS_MEMORY_USED", "value": 900}]})
+        with self.probe({"xpu-smi discovery": discovery, "xpu-smi stats": stats}):
+            self.assertEqual(core._intel_memory(), (900, 16_384, "Intel(R) Arc(TM) A770 Graphics"))
+
+    def test_apple_reports_the_metal_share_of_unified_memory(self) -> None:
+        uname = mock.Mock(sysname="Darwin", machine="arm64")
+        with mock.patch.object(core.os, "uname", return_value=uname, create=True):
+            with self.probe({"sysctl -n": str(32 * 1024 ** 3)}):
+                # 32 GB machine: 2/3 of RAM, no used figure of its own.
+                self.assertEqual(core._apple_memory(), (None, 21_845, "Apple GPU (unified memory)"))
+
+    def test_first_vendor_found_wins_and_absence_is_none(self) -> None:
+        with mock.patch.object(core, "_nvidia_memory", return_value=None), \
+             mock.patch.object(core, "_amd_memory", return_value=(1, 8_192, "AMD GPU")), \
+             mock.patch.object(core, "_intel_memory", return_value=None), \
+             mock.patch.object(core, "_apple_memory", return_value=None):
+            self.assertEqual(core.gpu_memory_mb(), (1, 8_192))
+            self.assertEqual(core.gpu_vram_mb(), 8_192)
+            self.assertEqual(core.gpu_name(), "AMD GPU")
+        with mock.patch.object(core, "_gpu_memory", return_value=None):
+            self.assertEqual(core.gpu_memory_mb(), (None, None))
+            self.assertIsNone(core.gpu_name())
+
+
 FIXTURES = Path(__file__).resolve().parent
 
 
@@ -1242,7 +1296,7 @@ class WorkbenchV2CoreTests(unittest.TestCase):
         self.assertFalse(core.node_supports_agent("v22.18.9"))
         self.assertFalse(core.node_supports_agent(None))
         used, total = core.gpu_memory_mb()
-        self.assertTrue(total is None or (used is not None and 0 <= used <= total))
+        self.assertTrue(total is None or used is None or 0 <= used <= total)
 
 
 class RemoteComputeTests(unittest.TestCase):

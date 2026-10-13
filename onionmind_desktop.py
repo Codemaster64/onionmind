@@ -9669,10 +9669,14 @@ class OnionmindWindow(QMainWindow):
         self.speed_status.setText(
             f"{self._live_tps:.0f} tok/s" if running and self._live_tps else "Idle")
         used, total = self._model_power.get("vram_used"), self._model_power.get("vram_total")
-        if total:
+        in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
+        if total and used is not None:
             self.vram_status.setText(f"VRAM {used / 1024:.1f} / {total / 1024:.0f} GB")
+        elif total:
+            # Unified memory (Apple): the GPU reports no used figure of its own,
+            # so show what the model server has placed in GPU memory.
+            self.vram_status.setText(f"VRAM {in_vram / 1024 ** 3:.1f} / {total / 1024:.0f} GB")
         else:
-            in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
             self.vram_status.setText(f"{in_vram / 1024 ** 3:.1f} GB in VRAM" if in_vram else "VRAM unknown")
         used_ctx, limit = self._context_numbers()
         fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))
