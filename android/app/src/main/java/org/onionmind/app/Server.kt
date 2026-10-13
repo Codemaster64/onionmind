@@ -18,6 +18,7 @@ import org.onionmind.core.ModelCatalog
 import org.onionmind.core.ModelFit
 import org.onionmind.core.Presets
 import org.onionmind.core.TurnStats
+import org.onionmind.core.Vault
 import org.onionmind.core.WorkbenchPreferences
 import java.io.File
 import java.io.RandomAccessFile
@@ -56,6 +57,7 @@ object Server {
     fun start(context: Context) {
         if (http != null) return
         ctx = context.applicationContext
+        Workbench.startVault(ctx)
         http = object : NanoHTTPD("127.0.0.1", PORT) {
             override fun serve(session: IHTTPSession): Response {
                 val response = try {
@@ -65,6 +67,13 @@ object Server {
                         session.uri in API_PATHS &&
                             session.headers["x-onionmind-token"] != apiToken ->
                             error(Response.Status.FORBIDDEN, "bad or missing token")
+                        session.uri == "/api/vault" -> vaultState()
+                        session.uri == "/api/vault/unlock" -> unlock(session)
+                        session.uri == "/api/vault/erase" -> erase(session)
+                        // Encrypted and not unlocked: no data route answers.
+                        Workbench.locked() && session.uri in API_PATHS -> lockedResponse()
+                        session.uri == "/api/vault/password" -> setPassword(session)
+                        session.uri == "/api/vault/remove" -> removePassword(session)
                         session.uri == "/api/status" -> status()
                         session.uri == "/api/preferences" -> preferences(session)
                         session.uri == "/api/features" -> features(session)
@@ -254,15 +263,16 @@ object Server {
      * POST replaces it (the UI saves after every turn), DELETE clears it.
      */
     private fun conversation(session: IHTTPSession): Response {
+        val vault = Workbench.vault
         if (session.method == NanoHTTPD.Method.DELETE) {
-            ConversationStore.save(ctx.filesDir, emptyList())
+            ConversationStore.save(ctx.filesDir, emptyList(), vault)
             return json("{\"ok\":true}")
         }
         if (session.method == NanoHTTPD.Method.GET) {
             // lock: an old conversation is deleted before it is ever shown.
             if (Workbench.on(ctx, "lock"))
                 ConversationStore.expire(ctx.filesDir, Workbench.preferences(ctx).autoDeleteDays)
-            return json(JsonArray(ConversationStore.load(ctx.filesDir)).toString())
+            return json(JsonArray(ConversationStore.load(ctx.filesDir, vault)).toString())
         }
         val files = HashMap<String, String>()
         session.parseBody(files)
@@ -274,8 +284,74 @@ object Server {
         } catch (_: Exception) {
             return error(Response.Status.BAD_REQUEST, "invalid conversation")
         }
-        ConversationStore.save(ctx.filesDir, messages)
+        ConversationStore.save(ctx.filesDir, messages, vault)
         return json(JsonArray(messages).toString())
+    }
+
+    // --- encryption at rest -------------------------------------------------
+
+    private object Locked : Response.IStatus {
+        override fun getDescription() = "423 Locked"
+        override fun getRequestStatus() = 423
+    }
+
+    private fun lockedResponse(): Response = NanoHTTPD.newFixedLengthResponse(Locked, "application/json",
+        buildJsonObject { put("locked", true); put("error", "Onionmind is locked") }.toString())
+
+    private fun vaultState(): Response = json(buildJsonObject {
+        val vault = Workbench.vault
+        put("locked", vault == null)
+        put("hasPassword", vault?.hasPassword ?: Vault.needsPassword(ctx.filesDir))
+        vault?.let { put("describe", it.describe()) }
+        Workbench.vaultProblem?.let { put("problem", it) }
+    }.toString())
+
+    private fun field(session: IHTTPSession, name: String): String? {
+        val files = HashMap<String, String>()
+        if (session.method == NanoHTTPD.Method.POST) session.parseBody(files)
+        return session.parms[name] ?: formValue(files["postData"] ?: files["content"], name)
+    }
+
+    private fun unlock(session: IHTTPSession): Response {
+        val password = field(session, "password").orEmpty()
+        return try {
+            Workbench.openVault(ctx, password)
+            vaultState()
+        } catch (e: Vault.WrongPassword) {
+            error(Response.Status.FORBIDDEN, "That password is not right.")
+        } catch (e: Vault.Unavailable) {
+            error(Response.Status.CONFLICT, e.message ?: "The encrypted data could not be opened.")
+        }
+    }
+
+    private fun setPassword(session: IHTTPSession): Response {
+        val files = HashMap<String, String>(); session.parseBody(files)
+        val body = files["postData"] ?: files["content"]
+        val password = session.parms["password"] ?: formValue(body, "password")
+        val current = session.parms["current"] ?: formValue(body, "current")
+        if (password == null || password.length < 8)
+            return error(Response.Status.BAD_REQUEST, "Use at least 8 characters.")
+        return try {
+            Workbench.vault!!.setPassword(password, current)
+            vaultState()
+        } catch (e: Vault.WrongPassword) {
+            error(Response.Status.FORBIDDEN, e.message ?: "The current password is not right.")
+        }
+    }
+
+    private fun removePassword(session: IHTTPSession): Response = try {
+        Workbench.vault!!.removePassword(field(session, "current").orEmpty())
+        vaultState()
+    } catch (e: Vault.WrongPassword) {
+        error(Response.Status.FORBIDDEN, e.message ?: "That password is not right.")
+    }
+
+    /** Forgotten password: erase the conversation, log and settings (models stay). */
+    private fun erase(session: IHTTPSession): Response {
+        if (field(session, "confirm") != "erase") return error(Response.Status.BAD_REQUEST, "not confirmed")
+        stopFlag?.set(true)
+        Workbench.eraseAll(ctx)
+        return vaultState()
     }
 
     private fun select(session: IHTTPSession): Response {
@@ -411,7 +487,8 @@ object Server {
     private val API_PATHS = setOf(
         "/api/status", "/api/preferences", "/api/conversation", "/api/stop",
         "/api/install", "/api/select", "/api/remove", "/api/chat",
-        "/api/features", "/api/netlog", "/api/share"
+        "/api/features", "/api/netlog", "/api/share",
+        "/api/vault", "/api/vault/unlock", "/api/vault/password", "/api/vault/remove", "/api/vault/erase"
     )
 
     // Set by /api/stop from outside the chat lock; the running turn polls it

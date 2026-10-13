@@ -576,9 +576,27 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   served only under a high-entropy capability URL handed to this app's own
   WebView, and the JSON API additionally requires a header token that never
   appears in a URL; both secrets are random per app start and not persisted.
+- **Encryption at rest:** the conversation, the network log and every
+  SharedPreferences value (preferences, feature flags, the active and custom
+  models) are AES-256-GCM encrypted in the desktop's file format
+  (`core/.../Vault.kt`). The data key is wrapped by an AES key created inside
+  the **Android Keystore** (`KeystoreWrap`; it never leaves the keystore and is
+  not in backups, so a backup or a copied data folder reads nothing). An
+  optional password (Settings → Encryption) wraps the key with
+  PBKDF2-HMAC-SHA256 (310,000 rounds) instead and deletes the Keystore copy;
+  the app then starts on an unlock screen, and every data route answers 423
+  until `/api/vault/unlock`. A forgotten password cannot be recovered: the
+  unlock screen erases the conversation, log and settings (models stay) after
+  a confirmation. An older install's plaintext is encrypted on first start.
+  Outside the vault: model files, Tor's state and llama-server's own log
+  (truncated each start; load and request lines, no prompts without `-v`).
+  Verified by `VaultTest` (12 JVM tests) and on an Android 14 emulator:
+  upgrade from the previous APK (every seeded secret gone from disk, values
+  `enc1:` and files `OMENC1`), set password, restart to the unlock screen,
+  wrong then right password, erase.
 - **Workbench preferences:** text size, the send key, and animation
   (`/api/preferences`, behind the same token) are presentation-only, persist
-  in the app's private storage, and never cross the network. The Tor boundary
+  (encrypted) in the app's private storage, and never cross the network. The Tor boundary
   and the per-turn search permission are deliberately not preferences.
 - **Workbench v2 features:** 14 of the desktop's 24 flags, adapted for a phone.
   They use the same keys, and every flag is off except "Ask before searching

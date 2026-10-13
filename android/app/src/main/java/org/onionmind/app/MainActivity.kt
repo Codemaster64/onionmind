@@ -3,6 +3,7 @@ package org.onionmind.app
 import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 
 class MainActivity : Activity() {
@@ -22,6 +23,10 @@ class MainActivity : Activity() {
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
+        // Without a chrome client a WebView drops confirm()/alert() and confirm()
+        // returns false: the download consent, model removal, clearing and the
+        // erase-after-forgotten-password prompts could never be accepted.
+        web.webChromeClient = WebChromeClient()
         // Nocturne ground behind the page, so the first frame is not Material grey.
         web.setBackgroundColor(0xFF161826.toInt())
         setContentView(web)

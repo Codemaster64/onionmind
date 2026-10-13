@@ -246,5 +246,6 @@ feature → add the check that proves it, or mark it unverified
 | Change desktop logic (settings, sessions, update, git snapshot) | `onionmind_desktop_core.py` | `tests/test_desktop_core.py` |
 | Change desktop UI | `onionmind_desktop.py` (window) or the `onionmind_desktop_{theme,widgets,panes,dialogs}.py` part that owns the widget, then `python build.py` | `tools/build-desktop.ps1 -Check`, the `test_desktop_*_ui.py` set |
 | Change Android behaviour | `android/core` (logic) / `android/app` (shell) | the Kotlin `test/` suites |
+| Change encryption at rest | `onionmind_desktop_core.py` (vault) and `android/core/.../Vault.kt` - keep the file format identical | `tests/test_vault.py`, `VaultTest` |
 | Change the USB image | `usb/` | `usb/tests/` |
 | Change an installer | **source** (`onionmind.py`/icon/logo) — never the embedded copy | `python build.py && python build.py --check` |
