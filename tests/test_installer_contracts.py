@@ -174,6 +174,11 @@ class InstallerContractTests(unittest.TestCase):
         sh = self.text("install-onionmind.sh")
         self.assertIn("--client) ROLE=client", sh)
         self.assertIn("--host=*) SERVER_HOST=", sh)
+        # Both halves check what they download against the release's SHA256SUMS,
+        # so the release must publish it.
+        self.assertIn("SHA256SUMS", release)
+        self.assertIn('"$BASE/SHA256SUMS"', text)
+        self.assertIn('"$Base/SHA256SUMS"', text)
 
     def text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")

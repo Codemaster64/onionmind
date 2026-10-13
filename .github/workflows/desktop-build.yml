@@ -123,6 +123,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write       # keyless Sigstore signing for the provenance attestation
+      attestations: write
     concurrency:
       group: desktop-release
       cancel-in-progress: false
@@ -168,6 +170,20 @@ jobs:
           EOF
           cat "${MANIFEST_ASSET}"
 
+      - name: Checksum every release asset
+        run: |
+          set -euo pipefail
+          # onionmind-install.cmd checks what it downloads against this file.
+          sha256sum "${BUNDLE_ASSET}" "${MANIFEST_ASSET}" onionmind-install.cmd \
+            onionmind-setup.cmd install-onionmind.sh install-onionmind-android.sh \
+            matchstick.cmd matchstick.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: SHA256SUMS
+
       - name: Publish the rolling release
         run: |
           set -euo pipefail
@@ -175,7 +191,7 @@ jobs:
           gh release create desktop-latest \
             --repo "$GITHUB_REPOSITORY" \
             --title "Onionmind desktop (rolling)" \
-            --notes "Rolling build of main, republished on every push. The installers are attached here because a raw link renders in the browser instead of downloading; release assets are served as attachments. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip." \
+            --notes "Rolling build of main, republished on every push. The installers are attached here because a raw link renders in the browser instead of downloading; release assets are served as attachments. Installed copies check this release over Tor; the manifest pins the revision, size, and SHA-256 of the zip. SHA256SUMS covers every asset and carries a GitHub build-provenance attestation (gh attestation verify SHA256SUMS --repo Codemaster64/onionmind)." \
             "${BUNDLE_ASSET}" \
             "${MANIFEST_ASSET}" \
             onionmind-install.cmd \
@@ -183,4 +199,5 @@ jobs:
             install-onionmind.sh \
             install-onionmind-android.sh \
             matchstick.cmd \
-            matchstick.sh
+            matchstick.sh \
+            SHA256SUMS
