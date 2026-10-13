@@ -247,6 +247,44 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(core.absorb_agent_net_log(agent_log, None), 0)
         self.assertFalse(agent_log.exists())
 
+    def test_the_agents_qwen_session_is_sealed_into_the_vault_and_restored_to_resume(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        base = Path(self.temp.name) / "runtime"
+        base.mkdir()
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(base)}):
+            scratch = core.open_agent_scratch(self.root, vault)
+            self.assertEqual(scratch.parent, base)              # RAM-backed where there is one
+            if os.name != "nt":
+                self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+            chat = scratch / "projects" / "-home-me-proj" / "chats" / "abc-123.jsonl"
+            chat.parent.mkdir(parents=True)
+            chat.write_text(json.dumps({"text": SECRET}) + "\n")
+            (scratch / core.AGENT_NET_LOG_NAME).write_text("2026-10-13 10:00:00 tor      example.org:443\n")
+            (scratch / "shims").mkdir()
+            (scratch / "shims" / "sitecustomize.py").write_text("# shim\n")
+            self.assertTrue(core.seal_agent_scratch(self.root, vault, scratch, "abc-123"))
+            self.assertFalse(scratch.exists())                   # the plaintext is gone
+            self.no_plaintext_anywhere()
+            archive = self.root / core.AGENT_ARCHIVE_DIR / "abc-123.tar"
+            self.assertTrue(core.is_encrypted(archive.read_bytes()))
+
+            resumed = core.open_agent_scratch(self.root, vault, resume="abc-123")
+            restored = resumed / "projects" / "-home-me-proj" / "chats" / "abc-123.jsonl"
+            self.assertIn(SECRET, restored.read_text())
+            self.assertFalse((resumed / core.AGENT_NET_LOG_NAME).exists())
+            self.assertFalse((resumed / "shims").exists())
+            # A run with no session id keeps nothing; a bad id never names a path.
+            self.assertFalse(core.seal_agent_scratch(self.root, vault, resumed, "../escape"))
+            self.assertFalse(resumed.exists())
+
+            # A run the app never saw end: its log is taken in, the folder shredded.
+            left = core.open_agent_scratch(self.root, vault)
+            (left / core.AGENT_NET_LOG_NAME).write_text("2026-10-13 10:00:00 tor      example.net:443\n")
+            log = core.EgressLog(self.root / "network-log.jsonl", vault)
+            self.assertEqual(core.sweep_agent_scratch(log), 1)
+            self.assertFalse(left.exists())
+            self.assertIn("example.net", log.entries()[0]["what"])
+
 
 @unittest.skipUnless(core.encryption_available(), "the cryptography package is not installed")
 class KeystoreTests(unittest.TestCase):
@@ -429,6 +467,30 @@ class VaultDesktopTests(unittest.TestCase):
         self.assertFalse(vault.locked)
         self.assertTrue(overlay.isHidden())
         self.assertEqual(window.session_bridge.list()[0].messages[0]["content"], SECRET)
+
+    def test_an_agent_run_gets_a_private_scratch_folder_sealed_when_it_ends(self) -> None:
+        vault, _notice = ui._open_vault_for_startup(core, self.root)
+        window = self.window(vault)
+        base = Path(self.temp.name) / "runtime"
+        base.mkdir()
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(base)}):
+            env = window._open_agent_scratch()
+            scratch = Path(env["QWEN_RUNTIME_DIR"])
+            self.assertTrue(scratch.is_dir())
+            self.assertEqual(Path(env["ONIONMIND_NET_LOG"]).parent, scratch)
+            (scratch / "projects").mkdir()
+            (scratch / "projects" / "chat.jsonl").write_text(SECRET)
+            window._agent_session_id = "run-1"
+            window._seal_agent_scratch()
+            self.assertFalse(scratch.exists())
+            self.assertIsNone(window._agent_scratch)
+            self.assertTrue((self.root / core.AGENT_ARCHIVE_DIR / "run-1.tar").is_file())
+            # Resuming that session restores it into a new scratch folder.
+            again = Path(window._open_agent_scratch()["QWEN_RUNTIME_DIR"])
+            self.assertEqual((again / "projects" / "chat.jsonl").read_text(), SECRET)
+            window._seal_agent_scratch()
+        unencrypted = self.window(None)
+        self.assertEqual(unencrypted._open_agent_scratch(), {})     # no vault: as before
 
     def test_forgotten_password_erases_after_confirmation(self) -> None:
         vault, _ = ui._open_vault_for_startup(core, self.root)

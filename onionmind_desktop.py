@@ -31,6 +31,7 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QProcess,
+    QProcessEnvironment,
     QRectF,
     QSettings,
     QSize,
@@ -357,6 +358,9 @@ class OnionmindWindow(QMainWindow):
         self._agent_cards: list[QWidget] = []
         self._agent_outcome: Optional[str] = None
         self._agent_session_id: Optional[str] = None
+        # The running agent's private scratch folder (qwen's runtime dir and
+        # the network log), only while the data is encrypted.
+        self._agent_scratch: Optional[Path] = None
         self._resume_cards: list[Any] = []
         # qwen's own context figures: live during a run, and the overhead it
         # adds to every run, learnt from the last one.
@@ -2277,6 +2281,9 @@ class OnionmindWindow(QMainWindow):
         if callable(shred_tree) and reverts.is_dir():
             shred_tree(reverts)
             self._revert_record = None
+        agent_sessions = self.data_root / getattr(self.desktop_core, "AGENT_ARCHIVE_DIR", "agent-runtime")
+        if callable(shred_tree) and agent_sessions.is_dir():
+            shred_tree(agent_sessions)                # the agent's sealed qwen sessions
         tor = self.wipe_tor_state()
 
         self.left_rail.clear_projects()
@@ -3134,8 +3141,19 @@ class OnionmindWindow(QMainWindow):
         self.terminal.show()
         self.terminal_toggle.setChecked(True)
         self.terminal.append("\n[agent] Starting Onionmind Agent\n")
+        try:
+            scratch_env = self._open_agent_scratch()
+        except Exception as exc:
+            # Never fall back to qwen writing the run into ~/.qwen in plaintext.
+            self._harness_start_failed(f"its private working folder could not be prepared ({exc})", generation)
+            return
         process = QProcess(self)
         self.harness_process = process
+        if scratch_env:
+            environment = QProcessEnvironment.systemEnvironment()
+            for name, value in scratch_env.items():
+                environment.insert(name, value)
+            process.setProcessEnvironment(environment)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         if self._agent_stream:
             # JSON lines on stdout must not interleave with stderr chatter.
@@ -3193,6 +3211,7 @@ class OnionmindWindow(QMainWindow):
                 self._handle_agent_line(rest)
             self._clear_agent_cards()
             self._finish_run_panel(normal and exit_code == 0)
+        self._seal_agent_scratch()
         suffix = f"\n\nAgent {'finished' if normal else 'crashed'} with exit code {exit_code}. Refreshing observed disk state."
         if self.stream_block is not None:
             self.stream_block.append_text(suffix)
@@ -3224,6 +3243,7 @@ class OnionmindWindow(QMainWindow):
             return
         message = _brand_runtime_text(message)
         self.tor_in_use = False
+        self._seal_agent_scratch()
         text = f"Onionmind Agent could not start: {message}\n\n{self.harness_bridge.limitation}"
         if self.stream_block is None:
             self.stream_block = self.transcript.add_message("assistant", text, "Onionmind Agent")
@@ -4294,20 +4314,65 @@ class OnionmindWindow(QMainWindow):
         log_type = getattr(self.desktop_core, "EgressLog", None)
         return log_type(self.egress_path, **self._vault_kw()) if log_type is not None else None
 
+    def _agent_net_logs(self) -> list[Path]:
+        """The plaintext agent logs: the run's scratch log, and the shared one
+        (an older agent, or a child that did not inherit the redirect)."""
+        logs = [Path(_as_text(getattr(self.core, "NET_LOG", "")) or ".")]
+        if self._agent_scratch is not None:
+            logs.insert(0, self._agent_scratch / getattr(self.desktop_core, "AGENT_NET_LOG_NAME", "agent-net.log"))
+        return [log for log in logs if log.is_file()]
+
     def _absorb_agent_log(self) -> None:
         """Take the agent's plaintext network log into the encrypted one (when a
         log is wanted) and shred it. Only with a vault: without one the file is
         the log, as before."""
         absorb = _optional_callable(self.desktop_core, "absorb_agent_net_log")
-        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
-        if self.vault is None or absorb is None or not net_log or not Path(net_log).is_file():
+        if self.vault is None or absorb is None:
             return
         logging = self.feature("netlog") or self.feature("boundary")
-        try:
-            absorb(net_log, self._egress_log() if logging else None)
-        except OSError:
+        for net_log in self._agent_net_logs():
+            try:
+                absorb(net_log, self._egress_log() if logging else None)
+            except OSError:
+                continue
+            self._egress_counts = None
+
+    def _open_agent_scratch(self) -> dict[str, str]:
+        """With a vault: a private scratch folder for this run (restoring the
+        resumed qwen session into it), and the environment that points qwen
+        and the agent's network log there. Empty without a vault."""
+        opener = _optional_callable(self.desktop_core, "open_agent_scratch")
+        if self.vault is None or opener is None:
+            return {}
+        self._seal_agent_scratch()                   # never two at once
+        scratch = Path(opener(self.data_root, self.vault, resume=self._agent_session_id or ""))
+        self._agent_scratch = scratch
+        name = getattr(self.desktop_core, "AGENT_NET_LOG_NAME", "agent-net.log")
+        return {"QWEN_RUNTIME_DIR": str(scratch), "ONIONMIND_NET_LOG": str(scratch / name)}
+
+    def _seal_agent_scratch(self) -> None:
+        """After a run: its network log into the encrypted log, qwen's session
+        into the vault, and the plaintext scratch folder shredded."""
+        scratch, self._agent_scratch = self._agent_scratch, None
+        sealer = _optional_callable(self.desktop_core, "seal_agent_scratch")
+        if scratch is None or sealer is None or self.vault is None:
             return
-        self._egress_counts = None
+        absorb = _optional_callable(self.desktop_core, "absorb_agent_net_log")
+        log = scratch / getattr(self.desktop_core, "AGENT_NET_LOG_NAME", "agent-net.log")
+        if absorb is not None and log.is_file():
+            logging = self.feature("netlog") or self.feature("boundary")
+            try:
+                absorb(log, self._egress_log() if logging else None)
+                self._egress_counts = None
+            except OSError:
+                pass
+        try:
+            sealer(self.data_root, self.vault, scratch, self._agent_session_id or "")
+        except Exception as exc:
+            shred = _optional_callable(self.desktop_core, "shred_tree")
+            if shred is not None:
+                shred(scratch)
+            self.inspector.append_activity(f"The agent's session could not be kept for resuming: {exc}")
 
     def _today_counts(self) -> dict[str, int]:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -4467,9 +4532,9 @@ class OnionmindWindow(QMainWindow):
         if log is not None:
             rows.extend(log.entries(today))
         agent_rows = getattr(self.desktop_core, "agent_net_entries", None)
-        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
-        if callable(agent_rows) and net_log:
-            rows.extend(agent_rows(net_log, today))
+        if callable(agent_rows):
+            for net_log in self._agent_net_logs():
+                rows.extend(agent_rows(net_log, today))
         return sorted(rows, key=lambda row: row.get("time", ""))
 
     def open_network_log(self) -> None:
@@ -5684,6 +5749,10 @@ def run(core_module: Any = None, demo: bool = False) -> int:
     if notice:
         window.set_status(notice)
     window._absorb_agent_log()                      # a run that ended with the app closed
+    sweep = _optional_callable(desktop_core, "sweep_agent_scratch")
+    if vault is not None and sweep is not None:
+        logging = window.feature("netlog") or window.feature("boundary")
+        sweep(window._egress_log() if logging else None)   # a run the app never saw end
     app.setProperty("onionmindWindow", window)
     window.show()
     _apply_native_dark_title_bar(window)

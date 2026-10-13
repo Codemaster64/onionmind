@@ -156,6 +156,9 @@ __all__ = [
     "read_data_file",
     "write_data_file",
     "absorb_agent_net_log",
+    "open_agent_scratch",
+    "seal_agent_scratch",
+    "sweep_agent_scratch",
 ]
 
 
@@ -3684,6 +3687,106 @@ def absorb_agent_net_log(path: PathInput, egress: Optional["EgressLog"]) -> int:
             egress.append(row["route"], row["what"], when)
     shred_file(target)
     return len(rows) if egress is not None else 0
+
+
+# qwen-code keeps its chats, tool output and todos under QWEN_RUNTIME_DIR, and
+# reads them back to resume a run, so it needs them in plaintext while it runs.
+# With a vault each run gets a private scratch folder - RAM-backed under
+# XDG_RUNTIME_DIR where there is one - and afterwards its contents go into the
+# vault as one encrypted archive per qwen session, and the plaintext is shredded.
+
+AGENT_ARCHIVE_DIR = "agent-runtime"
+AGENT_SCRATCH_PREFIX = "onionmind-agent-"
+AGENT_NET_LOG_NAME = "agent-net.log"
+_AGENT_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+def agent_scratch_base() -> Path:
+    """Where run scratch folders go: the per-user runtime dir (tmpfs on most
+    Linux systems, cleared at logout) when there is one, else the temp dir."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime and os.path.isdir(runtime) and os.access(runtime, os.W_OK):
+        return Path(runtime)
+    return Path(tempfile.gettempdir())
+
+
+def _agent_archive(root: PathInput, session_id: str) -> Optional[Path]:
+    if not _AGENT_SESSION_ID.fullmatch(session_id or ""):
+        return None
+    return Path(root).expanduser() / AGENT_ARCHIVE_DIR / f"{session_id}.tar"
+
+
+def open_agent_scratch(root: PathInput, vault: Vault, resume: str = "") -> Path:
+    """A new private (0700) scratch folder for one agent run. When resuming a
+    qwen session, its sealed archive is decrypted back into it first."""
+    scratch = Path(tempfile.mkdtemp(prefix=AGENT_SCRATCH_PREFIX, dir=agent_scratch_base()))
+    archive = _agent_archive(root, resume) if resume else None
+    if archive is not None and archive.is_file():
+        import io
+        import tarfile
+
+        data = vault.decrypt(archive.read_bytes())
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r") as bundle:
+            members = []
+            for member in bundle.getmembers():
+                name = Path(member.name)
+                # Our own authenticated archive, but extract defensively anyway.
+                if name.is_absolute() or ".." in name.parts or not (member.isfile() or member.isdir()):
+                    continue
+                members.append(member)
+            if hasattr(tarfile, "data_filter"):
+                bundle.extractall(scratch, members=members, filter="data")
+            else:
+                bundle.extractall(scratch, members=members)
+    return scratch
+
+
+def seal_agent_scratch(root: PathInput, vault: Vault, scratch: PathInput, session_id: str = "") -> bool:
+    """Encrypt what qwen wrote during the run into the vault (replacing that
+    session's earlier archive), then shred the scratch folder. The network log
+    and the socket shims are not kept: the log was absorbed already. Returns
+    True when an archive was written."""
+    import io
+    import tarfile
+
+    folder = Path(scratch)
+    archive = _agent_archive(root, session_id)
+    sealed = False
+    if archive is not None and folder.is_dir():
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as bundle:
+            for path in sorted(folder.rglob("*")):
+                rel = path.relative_to(folder)
+                if path.is_symlink() or rel.parts[0] in (AGENT_NET_LOG_NAME, "shims"):
+                    continue
+                if path.is_file() or path.is_dir():
+                    bundle.add(path, arcname=rel.as_posix(), recursive=False)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(archive, vault.encrypt(buffer.getvalue()))
+        sealed = True
+    shred_tree(folder)
+    return sealed
+
+
+def sweep_agent_scratch(egress: Optional["EgressLog"] = None) -> int:
+    """Scratch folders a crashed or killed run left behind: take their network
+    log in (or drop it), then shred them. Returns the folders removed."""
+    base = agent_scratch_base()
+    removed = 0
+    try:
+        leftovers = [p for p in base.iterdir() if p.name.startswith(AGENT_SCRATCH_PREFIX) and p.is_dir()]
+    except OSError:
+        return 0
+    for folder in leftovers:
+        try:
+            if folder.stat().st_uid != os.getuid():
+                continue
+        except (OSError, AttributeError):
+            pass
+        absorb_agent_net_log(folder / AGENT_NET_LOG_NAME, egress)
+        shred_tree(folder)
+        removed += 0 if folder.exists() else 1
+    return removed
 
 
 def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:

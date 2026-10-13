@@ -1172,6 +1172,11 @@ def set_code_ctx(value):
 # The agent owns the console it runs in - a full-screen TUI - so network activity
 # goes to a file rather than stderr, where it would draw straight over the UI.
 NET_LOG = os.path.join(os.path.expanduser("~"), ".onionmind", "agent-net.log")
+# The desktop, when its data is encrypted, points this at the run's private
+# scratch folder (RAM-backed where the system has one) and takes the lines into
+# its encrypted log when the run ends. The socket shims follow it there.
+if os.path.isabs(os.environ.get("ONIONMIND_NET_LOG", "")):
+    NET_LOG = os.environ["ONIONMIND_NET_LOG"]
 
 
 def _net_log(line):
