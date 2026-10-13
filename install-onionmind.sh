@@ -7401,6 +7401,11 @@ def _register_system_fonts(app: QApplication) -> None:
         for family in QFontDatabase.applicationFontFamilies(font_id):
             if not ui_family and not QFontDatabase.isFixedPitch(family):
                 ui_family = family
+    if not ui_family:
+        # macOS keeps Verdana under /System/Library/Fonts/Supplemental and
+        # distros put DejaVu where they like; both are already registered there.
+        installed = set(QFontDatabase.families())
+        ui_family = next((f for f in ("Verdana", "DejaVu Sans") if f in installed), "")
     if ui_family:
         ui_font = app.font()
         ui_font.setFamily(ui_family)

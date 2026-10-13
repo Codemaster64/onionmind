@@ -71,9 +71,17 @@ async def chat_round_trip(data: Path) -> None:
         await app.workers.wait_for_complete()
         await pilot.pause(0.3)
         assert core.calls == [("turn", "inferno", False)], core.calls   # local unless armed
-        screen = app.export_screenshot()
+        # The reply renders a frame or more after the worker ends; slow
+        # runners (macOS CI) need longer than a fixed pause.
+        for _ in range(30):
+            screen = app.export_screenshot()
+            if "Hello" in screen:
+                break
+            await pilot.pause(0.1)
         assert "secret plan" not in screen, "private reasoning reached the screen"
-        assert "Hello" in screen
+        import html, re
+        visible = html.unescape(re.sub(r"<[^>]+>", "", screen))
+        assert "Hello" in screen, " ".join(visible.split())[:3000]
 
         # Search is armed for exactly one turn, and starts Tor only then.
         await pilot.press("ctrl+s")

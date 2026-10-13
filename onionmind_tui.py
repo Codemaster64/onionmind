@@ -226,6 +226,9 @@ class BotMessage(Vertical):
         await body.update(text)
 
     def done(self, meta: str = "") -> None:
+        # A fast turn can finish before on_mount runs; without this, on_mount
+        # would then start the spinner and hide the finished reply.
+        self._pending = False
         if getattr(self, "_ticker", None):
             self._ticker.stop()
         self.query_one(".thinking").display = False

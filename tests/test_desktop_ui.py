@@ -1783,6 +1783,12 @@ class QualityOfLifeTests(unittest.TestCase):
         self._close(window)
 
 
+# Imported before any test patches os.name to "nt": ctypes reads os.name at
+# import time and, believing it is on Windows, imports COM names that only
+# exist there.
+import ctypes  # noqa: E402,F401
+
+
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class NativeTitleBarTests(unittest.TestCase):
     def test_windows_frame_is_pinned_dark_with_the_modern_attribute(self) -> None:
