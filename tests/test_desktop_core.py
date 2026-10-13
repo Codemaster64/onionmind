@@ -867,6 +867,44 @@ class WorkbenchPreferencesTests(unittest.TestCase):
         self.assertFalse(core.animations_enabled("system", False))
 
 
+class ModelServerStartPlanTests(unittest.TestCase):
+    def which(self, *found):
+        return lambda name: f"/usr/bin/{name}" if name in found else None
+
+    def test_linux_system_service_is_the_only_way_offered(self) -> None:
+        plan = core.model_server_start_plan("linux", self.which("systemctl", "ollama"),
+                                            unit_exists=lambda scope: scope == ())
+        self.assertEqual([w.argv for w in plan], [("systemctl", "start", "ollama.service")])
+        self.assertEqual(plan[0].manual, "sudo systemctl start ollama")
+
+    def test_linux_user_service_wins_over_the_system_one(self) -> None:
+        plan = core.model_server_start_plan("linux", self.which("systemctl", "ollama"),
+                                            unit_exists=lambda scope: True)
+        self.assertEqual(plan[0].argv, ("systemctl", "--user", "start", "ollama.service"))
+
+    def test_linux_without_a_service_falls_back_to_serve(self) -> None:
+        plan = core.model_server_start_plan("linux", self.which("systemctl", "ollama"),
+                                            unit_exists=lambda scope: False)
+        self.assertEqual([w.argv for w in plan], [("/usr/bin/ollama", "serve")])
+        self.assertEqual(core.model_server_start_plan("linux", self.which(), unit_exists=lambda s: False), [])
+
+    def test_this_platform_with_nothing_installed_offers_nothing(self) -> None:
+        self.assertEqual(core.model_server_start_plan(which=lambda name: None, exists=lambda p: False,
+                                                      unit_exists=lambda scope: False), [])
+
+    def test_mac_opens_the_app_before_serve(self) -> None:
+        plan = core.model_server_start_plan("darwin", self.which("ollama"),
+                                            exists=lambda p: p == "/Applications/Ollama.app")
+        self.assertEqual(plan[0].argv, ("open", "-g", "-a", "/Applications/Ollama.app"))
+        self.assertEqual(plan[1].argv, ("/usr/bin/ollama", "serve"))
+
+    def test_windows_starts_the_tray_app_before_serve(self) -> None:
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": "C:/Users/u/AppData/Local"}):
+            plan = core.model_server_start_plan("win32", self.which("ollama"), exists=lambda p: True)
+        self.assertTrue(plan[0].argv[0].endswith("ollama app.exe"))
+        self.assertFalse(plan[0].waits)
+
+
 class ModelDiscoveryTests(unittest.TestCase):
     def test_markers_are_found_by_name_and_tags(self) -> None:
         self.assertEqual(
@@ -1017,7 +1055,6 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertTrue(ram is None or ram > 0)
         vram = core.gpu_vram_mb()
         self.assertTrue(vram is None or vram > 0)
-
 
 
 class GpuMemoryProbeTests(unittest.TestCase):
