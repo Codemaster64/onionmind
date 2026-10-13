@@ -1245,6 +1245,134 @@ class WorkbenchV2CoreTests(unittest.TestCase):
         self.assertTrue(total is None or (used is not None and 0 <= used <= total))
 
 
+class RemoteComputeTests(unittest.TestCase):
+    def test_targets_are_narrow_and_never_read_as_options(self) -> None:
+        self.assertEqual(core.parse_ssh_target(" radagast@bever "), core.SshTarget("radagast@bever"))
+        self.assertEqual(core.parse_ssh_target("gpu-box:2222"), core.SshTarget("gpu-box", 2222))
+        self.assertEqual(core.parse_ssh_target("10.0.0.5").label, "10.0.0.5")
+        for bad in ("", "-oProxyCommand=evil", "a b", "host;rm", "host:0", "host:99999",
+                    "$(x)", "user@", None, 42):
+            self.assertIsNone(core.parse_ssh_target(bad), bad)
+
+    def test_tunnel_command_forwards_loopback_to_loopback_only(self) -> None:
+        argv = core.ssh_tunnel_argv(core.SshTarget("me@gpu", 2222), 40001)
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("-N", argv)
+        self.assertIn("BatchMode=yes", argv)
+        self.assertIn("ExitOnForwardFailure=yes", argv)
+        self.assertEqual(argv[argv.index("-L") + 1], "127.0.0.1:40001:127.0.0.1:11434")
+        self.assertEqual(argv[argv.index("-p") + 1], "2222")
+        self.assertEqual(argv[-2:], ["--", "me@gpu"])
+
+    def test_failures_name_the_fix(self) -> None:
+        self.assertIn("ssh-copy-id", core.describe_ssh_failure("me@gpu: Permission denied (publickey).", "me@gpu"))
+        self.assertIn("accept", core.describe_ssh_failure("Host key verification failed.", "gpu"))
+        self.assertIn("Could not find", core.describe_ssh_failure(
+            "ssh: Could not resolve hostname nope: Name or service not known", "nope"))
+        self.assertEqual(core.describe_ssh_failure("odd\nlast line\n"), "last line")
+
+    def test_settings_drop_junk_and_never_autoconnect_without_a_host(self) -> None:
+        self.assertEqual(core.load_remote_settings({}), {"host": "", "autoconnect": False})
+        self.assertEqual(core.load_remote_settings({"remote_compute": {"host": "-x", "autoconnect": True}}),
+                         {"host": "", "autoconnect": False})
+        self.assertEqual(core.load_remote_settings({"remote_compute": {"host": "gpu:22", "autoconnect": 1}}),
+                         {"host": "gpu:22", "autoconnect": True})
+
+    def _fake_ssh(self, *, serve: bool, stderr: bytes = b""):
+        """A Popen stand-in: 'forwards' by serving /api/version on the -L port."""
+        import http.server, io, threading
+
+        class Version(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = b'{"version": "0.40.1"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        launched: list[list[str]] = []
+
+        class Proc:
+            def __init__(self, argv, **kwargs):
+                launched.append(argv)
+                self.stderr = io.BytesIO(stderr)
+                self.code = None
+                self.server = None
+                if serve:
+                    port = int(argv[argv.index("-L") + 1].split(":")[1])
+                    self.server = http.server.HTTPServer(("127.0.0.1", port), Version)
+                    threading.Thread(target=self.server.serve_forever, daemon=True).start()
+                elif stderr:
+                    self.code = 255
+
+            def poll(self):
+                return self.code
+
+            def terminate(self):
+                if self.server is not None:
+                    self.server.shutdown()
+                    self.server.server_close()
+                self.code = -15
+
+            def wait(self, timeout=None):
+                return self.code
+
+            kill = terminate
+
+        return Proc, launched
+
+    def test_tunnel_is_ready_only_when_ollama_answers_through_it(self) -> None:
+        proc, launched = self._fake_ssh(serve=True)
+        tunnel = core.SshTunnel(core.SshTarget("me@gpu"), popen=proc, which=lambda name: "/usr/bin/ssh")
+        port = tunnel.start()
+        self.assertTrue(tunnel.alive)
+        self.assertEqual((tunnel.local_port, tunnel.version), (port, "0.40.1"))
+        self.assertEqual(launched[0][0], "/usr/bin/ssh")
+        tunnel.stop()
+        self.assertFalse(tunnel.alive)
+        self.assertIsNone(tunnel.local_port)
+
+    def test_tunnel_failure_raises_the_actionable_message(self) -> None:
+        proc, _ = self._fake_ssh(serve=False, stderr=b"me@gpu: Permission denied (publickey).\n")
+        tunnel = core.SshTunnel(core.SshTarget("me@gpu"), popen=proc, which=lambda name: "ssh")
+        with self.assertRaises(RuntimeError) as caught:
+            tunnel.start()
+        self.assertIn("ssh-copy-id", str(caught.exception))
+        self.assertFalse(tunnel.alive)
+        with self.assertRaises(RuntimeError) as missing:
+            core.SshTunnel(core.SshTarget("gpu"), which=lambda name: None).start()
+        self.assertIn("OpenSSH", str(missing.exception))
+
+    def test_login_without_ollama_fails_fast_and_cancel_leaves_nothing(self) -> None:
+        proc, _ = self._fake_ssh(
+            serve=False, stderr=b"channel 2: open failed: connect failed: Connection refused\n")
+        # A live ssh whose forward has nowhere to land.
+        class LiveProc(proc):
+            def __init__(self, argv, **kwargs):
+                super().__init__(argv, **kwargs)
+                self.code = None
+        tunnel = core.SshTunnel(core.SshTarget("gpu"), popen=LiveProc, which=lambda name: "ssh",
+                                ready_timeout=20)
+        import time
+        started = time.monotonic()
+        with self.assertRaises(RuntimeError) as caught:
+            tunnel.start()
+        self.assertIn("no Ollama answered", str(caught.exception))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertFalse(tunnel.alive)
+
+        hanging, _ = self._fake_ssh(serve=False)
+        tunnel = core.SshTunnel(core.SshTarget("gpu"), popen=hanging, which=lambda name: "ssh")
+        import threading
+        threading.Timer(0.5, tunnel.cancel).start()
+        with self.assertRaises(RuntimeError):
+            tunnel.start()
+        self.assertFalse(tunnel.alive)
+
+
 def datetime_today() -> str:
     from datetime import datetime
     return datetime.now().astimezone().strftime("%Y-%m-%d")

@@ -4744,6 +4744,7 @@ class SettingsDialog(QDialog):
         tabs.setAccessibleName("Onionmind settings sections")
         self.tabs = tabs
         tabs.addTab(self._page(self._general_page(preferences)), "General")
+        tabs.addTab(self._page(self._compute_page()), "Compute")
         tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
         tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
         tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
@@ -5339,6 +5340,111 @@ class SettingsDialog(QDialog):
         outer.addStretch(1)
         return page
 
+    def _compute_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Remote compute")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        intro = QLabel(
+            "Run the models on another computer you can reach over SSH - a GPU "
+            "server, say. Your projects, edits, the agent, the terminal and Tor "
+            "stay on this machine; only prompts and replies travel, through an "
+            "encrypted SSH tunnel to that computer's Ollama."
+        )
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        window = self._window()
+        settings = window.remote_settings() if window is not None else {"host": "", "autoconnect": False}
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        self.remote_host_field = QLineEdit(settings["host"])
+        self.remote_host_field.setPlaceholderText("user@server, server:2222, or an ~/.ssh/config alias")
+        self.remote_host_field.setAccessibleName("Remote compute server for SSH")
+        self.remote_connect_button = QPushButton("Connect")
+        host_row = QHBoxLayout()
+        host_row.addWidget(self.remote_host_field, 1)
+        host_row.addWidget(self.remote_connect_button)
+        form.addRow("Server", host_row)
+        self.remote_autoconnect_box = QCheckBox("Connect automatically when Onionmind opens")
+        self.remote_autoconnect_box.setToolTip(
+            "Off by default. While off, opening Onionmind contacts nothing; while on, "
+            "it opens the SSH connection to this server at every launch."
+        )
+        self.remote_autoconnect_box.setChecked(bool(settings["autoconnect"]))
+        form.addRow("", self.remote_autoconnect_box)
+        outer.addLayout(form)
+        self.remote_feedback = QLabel()
+        self.remote_feedback.setWordWrap(True)
+        self.remote_feedback.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self.remote_feedback)
+        needs = QLabel(
+            "Needs: key-based SSH login (Onionmind cannot type a password - run "
+            "`ssh-copy-id user@server` once), and Ollama with your models running on "
+            "the server. Keep its Ollama on 127.0.0.1 - the tunnel reaches it there, "
+            "and it has no password of its own. The SSH connection goes direct, not "
+            "over Tor: it is your own server, and it is opened only when you connect."
+        )
+        needs.setObjectName("meta")
+        needs.setWordWrap(True)
+        outer.addWidget(needs)
+        outer.addStretch(1)
+        if window is not None:
+            self.remote_connect_button.clicked.connect(self._remote_connect_clicked)
+            self.remote_host_field.returnPressed.connect(self._remote_connect_clicked)
+            self.remote_host_field.editingFinished.connect(self._remote_host_edited)
+            self.remote_autoconnect_box.toggled.connect(self._remote_autoconnect_toggled)
+            window.remoteChanged.connect(self._sync_remote)
+        else:
+            self.remote_connect_button.setEnabled(False)
+        self._sync_remote()
+        return page
+
+    def _remote_host_edited(self) -> None:
+        window = self._window()
+        dc = getattr(window, "desktop_core", None)
+        text = self.remote_host_field.text().strip()
+        if window is None or dc is None:
+            return
+        target = dc.parse_ssh_target(text)
+        if text and target is None:
+            self.remote_feedback.setText("Enter a server as user@host, host:port, or an ~/.ssh/config alias.")
+            return
+        window.set_remote_setting("host", target.label if target else "")
+        if target is None and self.remote_autoconnect_box.isChecked():
+            self.remote_autoconnect_box.setChecked(False)
+
+    def _remote_autoconnect_toggled(self, checked: bool) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_remote_setting("autoconnect", checked)
+
+    def _remote_connect_clicked(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if window.remote_phase in ("on", "connecting"):
+            window.disconnect_remote()
+            return
+        self._remote_host_edited()
+        window.connect_remote(self.remote_host_field.text().strip())
+
+    def _sync_remote(self) -> None:
+        window = self._window()
+        if window is None:
+            self.remote_feedback.setText("Remote compute is unavailable in this view.")
+            return
+        phase = window.remote_phase
+        self.remote_connect_button.setText(
+            {"on": "Disconnect", "connecting": "Cancel"}.get(phase, "Connect"))
+        self.remote_connect_button.setAccessibleName(
+            {"on": "Disconnect remote compute", "connecting": "Cancel connecting"}.get(
+                phase, "Connect to the remote compute server"))
+        self.remote_host_field.setEnabled(phase not in ("on", "connecting"))
+        text = window.remote_message or "Not connected - models run on this machine."
+        prefix = {"on": "● ", "connecting": "… ", "error": "⚠ "}.get(phase, "")
+        self.remote_feedback.setText(prefix + text)
+
     def _privacy_page(self, preferences: dict[str, Any], agent_limitation: str) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -5347,7 +5453,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(heading)
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
+        window = self._window()
+        where = window.inference_location() if window is not None else "on this machine"
+        form.addRow("Inference", QLabel(f"Onionmind inference {where}"))
         tor = QLabel(
             "Chat search and the coding agent both leave over Tor; a failed Tor "
             "check never falls back to a direct request."
@@ -5828,6 +5936,7 @@ class SettingsDialog(QDialog):
 
 class OnionmindWindow(QMainWindow):
     featuresChanged = Signal(object)
+    remoteChanged = Signal()
 
     def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
         super().__init__()
@@ -5863,6 +5972,12 @@ class OnionmindWindow(QMainWindow):
         self.tor_phase = "off"
         self.tor_stop_event: Optional[threading.Event] = None
         self.tor_in_use = False
+        # Remote compute: the live `ssh -L` tunnel, and its phase for the UI
+        # ("off" | "connecting" | "on" | "error").
+        self.remote_tunnel: Any = None
+        self._remote_pending: Any = None
+        self.remote_phase = "off"
+        self.remote_message = ""
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
         self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
@@ -5933,10 +6048,16 @@ class OnionmindWindow(QMainWindow):
                 self.show_update_ready()
             if self.update_permission_enabled():
                 self._start_update_timer()
-            self._probe_services()
+            # Connecting at launch is an opt-in the user ticked in Settings;
+            # without it, opening Onionmind still contacts nothing.
+            autoconnect = self.remote_settings()["autoconnect"]
+            self._probe_services(models=not autoconnect)
+            if autoconnect:
+                self.connect_remote()
             self.tor_liveness_timer = QTimer(self)
             self.tor_liveness_timer.setInterval(2500)
             self.tor_liveness_timer.timeout.connect(self._poll_tor_liveness)
+            self.tor_liveness_timer.timeout.connect(self._poll_remote_liveness)
             self.tor_liveness_timer.start()
 
     def _build_window(self) -> None:
@@ -6461,7 +6582,12 @@ class OnionmindWindow(QMainWindow):
         else:
             self.new_task(save_current=False)
 
-    def _probe_services(self) -> None:
+    def _probe_services(self, models: bool = True) -> None:
+        if models:
+            self._probe_models()
+        self._probe_tor()
+
+    def _probe_models(self) -> None:
         def model_probe(signals: WorkerSignals) -> tuple[str, list[str]]:
             del signals
             detector = getattr(self.core, "detect_backend", None)
@@ -6476,6 +6602,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.result.connect(self._model_probe_complete)
         worker.signals.error.connect(lambda message: self._model_probe_failed(message))
 
+    def _probe_tor(self) -> None:
         checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
             self.tor_phase = "error"
@@ -6554,8 +6681,9 @@ class OnionmindWindow(QMainWindow):
         current = self.current_model_id()
         self.set_model_options(models or [current], current)
         self.model_status.set_status("Ready", "good")
-        self.model_status.setToolTip("Onionmind inference is ready on this machine")
-        self.inspector.append_activity("Onionmind inference ready")
+        where = self.inference_location()
+        self.model_status.setToolTip(f"Onionmind inference is ready {where}")
+        self.inspector.append_activity(f"Onionmind inference ready {where}")
 
     def _model_probe_failed(self, message: str) -> None:
         self._report_error(message, "server")
@@ -10393,6 +10521,107 @@ class OnionmindWindow(QMainWindow):
             return
         self.setup_overlay.open()
 
+    # --- Remote compute over SSH ---------------------------------------------
+
+    def remote_settings(self) -> dict[str, Any]:
+        loader = getattr(self.desktop_core, "load_remote_settings", None)
+        if not callable(loader):
+            return {"host": "", "autoconnect": False}
+        return loader(self.settings_data)
+
+    def set_remote_setting(self, key: str, value: Any) -> None:
+        stored = self.settings_data.get("remote_compute")
+        settings = dict(stored) if isinstance(stored, dict) else {}
+        settings[key] = value
+        self.settings_data["remote_compute"] = settings
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def inference_location(self) -> str:
+        tunnel = self.remote_tunnel
+        if self.remote_phase == "on" and tunnel is not None:
+            return f"on {tunnel.target.label} (over SSH)"
+        return "on this machine"
+
+    def _set_remote_phase(self, phase: str, message: str = "") -> None:
+        self.remote_phase, self.remote_message = phase, message
+        self.remoteChanged.emit()
+
+    def connect_remote(self, host: Optional[str] = None) -> None:
+        """Open the SSH tunnel to `host` (default: the saved one) off the UI thread."""
+        dc = self.desktop_core
+        if dc is None or not hasattr(dc, "SshTunnel") or not callable(getattr(self.core, "use_ollama_port", None)):
+            self._set_remote_phase("error", "This Onionmind build cannot use remote compute.")
+            return
+        target = dc.parse_ssh_target(host if host is not None else self.remote_settings()["host"])
+        if target is None:
+            self._set_remote_phase("error", "Enter a server as user@host, host, or an ~/.ssh/config alias.")
+            return
+        if self.remote_phase == "connecting":
+            return
+        self.disconnect_remote(reprobe=False)
+        tunnel = dc.SshTunnel(target)
+        self._remote_pending = tunnel
+        self._set_remote_phase("connecting", f"Connecting to {target.label} over SSH…")
+        self.model_status.set_status("Connecting", "busy")
+        self.inspector.append_activity(f"Remote compute: opening SSH tunnel to {target.label} (direct, not Tor)")
+
+        def open_tunnel(signals: WorkerSignals) -> Any:
+            del signals
+            tunnel.start()
+            return tunnel
+
+        worker = self._start_worker(open_tunnel)
+        worker.signals.result.connect(self._remote_connected)
+        worker.signals.error.connect(lambda message: self._remote_failed(message))
+
+    def _remote_connected(self, tunnel: Any) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            tunnel.stop()                  # disconnected (or closed) while connecting
+            return
+        self.remote_tunnel = tunnel
+        self.core.use_ollama_port(tunnel.local_port)
+        label = tunnel.target.label
+        self._set_remote_phase("on", f"Connected to {label} · Ollama {tunnel.version}")
+        self.set_status(f"Models now run on {label}")
+        self.inspector.append_activity(f"Remote compute on: models run on {label}")
+        self._probe_models()
+
+    def _remote_failed(self, message: str) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            return
+        self._set_remote_phase("error", message)
+        self.set_status(f"Remote compute: {message}")
+        self.inspector.append_activity(f"Remote compute failed: {message}")
+        self._probe_models()               # show what this machine can still do
+
+    def disconnect_remote(self, reprobe: bool = True, message: str = "") -> None:
+        tunnel, self.remote_tunnel = self.remote_tunnel, None
+        pending, self._remote_pending = self._remote_pending, None
+        was_on = tunnel is not None or self.remote_phase == "connecting"
+        if tunnel is not None:
+            tunnel.stop()
+        if pending is not None:
+            pending.cancel()
+        use_port = getattr(self.core, "use_ollama_port", None)
+        if callable(use_port):
+            use_port(None)
+        self._set_remote_phase("error" if message else "off", message)
+        if was_on and reprobe:
+            self.inspector.append_activity("Remote compute off: models run on this machine")
+            self._probe_models()
+
+    def _poll_remote_liveness(self) -> None:
+        tunnel = self.remote_tunnel
+        if self.remote_phase != "on" or tunnel is None or tunnel.alive:
+            return
+        detail = tunnel.last_error()
+        message = f"Lost the SSH tunnel to {tunnel.target.label}: {detail}"
+        self.set_status(message + " Models run on this machine again.")
+        self.disconnect_remote(message=message)
+
     # --- v2: auto-delete and app lock ----------------------------------------
 
     def _lock_settings(self) -> dict[str, Any]:
@@ -10748,6 +10977,9 @@ class OnionmindWindow(QMainWindow):
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        for tunnel in (self.remote_tunnel, self._remote_pending):
+            if tunnel is not None:
+                tunnel.cancel()
         if self.preferences.get("clear_on_exit", False):
             # Last, so it takes what this very close just wrote with it.
             self.wipe_machine_data()

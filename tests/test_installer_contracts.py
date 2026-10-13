@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+import re
 import unittest
 
 
@@ -12,6 +13,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerContractTests(unittest.TestCase):
+    def test_linux_installer_roles_plan_first_and_keep_ollama_on_loopback(self) -> None:
+        """--check changes nothing; --server stops before the app; Ollama stays private.
+
+        The plan is printed from read-only probes, so `--check` must exit
+        before the first sudo. A compute server gets Ollama, a model and SSH -
+        never the app payloads. And no role may bind Ollama beyond loopback:
+        clients reach it through SSH, and Ollama itself has no password.
+        """
+        sh = self.text("install-onionmind.sh")
+        for flag in ("--client)", "--server)", "--check|--dry-run)", "--host=*)"):
+            self.assertIn(flag, sh)
+        check_exit = sh.index("Check only - nothing was changed")
+        first_sudo = re.search(r"^\s*sudo ", sh, re.MULTILINE).start()
+        self.assertLess(check_exit, first_sudo)
+        self.assertLess(sh.index('say "Server ready"'), sh.index("<<'PYEOF'"))
+        self.assertNotIn("OLLAMA_HOST=0.0.0.0", sh)
+        self.assertNotIn("OLLAMA_HOST=", sh.split("<<'PYEOF'")[0])
+        # Every step that installs or starts something checks first.
+        self.assertGreaterEqual(sh.count("skip \""), 12)
+
     def test_linux_installer_uses_distro_correct_package_names(self) -> None:
         """tkinter is packaged under a different name in every distro.
 
@@ -30,12 +51,13 @@ class InstallerContractTests(unittest.TestCase):
         self.assertNotIn("python-tk", pkgs)
 
         # Debian is the one that really does prefix it.
-        debian = sh[sh.index("apt-get install -y tor"):]
-        self.assertIn("python3-tk", debian[: debian.index("\n")])
+        debian = sh[sh.index("DEB_APP_PKGS=("):]
+        self.assertIn("python3-tk", debian[: debian.index(")")].split())
 
         # Homebrew has the same trap as Arch: there is no plain python-tk
         # formula, only versioned ones, so a bare name would fail the same way.
-        mac = sh[sh.index('"$DISTRO" = mac'):]
+        packages = sh[sh.index('say "Step: system packages"'):]
+        mac = packages[packages.index('"$DISTRO" = mac'):]
         mac = mac[: mac.index('elif [ "$DISTRO" = arch')]
         self.assertIn("python-tk@", mac)
         for bare in ('python-tk ', 'python-tk"', 'python-tk\n'):
@@ -147,6 +169,11 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("must be auto, lfm, 4b or 9b", self.text("install-onionmind-android.sh"))
         self.assertIn('MODELS="fast 27b"', text)
         self.assertIn('MODELS="lfm 4b 9b"', text)
+        # The remote-models option hands over to the flags install-onionmind.sh parses.
+        self.assertIn('bash "$f" --client "--host=$HOST"', text)
+        sh = self.text("install-onionmind.sh")
+        self.assertIn("--client) ROLE=client", sh)
+        self.assertIn("--host=*) SERVER_HOST=", sh)
 
     def text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")

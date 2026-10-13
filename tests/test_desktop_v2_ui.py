@@ -110,7 +110,7 @@ class FeatureStoreTests(V2Base):
             self.assertFalse(window.features_button.isHidden())
             dialog = self._settings(window)
             self.assertEqual(self._tab_labels(dialog),
-                             ["General", "Privacy", "Updates", "Storage", "Features"])
+                             ["General", "Compute", "Privacy", "Updates", "Storage", "Features"])
         finally:
             self._close(window)
 

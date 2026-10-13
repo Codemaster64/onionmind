@@ -281,11 +281,48 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
     except Exception: pass
 
+OLLAMA_PORT = 11434
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
 OLLAMA_GENERATE = "http://127.0.0.1:11434/api/generate"
+_USER_OLLAMA_HOST = os.environ.get("OLLAMA_HOST")   # restored when the tunnel goes
+
+
+def use_ollama_port(port=None):
+    """Point every Ollama call at 127.0.0.1:<port>; None means the default 11434.
+
+    Remote compute is an SSH tunnel landing on a local loopback port, so only
+    the port moves - the address stays 127.0.0.1 and nothing here ever talks
+    to another host. The variables are exported so the children follow too:
+    `onionmind.py --agent` reads ONIONMIND_OLLAMA_PORT, and the `ollama` CLI
+    the agent calls reads OLLAMA_HOST.
+    """
+    global OLLAMA_PORT, OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE
+    port = int(port) if port else 11434
+    if not 0 < port < 65536:
+        raise ValueError(f"not a port: {port}")
+    base = f"http://127.0.0.1:{port}/api/"
+    OLLAMA_PORT = port
+    OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE = (
+        base + "chat", base + "tags", base + "pull", base + "ps", base + "generate")
+    if port == 11434:
+        os.environ.pop("ONIONMIND_OLLAMA_PORT", None)
+        if _USER_OLLAMA_HOST is None:
+            os.environ.pop("OLLAMA_HOST", None)
+        else:
+            os.environ["OLLAMA_HOST"] = _USER_OLLAMA_HOST
+    else:
+        os.environ["ONIONMIND_OLLAMA_PORT"] = str(port)
+        os.environ["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+
+
+try:
+    if os.environ.get("ONIONMIND_OLLAMA_PORT"):
+        use_ollama_port(os.environ["ONIONMIND_OLLAMA_PORT"])
+except ValueError:
+    pass                                     # junk in the variable: keep the default
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
 MODEL  = "inferno"
@@ -770,7 +807,7 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -817,7 +854,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -886,7 +923,7 @@ def detect_backend():
     """Prefer ollama; fall back to llama.cpp's llama-server. Ollama has no
     Android build, so phones run llama-server with the same GGUFs."""
     global BACKEND
-    for url, name in (("http://127.0.0.1:11434/api/version", "ollama"),
+    for url, name in ((f"http://127.0.0.1:{OLLAMA_PORT}/api/version", "ollama"),
                       ("http://127.0.0.1:8080/health", "llama-server")):
         try:
             if requests.get(url, proxies=NOPROXY, timeout=3).ok:
@@ -895,7 +932,7 @@ def detect_backend():
                 return
         except Exception:
             pass
-    sys.exit("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+    sys.exit(f"No model server on {OLLAMA_PORT} (ollama) or 8080 (llama-server). Start one.")
 
 
 def resolve_model():
@@ -2593,6 +2630,13 @@ __all__ = [
     "model_fit",
     "node_version",
     "node_supports_agent",
+    "REMOTE_OLLAMA_PORT",
+    "SshTarget",
+    "parse_ssh_target",
+    "ssh_tunnel_argv",
+    "describe_ssh_failure",
+    "load_remote_settings",
+    "SshTunnel",
 ]
 
 
@@ -5673,6 +5717,233 @@ def node_supports_agent(version: Optional[str]) -> bool:
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     return major >= 24 or (major == 22 and minor >= 19) or major == 23
+
+
+# --- Remote compute over SSH -------------------------------------------
+#
+# The model runs on another machine the user can SSH into; everything else -
+# files, agent, terminal, Tor - stays here. An `ssh -L` tunnel lands that
+# machine's Ollama on a free loopback port, so the core still only ever talks
+# to 127.0.0.1 and the agent's loopback-only socket shims need no exception.
+# The SSH connection itself is direct, not Tor: it is the user's own server,
+# opened only when they press Connect (or opted into connecting at launch).
+
+REMOTE_OLLAMA_PORT = 11434
+
+_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+(?::(\d{1,5}))?")
+
+
+@dataclass(frozen=True)
+class SshTarget:
+    destination: str              # user@host or a ~/.ssh/config alias
+    port: Optional[int] = None
+
+    @property
+    def label(self) -> str:
+        return self.destination if self.port is None else f"{self.destination}:{self.port}"
+
+
+def parse_ssh_target(value: Any) -> Optional[SshTarget]:
+    """`user@host`, `host`, an ssh-config alias, optionally `:port`; else None.
+
+    Deliberately narrow: no spaces, no leading dash (it would be read as an
+    ssh option), nothing a shell or ssh would interpret.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith("-"):
+        return None
+    match = _SSH_TARGET.fullmatch(text)
+    if match is None:
+        return None
+    if match.group(1) is None:
+        return SshTarget(text)
+    port = int(match.group(1))
+    if not 0 < port < 65536:
+        return None
+    return SshTarget(text.rsplit(":", 1)[0], port)
+
+
+def ssh_tunnel_argv(target: SshTarget, local_port: int,
+                    remote_port: int = REMOTE_OLLAMA_PORT,
+                    executable: str = "ssh") -> list[str]:
+    """The exact `ssh` command: a forward only, no shell, no prompts."""
+    argv = [
+        executable, "-N", "-T",
+        # A GUI has nowhere to type a password or accept a host key, so ssh
+        # must fail fast instead of waiting on a prompt nobody sees.
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-L", f"127.0.0.1:{int(local_port)}:127.0.0.1:{int(remote_port)}",
+    ]
+    if target.port is not None:
+        argv += ["-p", str(target.port)]
+    return argv + ["--", target.destination]
+
+
+def describe_ssh_failure(stderr: str, target_label: str = "the server") -> str:
+    """ssh's last words, turned into the step that fixes them."""
+    text = _as_text_core(stderr)
+    lowered = text.lower()
+    if "permission denied" in lowered:
+        return (f"{target_label} refused the login. Onionmind cannot type a password: "
+                f"set up key login once with `ssh-copy-id {target_label}` "
+                "(or load your key into ssh-agent), then connect again.")
+    if "host key verification failed" in lowered or "no matching host key" in lowered:
+        return (f"{target_label}'s host key is not trusted yet. Run `ssh {target_label}` "
+                "once in a terminal to check and accept it, then connect again.")
+    if "could not resolve hostname" in lowered:
+        return f"Could not find {target_label}. Check the name, or your VPN/Tailscale."
+    if "connection refused" in lowered and "channel" not in lowered:
+        return f"{target_label} refused the SSH connection. Is sshd running there?"
+    if "timed out" in lowered:
+        return f"{target_label} did not answer in time."
+    if "forwarding" in lowered and ("failed" in lowered or "denied" in lowered):
+        return f"{target_label} does not allow port forwarding (AllowTcpForwarding)."
+    last = [line.strip() for line in text.splitlines() if line.strip()]
+    return last[-1] if last else f"ssh to {target_label} exited without saying why."
+
+
+def load_remote_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The `remote_compute` block of settings.json, validated; junk is dropped."""
+    stored = settings.get("remote_compute") if isinstance(settings, Mapping) else None
+    stored = stored if isinstance(stored, Mapping) else {}
+    target = parse_ssh_target(stored.get("host"))
+    return {
+        "host": target.label if target else "",
+        "autoconnect": bool(stored.get("autoconnect")) and target is not None,
+    }
+
+
+def _free_loopback_port() -> int:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _ollama_version(port: int, timeout: float = 5.0) -> Optional[str]:
+    """The Ollama version answering on 127.0.0.1:<port>, or None."""
+    import urllib.request
+    # No proxy handler: this is loopback, and an HTTP(S)_PROXY in the
+    # environment must not carry it anywhere else.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{int(port)}/api/version", timeout=timeout) as reply:
+            data = json.loads(reply.read().decode("utf-8", errors="replace") or "{}")
+    except Exception:
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version else None
+
+
+class SshTunnel:
+    """One `ssh -L` child forwarding a remote Ollama to a local loopback port.
+
+    `start()` blocks until Ollama answers through the tunnel (or raises with
+    an actionable message), so callers run it off the UI thread.
+    """
+
+    def __init__(self, target: SshTarget, *, remote_port: int = REMOTE_OLLAMA_PORT,
+                 executable: str = "ssh", ready_timeout: float = 25.0,
+                 popen: Callable[..., Any] = subprocess.Popen,
+                 which: Callable[[str], Optional[str]] = shutil.which) -> None:
+        self.target = target
+        self.remote_port = remote_port
+        self.executable = executable
+        self.ready_timeout = ready_timeout
+        self._popen = popen
+        self._which = which
+        self.process: Any = None
+        self.local_port: Optional[int] = None
+        self.version: Optional[str] = None
+        self.cancelled = False
+        self._stderr_tail: list[str] = []
+
+    @property
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def _drain(self, stream: Any) -> None:
+        # ssh keeps a pipe it may write to for hours; reading it forever means
+        # a chatty server can never fill the pipe and stall the tunnel.
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line:
+                self._stderr_tail = (self._stderr_tail + [line])[-20:]
+
+    def last_error(self) -> str:
+        return describe_ssh_failure("\n".join(self._stderr_tail), self.target.label)
+
+    def start(self) -> int:
+        import threading
+        import time
+
+        executable = self._which(self.executable)
+        if executable is None:
+            raise RuntimeError(
+                "No `ssh` command found. Install the OpenSSH client "
+                "(Windows: Settings > Optional features > OpenSSH Client)."
+            )
+        self.stop()
+        port = _free_loopback_port()
+        process = self._popen(
+            ssh_tunnel_argv(self.target, port, self.remote_port, executable),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_NO_WINDOW,
+        )
+        self.process = process
+        self._stderr_tail = []
+        if getattr(process, "stderr", None) is not None:
+            threading.Thread(target=self._drain, args=(process.stderr,), daemon=True).start()
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            if self.cancelled:
+                self.process = process
+                self.stop()
+                raise RuntimeError("Cancelled.")
+            if process.poll() is not None:
+                time.sleep(0.1)          # let the drain thread catch ssh's last line
+                self.process = None
+                raise RuntimeError(self.last_error())
+            version = _ollama_version(port, timeout=2.0)
+            if version:
+                self.local_port, self.version = port, version
+                return port
+            # ssh logs "channel N: open failed: connect failed" when the login
+            # worked but nothing listens on the far side - no need to wait out
+            # the whole timeout to say so.
+            if any("open failed" in line for line in self._stderr_tail):
+                break
+            time.sleep(0.4)
+        connected = self.alive
+        self.stop()
+        if connected:
+            raise RuntimeError(
+                f"Connected to {self.target.label}, but no Ollama answered on its "
+                f"127.0.0.1:{self.remote_port}. Start it there (`systemctl status ollama`)."
+            )
+        raise RuntimeError(self.last_error())
+
+    def cancel(self) -> None:
+        """Stop from another thread, including mid-`start()` - nothing is left running."""
+        self.cancelled = True
+        self.stop()
+
+    def stop(self) -> None:
+        process, self.process = self.process, None
+        self.local_port = self.version = None
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
 '@
 $desktopUi = @'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
@@ -10421,6 +10692,7 @@ class SettingsDialog(QDialog):
         tabs.setAccessibleName("Onionmind settings sections")
         self.tabs = tabs
         tabs.addTab(self._page(self._general_page(preferences)), "General")
+        tabs.addTab(self._page(self._compute_page()), "Compute")
         tabs.addTab(self._page(self._privacy_page(preferences, agent_limitation)), "Privacy")
         tabs.addTab(self._page(self._updates_page(update_bridge)), "Updates")
         tabs.addTab(self._page(self._storage_page(data_root)), "Storage")
@@ -11016,6 +11288,111 @@ class SettingsDialog(QDialog):
         outer.addStretch(1)
         return page
 
+    def _compute_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        heading = QLabel("Remote compute")
+        heading.setObjectName("brand")
+        outer.addWidget(heading)
+        intro = QLabel(
+            "Run the models on another computer you can reach over SSH - a GPU "
+            "server, say. Your projects, edits, the agent, the terminal and Tor "
+            "stay on this machine; only prompts and replies travel, through an "
+            "encrypted SSH tunnel to that computer's Ollama."
+        )
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        window = self._window()
+        settings = window.remote_settings() if window is not None else {"host": "", "autoconnect": False}
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        self.remote_host_field = QLineEdit(settings["host"])
+        self.remote_host_field.setPlaceholderText("user@server, server:2222, or an ~/.ssh/config alias")
+        self.remote_host_field.setAccessibleName("Remote compute server for SSH")
+        self.remote_connect_button = QPushButton("Connect")
+        host_row = QHBoxLayout()
+        host_row.addWidget(self.remote_host_field, 1)
+        host_row.addWidget(self.remote_connect_button)
+        form.addRow("Server", host_row)
+        self.remote_autoconnect_box = QCheckBox("Connect automatically when Onionmind opens")
+        self.remote_autoconnect_box.setToolTip(
+            "Off by default. While off, opening Onionmind contacts nothing; while on, "
+            "it opens the SSH connection to this server at every launch."
+        )
+        self.remote_autoconnect_box.setChecked(bool(settings["autoconnect"]))
+        form.addRow("", self.remote_autoconnect_box)
+        outer.addLayout(form)
+        self.remote_feedback = QLabel()
+        self.remote_feedback.setWordWrap(True)
+        self.remote_feedback.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self.remote_feedback)
+        needs = QLabel(
+            "Needs: key-based SSH login (Onionmind cannot type a password - run "
+            "`ssh-copy-id user@server` once), and Ollama with your models running on "
+            "the server. Keep its Ollama on 127.0.0.1 - the tunnel reaches it there, "
+            "and it has no password of its own. The SSH connection goes direct, not "
+            "over Tor: it is your own server, and it is opened only when you connect."
+        )
+        needs.setObjectName("meta")
+        needs.setWordWrap(True)
+        outer.addWidget(needs)
+        outer.addStretch(1)
+        if window is not None:
+            self.remote_connect_button.clicked.connect(self._remote_connect_clicked)
+            self.remote_host_field.returnPressed.connect(self._remote_connect_clicked)
+            self.remote_host_field.editingFinished.connect(self._remote_host_edited)
+            self.remote_autoconnect_box.toggled.connect(self._remote_autoconnect_toggled)
+            window.remoteChanged.connect(self._sync_remote)
+        else:
+            self.remote_connect_button.setEnabled(False)
+        self._sync_remote()
+        return page
+
+    def _remote_host_edited(self) -> None:
+        window = self._window()
+        dc = getattr(window, "desktop_core", None)
+        text = self.remote_host_field.text().strip()
+        if window is None or dc is None:
+            return
+        target = dc.parse_ssh_target(text)
+        if text and target is None:
+            self.remote_feedback.setText("Enter a server as user@host, host:port, or an ~/.ssh/config alias.")
+            return
+        window.set_remote_setting("host", target.label if target else "")
+        if target is None and self.remote_autoconnect_box.isChecked():
+            self.remote_autoconnect_box.setChecked(False)
+
+    def _remote_autoconnect_toggled(self, checked: bool) -> None:
+        window = self._window()
+        if window is not None:
+            window.set_remote_setting("autoconnect", checked)
+
+    def _remote_connect_clicked(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        if window.remote_phase in ("on", "connecting"):
+            window.disconnect_remote()
+            return
+        self._remote_host_edited()
+        window.connect_remote(self.remote_host_field.text().strip())
+
+    def _sync_remote(self) -> None:
+        window = self._window()
+        if window is None:
+            self.remote_feedback.setText("Remote compute is unavailable in this view.")
+            return
+        phase = window.remote_phase
+        self.remote_connect_button.setText(
+            {"on": "Disconnect", "connecting": "Cancel"}.get(phase, "Connect"))
+        self.remote_connect_button.setAccessibleName(
+            {"on": "Disconnect remote compute", "connecting": "Cancel connecting"}.get(
+                phase, "Connect to the remote compute server"))
+        self.remote_host_field.setEnabled(phase not in ("on", "connecting"))
+        text = window.remote_message or "Not connected - models run on this machine."
+        prefix = {"on": "● ", "connecting": "… ", "error": "⚠ "}.get(phase, "")
+        self.remote_feedback.setText(prefix + text)
+
     def _privacy_page(self, preferences: dict[str, Any], agent_limitation: str) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -11024,7 +11401,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(heading)
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.addRow("Inference", QLabel("Onionmind inference on this machine"))
+        window = self._window()
+        where = window.inference_location() if window is not None else "on this machine"
+        form.addRow("Inference", QLabel(f"Onionmind inference {where}"))
         tor = QLabel(
             "Chat search and the coding agent both leave over Tor; a failed Tor "
             "check never falls back to a direct request."
@@ -11505,6 +11884,7 @@ class SettingsDialog(QDialog):
 
 class OnionmindWindow(QMainWindow):
     featuresChanged = Signal(object)
+    remoteChanged = Signal()
 
     def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
         super().__init__()
@@ -11540,6 +11920,12 @@ class OnionmindWindow(QMainWindow):
         self.tor_phase = "off"
         self.tor_stop_event: Optional[threading.Event] = None
         self.tor_in_use = False
+        # Remote compute: the live `ssh -L` tunnel, and its phase for the UI
+        # ("off" | "connecting" | "on" | "error").
+        self.remote_tunnel: Any = None
+        self._remote_pending: Any = None
+        self.remote_phase = "off"
+        self.remote_message = ""
         self._project_delete_pending: Optional[str] = None
         self._pending_redirect = False
         self._catalog_specs: tuple[Optional[int], Optional[int]] = (None, None)
@@ -11610,10 +11996,16 @@ class OnionmindWindow(QMainWindow):
                 self.show_update_ready()
             if self.update_permission_enabled():
                 self._start_update_timer()
-            self._probe_services()
+            # Connecting at launch is an opt-in the user ticked in Settings;
+            # without it, opening Onionmind still contacts nothing.
+            autoconnect = self.remote_settings()["autoconnect"]
+            self._probe_services(models=not autoconnect)
+            if autoconnect:
+                self.connect_remote()
             self.tor_liveness_timer = QTimer(self)
             self.tor_liveness_timer.setInterval(2500)
             self.tor_liveness_timer.timeout.connect(self._poll_tor_liveness)
+            self.tor_liveness_timer.timeout.connect(self._poll_remote_liveness)
             self.tor_liveness_timer.start()
 
     def _build_window(self) -> None:
@@ -12138,7 +12530,12 @@ class OnionmindWindow(QMainWindow):
         else:
             self.new_task(save_current=False)
 
-    def _probe_services(self) -> None:
+    def _probe_services(self, models: bool = True) -> None:
+        if models:
+            self._probe_models()
+        self._probe_tor()
+
+    def _probe_models(self) -> None:
         def model_probe(signals: WorkerSignals) -> tuple[str, list[str]]:
             del signals
             detector = getattr(self.core, "detect_backend", None)
@@ -12153,6 +12550,7 @@ class OnionmindWindow(QMainWindow):
         worker.signals.result.connect(self._model_probe_complete)
         worker.signals.error.connect(lambda message: self._model_probe_failed(message))
 
+    def _probe_tor(self) -> None:
         checker = getattr(self.core, "tor_proxy_port", None)
         if not callable(checker):
             self.tor_phase = "error"
@@ -12231,8 +12629,9 @@ class OnionmindWindow(QMainWindow):
         current = self.current_model_id()
         self.set_model_options(models or [current], current)
         self.model_status.set_status("Ready", "good")
-        self.model_status.setToolTip("Onionmind inference is ready on this machine")
-        self.inspector.append_activity("Onionmind inference ready")
+        where = self.inference_location()
+        self.model_status.setToolTip(f"Onionmind inference is ready {where}")
+        self.inspector.append_activity(f"Onionmind inference ready {where}")
 
     def _model_probe_failed(self, message: str) -> None:
         self._report_error(message, "server")
@@ -16070,6 +16469,107 @@ class OnionmindWindow(QMainWindow):
             return
         self.setup_overlay.open()
 
+    # --- Remote compute over SSH ---------------------------------------------
+
+    def remote_settings(self) -> dict[str, Any]:
+        loader = getattr(self.desktop_core, "load_remote_settings", None)
+        if not callable(loader):
+            return {"host": "", "autoconnect": False}
+        return loader(self.settings_data)
+
+    def set_remote_setting(self, key: str, value: Any) -> None:
+        stored = self.settings_data.get("remote_compute")
+        settings = dict(stored) if isinstance(stored, dict) else {}
+        settings[key] = value
+        self.settings_data["remote_compute"] = settings
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+
+    def inference_location(self) -> str:
+        tunnel = self.remote_tunnel
+        if self.remote_phase == "on" and tunnel is not None:
+            return f"on {tunnel.target.label} (over SSH)"
+        return "on this machine"
+
+    def _set_remote_phase(self, phase: str, message: str = "") -> None:
+        self.remote_phase, self.remote_message = phase, message
+        self.remoteChanged.emit()
+
+    def connect_remote(self, host: Optional[str] = None) -> None:
+        """Open the SSH tunnel to `host` (default: the saved one) off the UI thread."""
+        dc = self.desktop_core
+        if dc is None or not hasattr(dc, "SshTunnel") or not callable(getattr(self.core, "use_ollama_port", None)):
+            self._set_remote_phase("error", "This Onionmind build cannot use remote compute.")
+            return
+        target = dc.parse_ssh_target(host if host is not None else self.remote_settings()["host"])
+        if target is None:
+            self._set_remote_phase("error", "Enter a server as user@host, host, or an ~/.ssh/config alias.")
+            return
+        if self.remote_phase == "connecting":
+            return
+        self.disconnect_remote(reprobe=False)
+        tunnel = dc.SshTunnel(target)
+        self._remote_pending = tunnel
+        self._set_remote_phase("connecting", f"Connecting to {target.label} over SSH…")
+        self.model_status.set_status("Connecting", "busy")
+        self.inspector.append_activity(f"Remote compute: opening SSH tunnel to {target.label} (direct, not Tor)")
+
+        def open_tunnel(signals: WorkerSignals) -> Any:
+            del signals
+            tunnel.start()
+            return tunnel
+
+        worker = self._start_worker(open_tunnel)
+        worker.signals.result.connect(self._remote_connected)
+        worker.signals.error.connect(lambda message: self._remote_failed(message))
+
+    def _remote_connected(self, tunnel: Any) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            tunnel.stop()                  # disconnected (or closed) while connecting
+            return
+        self.remote_tunnel = tunnel
+        self.core.use_ollama_port(tunnel.local_port)
+        label = tunnel.target.label
+        self._set_remote_phase("on", f"Connected to {label} · Ollama {tunnel.version}")
+        self.set_status(f"Models now run on {label}")
+        self.inspector.append_activity(f"Remote compute on: models run on {label}")
+        self._probe_models()
+
+    def _remote_failed(self, message: str) -> None:
+        self._remote_pending = None
+        if self.remote_phase != "connecting":
+            return
+        self._set_remote_phase("error", message)
+        self.set_status(f"Remote compute: {message}")
+        self.inspector.append_activity(f"Remote compute failed: {message}")
+        self._probe_models()               # show what this machine can still do
+
+    def disconnect_remote(self, reprobe: bool = True, message: str = "") -> None:
+        tunnel, self.remote_tunnel = self.remote_tunnel, None
+        pending, self._remote_pending = self._remote_pending, None
+        was_on = tunnel is not None or self.remote_phase == "connecting"
+        if tunnel is not None:
+            tunnel.stop()
+        if pending is not None:
+            pending.cancel()
+        use_port = getattr(self.core, "use_ollama_port", None)
+        if callable(use_port):
+            use_port(None)
+        self._set_remote_phase("error" if message else "off", message)
+        if was_on and reprobe:
+            self.inspector.append_activity("Remote compute off: models run on this machine")
+            self._probe_models()
+
+    def _poll_remote_liveness(self) -> None:
+        tunnel = self.remote_tunnel
+        if self.remote_phase != "on" or tunnel is None or tunnel.alive:
+            return
+        detail = tunnel.last_error()
+        message = f"Lost the SSH tunnel to {tunnel.target.label}: {detail}"
+        self.set_status(message + " Models run on this machine again.")
+        self.disconnect_remote(message=message)
+
     # --- v2: auto-delete and app lock ----------------------------------------
 
     def _lock_settings(self) -> dict[str, Any]:
@@ -16425,6 +16925,9 @@ class OnionmindWindow(QMainWindow):
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
             self.harness_process.kill()
         self.terminal.stop()
+        for tunnel in (self.remote_tunnel, self._remote_pending):
+            if tunnel is not None:
+                tunnel.cancel()
         if self.preferences.get("clear_on_exit", False):
             # Last, so it takes what this very close just wrote with it.
             self.wipe_machine_data()

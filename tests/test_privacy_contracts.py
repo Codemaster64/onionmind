@@ -299,7 +299,9 @@ class DistributionPrivacyTests(unittest.TestCase):
 
     def test_desktop_startup_verifies_a_detected_listener_through_core(self) -> None:
         desktop = self.text("onionmind_desktop.py")
-        start = desktop.index("    def _probe_services(self) -> None:")
+        # _probe_services() only fans out; the Tor half lives in _probe_tor().
+        self.assertIn("self._probe_tor()", desktop)
+        start = desktop.index("    def _probe_tor(self) -> None:")
         end = desktop.index("    def _start_worker", start)
         probe = desktop[start:end]
         self.assertIn('getattr(self.core, "tor_proxy_port", None)', probe)

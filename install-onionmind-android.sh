@@ -64,11 +64,48 @@ for _s in (sys.stdout, sys.stderr):              # Windows console defaults to c
     try: _s.reconfigure(encoding="utf-8")        # which mangles en-dashes and km2
     except Exception: pass
 
+OLLAMA_PORT = 11434
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 OLLAMA_PULL = "http://127.0.0.1:11434/api/pull"
 OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
 OLLAMA_GENERATE = "http://127.0.0.1:11434/api/generate"
+_USER_OLLAMA_HOST = os.environ.get("OLLAMA_HOST")   # restored when the tunnel goes
+
+
+def use_ollama_port(port=None):
+    """Point every Ollama call at 127.0.0.1:<port>; None means the default 11434.
+
+    Remote compute is an SSH tunnel landing on a local loopback port, so only
+    the port moves - the address stays 127.0.0.1 and nothing here ever talks
+    to another host. The variables are exported so the children follow too:
+    `onionmind.py --agent` reads ONIONMIND_OLLAMA_PORT, and the `ollama` CLI
+    the agent calls reads OLLAMA_HOST.
+    """
+    global OLLAMA_PORT, OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE
+    port = int(port) if port else 11434
+    if not 0 < port < 65536:
+        raise ValueError(f"not a port: {port}")
+    base = f"http://127.0.0.1:{port}/api/"
+    OLLAMA_PORT = port
+    OLLAMA, OLLAMA_TAGS, OLLAMA_PULL, OLLAMA_PS, OLLAMA_GENERATE = (
+        base + "chat", base + "tags", base + "pull", base + "ps", base + "generate")
+    if port == 11434:
+        os.environ.pop("ONIONMIND_OLLAMA_PORT", None)
+        if _USER_OLLAMA_HOST is None:
+            os.environ.pop("OLLAMA_HOST", None)
+        else:
+            os.environ["OLLAMA_HOST"] = _USER_OLLAMA_HOST
+    else:
+        os.environ["ONIONMIND_OLLAMA_PORT"] = str(port)
+        os.environ["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+
+
+try:
+    if os.environ.get("ONIONMIND_OLLAMA_PORT"):
+        use_ollama_port(os.environ["ONIONMIND_OLLAMA_PORT"])
+except ValueError:
+    pass                                     # junk in the variable: keep the default
 LLAMA  = "http://127.0.0.1:8080/v1/chat/completions"   # llama.cpp llama-server
 BACKEND = None
 MODEL  = "inferno"
@@ -553,7 +590,7 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit(f"Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -600,7 +637,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
         r = requests.post(OLLAMA, proxies=NOPROXY, timeout=1800, stream=True,
                           json=body)
     except requests.exceptions.ConnectionError:
-        sys.exit("Ollama is not running on 127.0.0.1:11434. Start it, then retry.")
+        sys.exit(f"Ollama is not running on 127.0.0.1:{OLLAMA_PORT}. Start it, then retry.")
     if r.status_code == 404:
         sys.exit(f"Model {MODEL!r} is not installed. See what is: ollama list")
     if not r.ok:
@@ -669,7 +706,7 @@ def detect_backend():
     """Prefer ollama; fall back to llama.cpp's llama-server. Ollama has no
     Android build, so phones run llama-server with the same GGUFs."""
     global BACKEND
-    for url, name in (("http://127.0.0.1:11434/api/version", "ollama"),
+    for url, name in ((f"http://127.0.0.1:{OLLAMA_PORT}/api/version", "ollama"),
                       ("http://127.0.0.1:8080/health", "llama-server")):
         try:
             if requests.get(url, proxies=NOPROXY, timeout=3).ok:
@@ -678,7 +715,7 @@ def detect_backend():
                 return
         except Exception:
             pass
-    sys.exit("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+    sys.exit(f"No model server on {OLLAMA_PORT} (ollama) or 8080 (llama-server). Start one.")
 
 
 def resolve_model():

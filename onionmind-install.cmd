@@ -42,6 +42,7 @@ for a in "$@"; do
       echo "usage: sh onionmind-install.cmd [--dry-run] [--yes]"
       echo "  --dry-run  show this device, the recommendation and the plan; change nothing"
       echo "  --yes      install the recommended choices without asking"
+      echo "  ONIONMIND_HOST=user@server  the server for the remote-models option"
       exit 0 ;;
     *) die "unknown option: $a (try --help)" ;;
   esac
@@ -183,6 +184,18 @@ else
     add desktop yes "Onionmind desktop app + local model" "native workbench, Tor search, the onionmind command and a desktop icon"
   fi
 
+  # Remote compute: the app here, the models on a Linux box you can SSH into.
+  # Never preselected - only the user knows whether they have such a server.
+  if [ -n "$why" ]; then
+    add client na "Onionmind desktop app, models on your own server (SSH)" "$why"
+  elif have ssh; then
+    r="a GPU box you can SSH into runs the models; files, agent and Tor stay here. No model download here"
+    [ "$VRAM" -lt 6000 ] && r="$r - worth it on this machine's $(gb "$VRAM") GB of GPU memory"
+    add client no "Onionmind desktop app, models on your own server (SSH)" "$r"
+  else
+    add client na "Onionmind desktop app, models on your own server (SSH)" "needs the ssh command (OpenSSH client)"
+  fi
+
   # Matchstick: the launcher needs lsblk and bash 4 (mapfile) - Linux only.
   if [ $OS = linux ]; then
     r=no; [ -n "$why" ] && [ $INSTALLED = 0 ] && r=yes   # can't install here? boot it instead
@@ -258,6 +271,18 @@ while :; do
   [ $YES = 1 ] && exit 1
 done
 [ -n "$SEL" ] || { say "nothing selected"; exit 0; }
+case " $SEL " in *" desktop "*) case " $SEL " in *" client "*)
+  die "pick either the local-model desktop app or the server one, not both" ;; esac ;; esac
+
+HOST="${ONIONMIND_HOST:-}"
+case " $SEL " in *" client "*)
+  while [ -z "$HOST" ] && [ $YES = 0 ]; do
+    ask "Server? [user@address or an ~/.ssh/config name, Enter = set it later in the app]"
+    [ -n "$REPLY" ] || break
+    case "$REPLY" in *[!A-Za-z0-9@._:%+-]*) warn "'$REPLY' does not look like user@address"; continue ;; esac
+    HOST=$REPLY
+  done
+;; esac
 
 MODEL=$REC_MODEL
 case " $SEL " in *" desktop "*|*" termux "*)
@@ -281,7 +306,7 @@ case " $SEL " in *" desktop "*|*" termux "*)
 
 # --- 6. Plan, then confirm --------------------------------------------------
 script_for() {
-  case "$1" in desktop) echo install-onionmind.sh ;; termux) echo install-onionmind-android.sh ;;
+  case "$1" in desktop|client) echo install-onionmind.sh ;; termux) echo install-onionmind-android.sh ;;
                usb) echo matchstick.sh ;; *) echo "" ;; esac
 }
 echo; echo "   Plan"
@@ -290,6 +315,8 @@ for id in $SEL; do
   src="$BASE/$s"; [ -n "$s" ] && [ -f "$HERE/$s" ] && src="$HERE/$s (local copy)"
   case $id in
     desktop) echo "     - desktop app + $MD, via $src" ;;
+    client)  echo "     - desktop app, no local model, server ${HOST:-(set later in Settings -> Compute)}, via $src --client"
+             [ -n "$HOST" ] && echo "       if the server has no models yet, the installer sets it up over SSH (direct, not Tor)" ;;
     termux)  echo "     - Termux install + $MD, via $src" ;;
     usb)     echo "     - Matchstick USB writer, via $src (it asks before erasing anything)" ;;
     ollamator) echo "     - ollama-tor, from $OLLAMA_TOR_SRC" ;;
@@ -322,6 +349,10 @@ run() {  # id -> status
     desktop)
       f=$(fetch install-onionmind.sh "$TMP") || return 1
       ONIONMIND_MODEL=$MODEL bash "$f" ;;
+    client)
+      f=$(fetch install-onionmind.sh "$TMP") || return 1
+      if [ -n "$HOST" ]; then bash "$f" --client "--host=$HOST"
+      else bash "$f" --client; fi ;;
     termux)
       f=$(fetch install-onionmind-android.sh "$TMP") || return 1
       ONIONMIND_MODEL=$MODEL bash "$f" ;;
@@ -410,6 +441,7 @@ if ($Vram -eq 0 -and ($Gpus -join ' ') -match 'AMD|Radeon|Intel') {
   $Notes += 'No NVIDIA GPU: the Windows engine setup uses NVIDIA VRAM only, so models run on the CPU here.'
 }
 if ($Arch -eq 'ARM64') { $Notes += 'Windows on ARM: the engine runs native, the desktop app under x64 emulation (slower).' }
+if ($Vram -lt 6000) { $Notes += 'Small GPU: the app can run the models on your own SSH server instead - after installing, open Settings > Compute.' }
 
 $Py = $null
 foreach ($cand in @(@('py','-3'), @('python'))) {

@@ -1411,7 +1411,7 @@ class WorkbenchPreferencesTests(unittest.TestCase):
             # The original four keep their place; v2 appends its Features tab.
             self.assertEqual(
                 [tabs.tabText(index) for index in range(tabs.count())],
-                ["General", "Privacy", "Updates", "Storage", "Features"],
+                ["General", "Compute", "Privacy", "Updates", "Storage", "Features"],
             )
             for index in range(tabs.count()):
                 page = tabs.widget(index)

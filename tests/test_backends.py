@@ -420,6 +420,60 @@ def test_old_python_uses_legacy_ui_without_importing_native_module():
     legacy.assert_called_once_with()
 
 
+class _RemoteOllama(http.server.BaseHTTPRequestHandler):
+    """What a tunnelled remote Ollama looks like from here: a loopback port."""
+    def do_GET(self):
+        body = {"/api/version": {"version": "9.9.9"},
+                "/api/tags": {"models": [{"name": "blaze:latest", "size": 1}]}}.get(self.path)
+        data = json.dumps(body or {}).encode()
+        self.send_response(200 if body else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_remote_compute_moves_only_the_loopback_port():
+    import os, subprocess
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _RemoteOllama)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_port
+    old_backend, old_model = onionmind.BACKEND, onionmind.MODEL
+    try:
+        onionmind.use_ollama_port(port)
+        urls = (onionmind.OLLAMA, onionmind.OLLAMA_TAGS, onionmind.OLLAMA_PULL,
+                onionmind.OLLAMA_PS, onionmind.OLLAMA_GENERATE)
+        assert all(u.startswith(f"http://127.0.0.1:{port}/api/") for u in urls), urls
+        # Children follow: the agent re-imports onionmind, the ollama CLI reads OLLAMA_HOST.
+        assert os.environ["ONIONMIND_OLLAMA_PORT"] == str(port)
+        assert os.environ["OLLAMA_HOST"] == f"127.0.0.1:{port}"
+        onionmind.detect_backend()
+        assert onionmind.BACKEND == "ollama"
+        assert onionmind.installed_models() == ["blaze:latest"]
+        child = subprocess.run(
+            [sys.executable, "-c", "import onionmind; print(onionmind.OLLAMA_TAGS)"],
+            cwd=str(pathlib.Path(onionmind.__file__).parent), capture_output=True,
+            text=True, timeout=60, env=dict(os.environ))
+        assert child.stdout.strip() == f"http://127.0.0.1:{port}/api/tags", child
+    finally:
+        onionmind.use_ollama_port(None)
+        onionmind.BACKEND, onionmind.MODEL = old_backend, old_model
+        srv.shutdown()
+    assert onionmind.OLLAMA == "http://127.0.0.1:11434/api/chat"
+    assert "ONIONMIND_OLLAMA_PORT" not in os.environ
+    for bad in (-1, 70000):
+        try:
+            onionmind.use_ollama_port(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad} accepted as a port")
+    assert onionmind.OLLAMA_PORT == 11434
+
+
 if __name__ == "__main__":
     test_llama_backend()
     test_ollama_reasoning_budget_exceeds_old_ceiling()
@@ -436,4 +490,5 @@ if __name__ == "__main__":
     test_turn_stream_emits_stats_and_search_counts_without_the_query()
     test_model_memory_calls_stay_on_loopback_without_a_proxy()
     test_old_python_uses_legacy_ui_without_importing_native_module()
+    test_remote_compute_moves_only_the_loopback_port()
     print("DONE_BACKEND_OK")
