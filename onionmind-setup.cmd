@@ -2693,6 +2693,7 @@ __all__ = [
     "VAULT_FILE",
     "Vault",
     "VaultError",
+    "VaultLocked",
     "WrongPassword",
     "KeystoreUnavailable",
     "encryption_available",
@@ -5590,6 +5591,10 @@ class KeystoreUnavailable(VaultError):
     pass
 
 
+class VaultLocked(VaultError):
+    """The vault was locked: its key is out of memory until the password is typed."""
+
+
 def encryption_available() -> bool:
     """True when the `cryptography` package (AES-GCM) can be imported."""
     try:
@@ -5828,25 +5833,58 @@ class Vault:
 
     def __init__(self, root: PathInput, key: bytes, header: Mapping[str, Any], keystore: Any = None) -> None:
         self.root = Path(root).expanduser()
-        self._key = key
-        self._cipher = _aesgcm(key)
+        self._key: Optional[bytes] = key
+        self._cipher: Any = _aesgcm(key)
         self.header = dict(header)
         self.keystore = keystore
+
+    # lock
+
+    @property
+    def locked(self) -> bool:
+        return self._key is None
+
+    def lock(self) -> bool:
+        """Drop the data key from memory; only the password brings it back.
+
+        Only with a password: without one the key store would hand the key
+        straight back, so there is nothing to lock. Python cannot overwrite the
+        old bytes, so this drops every reference and leaves them to the
+        allocator. Returns True when the key was dropped."""
+        if not self.has_password:
+            return False
+        self._key = None
+        self._cipher = None
+        return True
+
+    def unlock(self, password: str) -> None:
+        """Bring the key back from the password. Raises WrongPassword."""
+        if not self.locked:
+            return
+        key = _unwrap_key(self.header["password"], password)
+        self._key, self._cipher = key, _aesgcm(key)
+
+    def _require_key(self) -> tuple[bytes, Any]:
+        if self._key is None:
+            raise VaultLocked("Onionmind is locked; unlock it to read or write its data.")
+        return self._key, self._cipher
 
     # data
 
     def encrypt(self, data: bytes) -> bytes:
+        _, cipher = self._require_key()
         nonce = os.urandom(_NONCE_BYTES)
-        return _ENC_MAGIC + nonce + self._cipher.encrypt(nonce, data, _ENC_AAD)
+        return _ENC_MAGIC + nonce + cipher.encrypt(nonce, data, _ENC_AAD)
 
     def decrypt(self, blob: bytes) -> bytes:
         from cryptography.exceptions import InvalidTag
 
         if not is_encrypted(blob):
             raise VaultError("not an Onionmind encrypted file")
+        _, cipher = self._require_key()
         start = len(_ENC_MAGIC)
         try:
-            return self._cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
+            return cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
         except InvalidTag:
             raise VaultError("the file was not encrypted with this data key, or it was changed") from None
 
@@ -5886,9 +5924,10 @@ class Vault:
         if not isinstance(record, dict):
             return False
         try:
-            return _unwrap_key(record, password) == self._key
+            key = _unwrap_key(record, password)
         except VaultError:
             return False
+        return self._key is None or key == self._key
 
     def set_password(self, password: str, current: Optional[str] = None) -> None:
         """Set or change the password. Changing needs the current one."""
@@ -5896,7 +5935,8 @@ class Vault:
             raise VaultError("The password cannot be empty.")
         if self.has_password and not self.check_password(current or ""):
             raise WrongPassword("The current password is not right.")
-        header = {**self.header, "mode": "password", "password": _wrap_key(self._key, password)}
+        key, _ = self._require_key()
+        header = {**self.header, "mode": "password", "password": _wrap_key(key, password)}
         header.pop("keystore", None)
         _write_header(self.root, header)            # the wrapped key first...
         old = self.header.get("keystore")
@@ -5912,8 +5952,9 @@ class Vault:
         """Back to the key store: the data stays encrypted, no login needed."""
         if not self.check_password(current):
             raise WrongPassword("That password is not right.")
+        key, _ = self._require_key()
         store = keystore_for(self.root)
-        store.put(self._key)                        # the key store first...
+        store.put(key)                        # the key store first...
         header = {key: value for key, value in self.header.items() if key != "password"}
         header.update(mode="device", keystore=store.name)
         _write_header(self.root, header)            # ...then the header stops asking
@@ -7269,7 +7310,7 @@ class OnionmindWindow(QMainWindow):
         self._apply_preferences()
         self._install_shortcuts()
         self.lock_overlay = LockOverlay(self, self._verify_passphrase)
-        self.lock_overlay.unlocked.connect(lambda: self.set_status("Unlocked."))
+        self.lock_overlay.unlocked.connect(self._after_unlock)
         self.setup_overlay = SetupOverlay(self)
         self.idle_timer = QTimer(self)
         self.idle_timer.setInterval(15_000)
@@ -9645,6 +9686,8 @@ class OnionmindWindow(QMainWindow):
                 QTimer.singleShot(0, self.submit)
         if kind is None and was_running:
             self._alert_if_unfocused()
+            # After the finishing run has saved its result (still on this stack).
+            QTimer.singleShot(0, self._drop_key_if_locked)
         self._sync_action_states()
         if hasattr(self, "speed_status"):
             self._update_live_status()           # "Idle" again once nothing runs
@@ -12074,6 +12117,12 @@ class OnionmindWindow(QMainWindow):
 
     def _verify_passphrase(self, text: str) -> bool:
         if self.vault is not None:
+            if getattr(self.vault, "locked", False):
+                try:
+                    self.vault.unlock(text)          # the key comes back only from the password
+                except Exception:
+                    return False
+                return True
             return self.vault.check_password(text)
         verify = getattr(self.desktop_core, "verify_passphrase", None)
         record = self._lock_settings().get("passphrase")
@@ -12088,7 +12137,27 @@ class OnionmindWindow(QMainWindow):
             return False
         self.lock_overlay.lock()
         self.inspector.append_activity("Onionmind locked")
+        self._drop_key_if_locked()
         return True
+
+    def _drop_key_if_locked(self) -> None:
+        """Take the data key out of memory while the window is locked.
+
+        A run that is still going keeps the key until it ends and has saved
+        its result; `_set_active` calls back here then."""
+        if self.vault is None or self.lock_overlay.isHidden() or self.active_kind:
+            return
+        locker = getattr(self.vault, "lock", None)
+        if not callable(locker) or getattr(self.vault, "locked", False):
+            return
+        self._remember_draft()                       # written while the key is still here
+        if locker():
+            self.inspector.append_activity("Data key removed from memory until unlock")
+
+    def _after_unlock(self) -> None:
+        self._egress_counts = None                   # counts read while locked came back empty
+        self._refresh_session_rows()
+        self.set_status("Unlocked.")
 
     _INPUT_EVENTS = None
 
@@ -12132,7 +12201,7 @@ class OnionmindWindow(QMainWindow):
         return [s for s in finder(candidates, days) if _as_text(_field(s, "id")) != current]
 
     def _auto_delete_old(self) -> int:
-        if not self.feature("lock"):
+        if not self.feature("lock") or getattr(self.vault, "locked", False):
             return 0
         removed = sum(1 for session in self.old_sessions() if self.session_bridge.delete(_as_text(_field(session, "id"))))
         if removed:

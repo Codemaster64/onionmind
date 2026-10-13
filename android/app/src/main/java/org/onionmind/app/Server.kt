@@ -3,6 +3,8 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.app.ActivityManager
+import android.os.Handler
+import android.os.Looper
 import android.os.StatFs
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoHTTPD.IHTTPSession
@@ -16,6 +18,7 @@ import org.onionmind.core.ErrorKind
 import org.onionmind.core.Features
 import org.onionmind.core.ModelCatalog
 import org.onionmind.core.ModelFit
+import org.onionmind.core.PasswordThrottle
 import org.onionmind.core.Presets
 import org.onionmind.core.TurnStats
 import org.onionmind.core.Vault
@@ -33,6 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  127.0.0.1:8081. The WebView talks only to this. */
 object Server {
     private const val PORT = 8081
+    private const val BACKGROUND_LOCK_MS = 5 * 60_000L
+    private const val SAVE_GRACE_MS = 15_000L
     private const val LLAMA = "http://127.0.0.1:8080"
     private var http: NanoHTTPD? = null
     private val chatLock = Executors.newSingleThreadExecutor()
@@ -313,15 +318,63 @@ object Server {
     }
 
     private fun unlock(session: IHTTPSession): Response {
+        throttled()?.let { return it }
         val password = field(session, "password").orEmpty()
         return try {
             Workbench.openVault(ctx, password)
+            throttle.succeeded()
             vaultState()
         } catch (e: Vault.WrongPassword) {
+            throttle.failed()
             error(Response.Status.FORBIDDEN, "That password is not right.")
         } catch (e: Vault.Unavailable) {
             error(Response.Status.CONFLICT, e.message ?: "The encrypted data could not be opened.")
         }
+    }
+
+    // Every route that checks a password shares one back-off.
+    private val throttle = PasswordThrottle()
+
+    private fun throttled(): Response? {
+        val wait = throttle.waitMillis()
+        if (wait == 0L) return null
+        val seconds = (wait + 999) / 1000
+        return NanoHTTPD.newFixedLengthResponse(TooMany, "application/json", buildJsonObject {
+            put("error", "Too many wrong passwords. Try again in $seconds second${if (seconds == 1L) "" else "s"}.")
+        }.toString())
+    }
+
+    private object TooMany : Response.IStatus {
+        override fun getDescription() = "429 Too Many Requests"
+        override fun getRequestStatus() = 429
+    }
+
+    // --- lock in the background ---------------------------------------------
+    // With a password set, the key is wiped once the app has been out of sight
+    // for BACKGROUND_LOCK_MS. A reply still being written keeps it until it has
+    // finished and the page has had time to save it.
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var lockAfterChat = false
+    private val lockTask = Runnable {
+        if (stopFlag != null) lockAfterChat = true else Workbench.lock()
+    }
+
+    /** MainActivity.onStop. */
+    fun movedToBackground() {
+        main.removeCallbacks(lockTask)
+        main.postDelayed(lockTask, BACKGROUND_LOCK_MS)
+    }
+
+    /** MainActivity.onStart. */
+    fun movedToForeground() {
+        main.removeCallbacks(lockTask)
+        lockAfterChat = false
+    }
+
+    private fun chatEnded() {
+        if (!lockAfterChat) return
+        lockAfterChat = false
+        main.postDelayed(lockTask, SAVE_GRACE_MS)
     }
 
     private fun setPassword(session: IHTTPSession): Response {
@@ -332,17 +385,22 @@ object Server {
         if (password == null || password.length < 8)
             return error(Response.Status.BAD_REQUEST, "Use at least 8 characters.")
         return try {
+            throttled()?.let { return it }
             Workbench.vault!!.setPassword(password, current)
+            throttle.succeeded()
             vaultState()
         } catch (e: Vault.WrongPassword) {
+            throttle.failed()
             error(Response.Status.FORBIDDEN, e.message ?: "The current password is not right.")
         }
     }
 
-    private fun removePassword(session: IHTTPSession): Response = try {
+    private fun removePassword(session: IHTTPSession): Response = throttled() ?: try {
         Workbench.vault!!.removePassword(field(session, "current").orEmpty())
+        throttle.succeeded()
         vaultState()
     } catch (e: Vault.WrongPassword) {
+        throttle.failed()
         error(Response.Status.FORBIDDEN, e.message ?: "That password is not right.")
     }
 
@@ -439,6 +497,7 @@ object Server {
             return failure(Response.Status.INTERNAL_ERROR, rootMessage(e))
         } finally {
             stopFlag = null
+            chatEnded()
         }
         if (answer == null) return failure(
             Response.Status.SERVICE_UNAVAILABLE,

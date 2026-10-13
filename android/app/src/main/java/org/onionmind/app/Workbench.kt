@@ -43,6 +43,20 @@ object Workbench {
         return opened
     }
 
+    /**
+     * Lock: the key is wiped from memory and every data route answers 423
+     * until the password is typed again. Only with a password - without one
+     * the Android Keystore would hand the key straight back.
+     */
+    @Synchronized
+    fun lock(): Boolean {
+        val open = vault ?: return false
+        if (!open.hasPassword) return false
+        vault = null
+        open.close()
+        return true
+    }
+
     /** At process start: open without a password when none is set. */
     fun startVault(ctx: Context) {
         try {

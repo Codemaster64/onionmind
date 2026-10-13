@@ -38,6 +38,17 @@ class MainActivity : Activity() {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
+    override fun onStart() {
+        super.onStart()
+        Server.movedToForeground()
+    }
+
+    override fun onStop() {
+        // With a password set, the data key is wiped after a while out of sight.
+        Server.movedToBackground()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         Workbench.onSecureChanged = null
         // the model server keeps running while the process lives; the OS will

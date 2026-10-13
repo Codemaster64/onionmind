@@ -393,7 +393,7 @@ class OnionmindWindow(QMainWindow):
         self._apply_preferences()
         self._install_shortcuts()
         self.lock_overlay = LockOverlay(self, self._verify_passphrase)
-        self.lock_overlay.unlocked.connect(lambda: self.set_status("Unlocked."))
+        self.lock_overlay.unlocked.connect(self._after_unlock)
         self.setup_overlay = SetupOverlay(self)
         self.idle_timer = QTimer(self)
         self.idle_timer.setInterval(15_000)
@@ -2769,6 +2769,8 @@ class OnionmindWindow(QMainWindow):
                 QTimer.singleShot(0, self.submit)
         if kind is None and was_running:
             self._alert_if_unfocused()
+            # After the finishing run has saved its result (still on this stack).
+            QTimer.singleShot(0, self._drop_key_if_locked)
         self._sync_action_states()
         if hasattr(self, "speed_status"):
             self._update_live_status()           # "Idle" again once nothing runs
@@ -5198,6 +5200,12 @@ class OnionmindWindow(QMainWindow):
 
     def _verify_passphrase(self, text: str) -> bool:
         if self.vault is not None:
+            if getattr(self.vault, "locked", False):
+                try:
+                    self.vault.unlock(text)          # the key comes back only from the password
+                except Exception:
+                    return False
+                return True
             return self.vault.check_password(text)
         verify = getattr(self.desktop_core, "verify_passphrase", None)
         record = self._lock_settings().get("passphrase")
@@ -5212,7 +5220,27 @@ class OnionmindWindow(QMainWindow):
             return False
         self.lock_overlay.lock()
         self.inspector.append_activity("Onionmind locked")
+        self._drop_key_if_locked()
         return True
+
+    def _drop_key_if_locked(self) -> None:
+        """Take the data key out of memory while the window is locked.
+
+        A run that is still going keeps the key until it ends and has saved
+        its result; `_set_active` calls back here then."""
+        if self.vault is None or self.lock_overlay.isHidden() or self.active_kind:
+            return
+        locker = getattr(self.vault, "lock", None)
+        if not callable(locker) or getattr(self.vault, "locked", False):
+            return
+        self._remember_draft()                       # written while the key is still here
+        if locker():
+            self.inspector.append_activity("Data key removed from memory until unlock")
+
+    def _after_unlock(self) -> None:
+        self._egress_counts = None                   # counts read while locked came back empty
+        self._refresh_session_rows()
+        self.set_status("Unlocked.")
 
     _INPUT_EVENTS = None
 
@@ -5256,7 +5284,7 @@ class OnionmindWindow(QMainWindow):
         return [s for s in finder(candidates, days) if _as_text(_field(s, "id")) != current]
 
     def _auto_delete_old(self) -> int:
-        if not self.feature("lock"):
+        if not self.feature("lock") or getattr(self.vault, "locked", False):
             return 0
         removed = sum(1 for session in self.old_sessions() if self.session_bridge.delete(_as_text(_field(session, "id"))))
         if removed:

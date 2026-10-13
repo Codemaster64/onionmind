@@ -133,6 +133,30 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(opened.check_password("correct horse"))
         self.assertFalse(opened.check_password("nope"))
 
+    def test_locking_drops_the_key_until_the_password_brings_it_back(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        settings = core.SettingsStore(self.root / "settings.json", vault=vault)
+        settings.save({"note": SECRET})
+        self.assertFalse(vault.lock())                           # no password: nothing to lock
+        self.assertFalse(vault.locked)
+        vault.set_password("correct horse")
+        self.assertTrue(vault.lock())
+        self.assertTrue(vault.locked)
+        with self.assertRaises(core.VaultLocked):
+            vault.encrypt(b"x")
+        with self.assertRaises(core.VaultLocked):
+            vault.decrypt((self.root / "settings.json").read_bytes())
+        with self.assertRaises(core.VaultLocked):
+            vault.set_password("another one", current="correct horse")
+        self.assertFalse(vault.check_password("wrong"))
+        self.assertTrue(vault.check_password("correct horse"))  # checked without the key in memory
+        self.assertTrue(vault.locked)
+        with self.assertRaises(core.WrongPassword):
+            vault.unlock("wrong")
+        vault.unlock("correct horse")
+        self.assertFalse(vault.locked)
+        self.assertEqual(settings.load()["note"], SECRET)
+
     def test_changing_the_password_needs_the_current_one_and_keeps_the_data(self) -> None:
         vault = core.open_vault(self.root, keystore=self.store)
         core.SettingsStore(self.root / "settings.json", vault=vault).save({"note": SECRET})
@@ -380,6 +404,31 @@ class VaultDesktopTests(unittest.TestCase):
         self.assertEqual(shown, ["password", "That password is not right."])
         reopened, _ = ui._open_vault_for_startup(core, self.root)
         self.assertTrue(reopened.has_password)
+
+    def test_the_idle_lock_drops_the_key_after_a_run_ends_and_unlock_brings_it_back(self) -> None:
+        vault, _notice = ui._open_vault_for_startup(core, self.root)
+        window = self.window(vault)
+        window.session_bridge.create("Plans", "m", None, [{"role": "user", "content": SECRET}])
+        window.features["lock"] = True
+        window.open_settings_tab = lambda label: None
+        self.assertTrue(window.set_passphrase("a long password"))
+        window.active_kind = "chat"                      # a run is still going
+        self.assertTrue(window.lock_now())
+        self.assertFalse(vault.locked)                   # it keeps the key to save its result
+        window._set_active(None)
+        self.app.processEvents()
+        self.assertTrue(vault.locked)
+        self.assertEqual(window.session_bridge.list(), [])   # nothing readable while locked
+        overlay = window.lock_overlay
+        overlay.passphrase.setText("wrong")
+        overlay.try_unlock()
+        self.assertTrue(vault.locked)
+        self.assertFalse(overlay.isHidden())
+        overlay.passphrase.setText("a long password")
+        overlay.try_unlock()
+        self.assertFalse(vault.locked)
+        self.assertTrue(overlay.isHidden())
+        self.assertEqual(window.session_bridge.list()[0].messages[0]["content"], SECRET)
 
     def test_forgotten_password_erases_after_confirmation(self) -> None:
         vault, _ = ui._open_vault_for_startup(core, self.root)

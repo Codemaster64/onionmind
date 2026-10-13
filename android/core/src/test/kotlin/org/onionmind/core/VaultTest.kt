@@ -175,6 +175,34 @@ class VaultTest {
     }
 
     @Test
+    fun `closing wipes the key and refuses to read or write`() {
+        val dir = dir(); val device = MemoryDeviceWrap()
+        val vault = Vault.open(dir, device)
+        ConversationStore.save(dir, listOf(user(secret)), vault)
+        vault.setPassword("correct horse")
+        vault.close()
+        assertTrue(vault.closed)
+        assertFailsWith<Vault.Unavailable> { vault.encrypt(byteArrayOf(1)) }
+        assertFailsWith<Vault.Unavailable> { vault.decrypt(File(dir, "conversation.json").readBytes()) }
+        // The password opens it again, with the data intact.
+        assertEquals(1, ConversationStore.load(dir, Vault.open(dir, device, "correct horse")).size)
+    }
+
+    @Test
+    fun `wrong passwords back off and a right one resets`() {
+        var now = 0L
+        val throttle = PasswordThrottle { now }
+        assertEquals(0L, throttle.waitMillis())
+        throttle.failed(); assertEquals(1_000L, throttle.waitMillis())
+        now += 1_000; assertEquals(0L, throttle.waitMillis())
+        throttle.failed(); assertEquals(2_000L, throttle.waitMillis())
+        repeat(20) { throttle.failed() }
+        assertEquals(PasswordThrottle.MAX_WAIT_MS, throttle.waitMillis())
+        throttle.succeeded()
+        assertEquals(0L, throttle.waitMillis())
+    }
+
+    @Test
     fun `the file format matches the desktop`() {
         // OMENC1\n + 12-byte nonce + AES-GCM, AAD "onionmind/v1": the same bytes
         // onionmind_desktop_core.Vault writes, so the two can never drift apart.

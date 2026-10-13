@@ -444,6 +444,16 @@ async function removeVaultPassword() {
 }
 $('unlock-password').addEventListener('keydown', e => { if (e.key === 'Enter') unlockVault(); });
 loadVault().then(v => { if (v.locked) showUnlock(); else boot(); });
+// Back from the background: if the phone locked the data meanwhile, forget
+// what this page still holds and ask for the password again.
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden || !$('unlock').hidden) return;
+  const v = await loadVault();
+  if (!v.locked) return;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  history = []; renderHistory();
+  showUnlock();
+});
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
