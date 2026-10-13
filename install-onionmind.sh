@@ -1551,9 +1551,10 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
         return turn(messages, stop_event, allow_search=allow_search)
     progress = None
     if on_event:
-        def progress(chunks, seconds, reasoning=False):
+        def report(chunks, seconds, reasoning=False):
             on_event({"kind": "generating", "chunks": chunks, "seconds": seconds,
                       "reasoning": bool(reasoning)})
+        progress = report
     for _ in range(6):
         if stop_event is not None and stop_event.is_set():
             return "(stopped)"
@@ -2369,7 +2370,6 @@ def run_legacy_ui():
     """Run the Windows desktop chat without putting conversation in a console."""
     import base64
     import os
-    import subprocess
     import threading
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
@@ -2528,7 +2528,9 @@ def run_legacy_ui():
                 root.after(0, lambda: populate_models(models))
                 root.after(0, lambda: set_status("model installed", "#9ef0b0"))
             except Exception as exc:
-                root.after(0, lambda: set_status(user_error(exc), "#e39a9a"))
+                # Bound now: Python unbinds `exc` when the except block ends,
+                # long before Tk runs this callback.
+                root.after(0, lambda error=exc: set_status(user_error(error), "#e39a9a"))
             finally:
                 root.after(0, lambda: install_model_button.configure(
                     state="normal" if BACKEND == "ollama" else "disabled"))
@@ -2618,7 +2620,7 @@ def run_legacy_ui():
             root.after(0, lambda: append("onion", f"Ready with {MODEL}. Ask anything."))
         except (Exception, SystemExit) as exc:
             root.after(0, lambda: set_status("not ready", "#e39a9a"))
-            root.after(0, lambda: append("onion", user_error(exc)))
+            root.after(0, lambda error=exc: append("onion", user_error(error)))
 
     def ask():
         nonlocal busy
@@ -10052,7 +10054,6 @@ class OnionmindWindow(QMainWindow):
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
-            port = event.get("port")
             self.tor_phase = "starting"
             self.tor_status.set_status("Checking…", "warn")
             _set_tor_action(
@@ -10067,7 +10068,6 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Verifying the Tor circuit before protected work begins…")
             self.inspector.append_activity("Local SOCKS listener ready; verifying Tor circuit")
         elif kind == "tor_verified":
-            port = event.get("port")
             self.tor_phase = "running"
             self.tor_status.set_status("Ready", "good")
             _set_tor_action(
@@ -15692,7 +15692,6 @@ class SetupOverlay(_Overlay):
         else:
             self.body.setText("No model is installed yet. Name one to download; the download goes directly to "
                               "its registry, not over Tor, and starts only after you confirm.")
-        row = QHBoxLayout()
         self.model_name = QLineEdit()
         self.model_name.setPlaceholderText("BLAZE, llama3.2:3b, or a huggingface.co link")
         self.model_name.setAccessibleName("Model to download")

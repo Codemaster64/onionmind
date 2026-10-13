@@ -2895,7 +2895,6 @@ class OnionmindWindow(QMainWindow):
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
-            port = event.get("port")
             self.tor_phase = "starting"
             self.tor_status.set_status("Checking…", "warn")
             _set_tor_action(
@@ -2910,7 +2909,6 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Verifying the Tor circuit before protected work begins…")
             self.inspector.append_activity("Local SOCKS listener ready; verifying Tor circuit")
         elif kind == "tor_verified":
-            port = event.get("port")
             self.tor_phase = "running"
             self.tor_status.set_status("Ready", "good")
             _set_tor_action(

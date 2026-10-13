@@ -48,6 +48,15 @@ jobs:
       - name: Generated payloads are current
         run: python build.py --check
 
+      - name: Static checks (pyflakes rules through flake8, which honours noqa)
+        # CI-only tool; nothing is added to the app. onionmind_desktop.py
+        # re-exports its parts' names for older callers, so unused imports
+        # there are intended.
+        run: |
+          python -m pip install "flake8>=7,<8"
+          python -m flake8 --select=F --per-file-ignores="onionmind_desktop.py:F401" \
+            --exclude=android,.git,__pycache__ .
+
       - name: unittest suites
         shell: bash
         run: |

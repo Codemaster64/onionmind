@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtCore import QProcess, QStandardPaths, Qt
     from PySide6.QtGui import QKeyEvent
-    from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QWidget
+    from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
     import onionmind_desktop as ui
     import onionmind_desktop_theme as theme
