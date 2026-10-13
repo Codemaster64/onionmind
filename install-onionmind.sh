@@ -2060,7 +2060,10 @@ def _contain_env(env):
 # single place Tor is verified for the agent, exactly as run_code() is for qwen.
 
 
-def agent_argv(model=None, task=None, executable=None, stream=False):
+AGENT_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def agent_argv(model=None, task=None, executable=None, stream=False, resume=None):
     """The Agent-mode command: Qwen Code, non-interactive when given a task.
 
     This used to be `ollama launch dsh -- --profile headless <task>`. The
@@ -2078,6 +2081,11 @@ def agent_argv(model=None, task=None, executable=None, stream=False):
     argv = list(executable) if executable else qwen_launcher()
     if model:
         argv += ["--model", model]
+    if resume:
+        # Pick up a stopped run: same qwen session, same context, new turn.
+        if not AGENT_SESSION_ID.fullmatch(resume):
+            raise ValueError(f"not an agent session id: {resume!r}")
+        argv += ["--resume", resume]
     if stream:
         # The desktop's structured mode: qwen reads the task and the person's
         # approvals as JSON lines on stdin and reports every step as JSON on
@@ -2119,7 +2127,7 @@ def agent_env(env=None):
 
 
 def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
-              extra_deny=(), no_network=False):
+              extra_deny=(), no_network=False, resume=None):
     """Run the coding agent over Tor and return its exit code.
 
     qwen_setup() writes the settings the agent reads (deny list, approval mode,
@@ -2158,7 +2166,8 @@ def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
     # Piped stdout is block-buffered, so without this the desktop's process
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
-    return subprocess.call(agent_argv(model, None if stream else task, stream=stream),
+    extra = {"resume": resume} if resume else {}
+    return subprocess.call(agent_argv(model, None if stream else task, stream=stream, **extra),
                            env=env, cwd=workdir)
 
 
@@ -2720,6 +2729,11 @@ if __name__ == "__main__":
             i = args.index("--deny")
             deny.append(args.pop(i + 1))
             args.pop(i)
+        resume = None
+        if "--resume" in args[:-1]:              # --resume SESSION_ID
+            i = args.index("--resume")
+            resume = args.pop(i + 1)
+            args.pop(i)
         model = None
         workdir = None
         if len(args) >= 2 and args[0] == "--model":
@@ -2731,7 +2745,8 @@ if __name__ == "__main__":
                                        yolo=yolo, workdir=workdir,
                                        stream="--stream-json" in sys.argv,
                                        extra_deny=deny,
-                                       no_network="--no-network" in sys.argv))
+                                       no_network="--no-network" in sys.argv,
+                                       resume=resume))
         finally:
             stop_managed_tor()                   # only ours, never a reused proxy
     if "--ui" in sys.argv:
@@ -9497,7 +9512,8 @@ class HarnessBridge:
 
     def _launcher(self, model: str, task: str, cwd: str = "",
                   yolo: bool = False, stream: bool = False,
-                  deny: Iterable[str] = (), no_network: bool = False) -> Optional[list[str]]:
+                  deny: Iterable[str] = (), no_network: bool = False,
+                  resume: str = "") -> Optional[list[str]]:
         """``onionmind.py --agent``: the one place Tor is verified and enforced.
 
         Launching the agent directly would inherit this window's environment,
@@ -9518,6 +9534,8 @@ class HarnessBridge:
             argv.append("--no-network")
         for rule in deny:
             argv += ["--deny", rule]
+        if resume:
+            argv += ["--resume", resume]
         if cwd:
             # The working directory is an argument, not just the process cwd:
             # run_agent writes the project settings there before it starts.
@@ -9563,8 +9581,9 @@ class HarnessBridge:
 
     def build(self, *, model: str, task: str, cwd: str,
               yolo: bool = False, stream: bool = False,
-              deny: Iterable[str] = (), no_network: bool = False) -> tuple[list[str], str]:
-        launcher = self._launcher(model, task, cwd, yolo, stream, deny, no_network)
+              deny: Iterable[str] = (), no_network: bool = False,
+              resume: str = "") -> tuple[list[str], str]:
+        launcher = self._launcher(model, task, cwd, yolo, stream, deny, no_network, resume)
         if launcher is None:                     # check() refuses first; belt and braces
             raise RuntimeError(
                 "Onionmind Agent has no Tor-verified launcher, so it will not start."
@@ -12226,6 +12245,8 @@ class OnionmindWindow(QMainWindow):
         self._agent_permission: Optional[dict[str, Any]] = None
         self._agent_cards: list[QWidget] = []
         self._agent_outcome: Optional[str] = None
+        self._agent_session_id: Optional[str] = None
+        self._resume_cards: list[Any] = []
         self._run_allow_all = False
         self._open_steps: dict[str, Any] = {}
         # v2 model power and live numbers - only ever filled from real probes.
@@ -14879,7 +14900,7 @@ class OnionmindWindow(QMainWindow):
         self.retry_button.setVisible(self._fault is None)
         self.save_current_session()
 
-    def _start_harness(self, task: str) -> None:
+    def _start_harness(self, task: str, resume: str = "", allow_all: bool = False) -> None:
         if not self.workspace:
             block = self.transcript.add_message(
                 "assistant", "Agent mode needs a project folder. Open one with Ctrl+O, then send the task again."
@@ -14913,7 +14934,9 @@ class OnionmindWindow(QMainWindow):
         self._agent_steps = {}
         self._agent_permission = None
         self._agent_outcome = None
-        self._run_allow_all = False
+        self._run_allow_all = allow_all
+        self._agent_session_id = resume or None
+        self._clear_resume_cards()
         self._agent_buffer = b""
         self._agent_yolo = yolo
         self._last_agent_task = task
@@ -14934,7 +14957,8 @@ class OnionmindWindow(QMainWindow):
             argv, cwd = self.harness_bridge.build(model=model, task=task,
                                                   cwd=workspace, yolo=yolo,
                                                   stream=stream, deny=deny,
-                                                  no_network=no_network)
+                                                  no_network=no_network,
+                                                  resume=resume if stream else "")
             return {"available": True, "argv": argv, "cwd": cwd}
 
         worker = self._start_worker(prepare)
@@ -15549,6 +15573,9 @@ class OnionmindWindow(QMainWindow):
                     self._agent_tool_result(item)
         elif kind == "permission":
             self._agent_permission_requested(event)
+        elif kind == "system" and event.get("session_id"):
+            # qwen's own session id: what "Continue this run" resumes.
+            self._agent_session_id = _as_text(event.get("session_id"))
         elif kind == "result":
             # The turn is over; closing stdin lets qwen exit on its own.
             if self.harness_process is not None:
@@ -15710,8 +15737,46 @@ class OnionmindWindow(QMainWindow):
         self.inspector.run_panel.finish(status)
         if note and self.stream_block is not None:
             self.stream_block.append_text("\n" + note)
+        if note and self._agent_stream and self._agent_session_id:
+            self._offer_resume(halted=outcome.startswith("halted"))
         if status == "Done":
             self._notify("Agent run finished", f"{self._session_title()} · {Path(self.workspace or '').name}")
+
+    def _offer_resume(self, halted: bool) -> None:
+        """A stopped run keeps its qwen session, so it can carry on from there
+        with its context intact instead of being sent again from scratch."""
+        if halted:
+            card = NoticeCard("info", "Continue this run?",
+                              "The agent picks up where it stopped, with what it already read and "
+                              "planned. It stopped because a headless run can't ask, so continuing "
+                              "allows its edits and commands for the rest of this run.")
+            card.add_button("Continue, allowing edits", lambda: self._continue_run(True), primary=True)
+        else:
+            card = NoticeCard("info", "Continue this run?",
+                              "The agent picks up where it stopped, with what it already read and planned. "
+                              "Protected actions still ask first.")
+            card.add_button("Continue this run", lambda: self._continue_run(False), primary=True)
+        self._resume_cards.append(self.transcript.add_widget(card))
+
+    def _clear_resume_cards(self) -> None:
+        for holder in getattr(self, "_resume_cards", []):
+            self.transcript.remove_widget(holder)
+        self._resume_cards = []
+
+    def _continue_run(self, allow_all: bool) -> None:
+        session = self._agent_session_id
+        if self.active_kind or not session:
+            return
+        if not _tor_is_enabled(self.core):
+            self.set_status("Tor proxy is off. Turn it on in the toolbar before using a protected feature.")
+            return
+        text = "Continue where you stopped."
+        self.set_mode("agent")
+        self.chat_messages.append({"role": "user", "content": text})
+        self._index_block(self.transcript.add_message("user", text), len(self.chat_messages) - 1)
+        self._set_active("agent")
+        self.inspector.append_activity("Continuing the stopped Agent run in the same session")
+        self._start_harness(text, resume=session, allow_all=allow_all)
 
     # --- v2: model power (ladder), model per mode and live stats ----------
 

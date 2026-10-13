@@ -389,6 +389,60 @@ class ApprovalTests(AgentStreamBase):
             self._close(window)
 
 
+class ResumeTests(AgentStreamBase):
+    SESSION = "46d34087-9e08-4a2d-af1d-1551019a8e3d"   # the fixture's init line
+
+    def test_the_launcher_passes_the_session_to_resume(self) -> None:
+        core = SimpleNamespace(__file__="/x/onionmind.py", run_agent=lambda *a, **k: 0)
+        argv = ui.HarnessBridge(desktop_core, core)._launcher("m", "t", "/w", stream=True, resume=self.SESSION)
+        self.assertEqual(argv[argv.index("--resume") + 1], self.SESSION)
+        self.assertNotIn("--resume", ui.HarnessBridge(desktop_core, core)._launcher("m", "t", "/w", stream=True))
+
+    def test_a_halted_run_offers_to_continue_its_own_session(self) -> None:
+        window, _process = self._agent_window(runPanel=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:4])
+            self.assertEqual(window._agent_session_id, self.SESSION)
+            window._finish_run_panel(True)
+            self.app.processEvents()
+            cards = _cards(window, "Continue this run?")
+            self.assertEqual(len(cards), 1)
+            started = []
+            window._start_harness = lambda task, resume="", allow_all=False: started.append((task, resume, allow_all))
+            window.active_kind = None
+            with mock.patch.object(ui, "_tor_is_enabled", return_value=True):
+                _button(cards[0], "Continue, allowing edits").click()
+            self.assertEqual(started, [("Continue where you stopped.", self.SESSION, True)])
+        finally:
+            self._close(window)
+
+    def test_a_denied_run_continues_with_approvals_still_on(self) -> None:
+        window, _process = self._agent_window(approvals=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:4])
+            _button(_cards(window, "wants to edit a file")[0], "Deny").click()
+            window._finish_run_panel(True)
+            self.app.processEvents()
+            started = []
+            window._start_harness = lambda task, resume="", allow_all=False: started.append((resume, allow_all))
+            window.active_kind = None
+            with mock.patch.object(ui, "_tor_is_enabled", return_value=True):
+                _button(_cards(window, "Continue this run?")[0], "Continue this run").click()
+            self.assertEqual(started, [(self.SESSION, False)])
+        finally:
+            self._close(window)
+
+    def test_a_finished_run_offers_nothing(self) -> None:
+        window, _process = self._agent_window(runPanel=True)
+        try:
+            self._feed(window, FIXTURE_LINES[:2])
+            window._finish_run_panel(True)
+            self.app.processEvents()
+            self.assertEqual(_cards(window, "Continue this run?"), [])
+        finally:
+            self._close(window)
+
+
 class RunPanelTests(AgentStreamBase):
     def test_off_leaves_the_three_original_tabs(self) -> None:
         window = self._window()
