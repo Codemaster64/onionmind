@@ -169,6 +169,11 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("must be auto, lfm, 4b or 9b", self.text("install-onionmind-android.sh"))
         self.assertIn('MODELS="fast 27b"', text)
         self.assertIn('MODELS="lfm 4b 9b"', text)
+        # The remote-models option hands over to the flags install-onionmind.sh parses.
+        self.assertIn('bash "$f" --client "--host=$HOST"', text)
+        sh = self.text("install-onionmind.sh")
+        self.assertIn("--client) ROLE=client", sh)
+        self.assertIn("--host=*) SERVER_HOST=", sh)
 
     def text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")
