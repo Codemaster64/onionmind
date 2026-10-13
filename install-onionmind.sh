@@ -3509,23 +3509,11 @@ def machine_memory_mb() -> Optional[int]:
 
 
 def gpu_vram_mb() -> Optional[int]:
-    """The first NVIDIA GPU's VRAM in MB, or None without one."""
-    try:
-        output = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if output.returncode == 0 and output.stdout.strip():
-            return int(output.stdout.strip().splitlines()[0].strip())
-    except Exception:
-        return None
-    return None
+    """The GPU memory models can use, in MB, or None without a GPU we can read.
+
+    Same probes as gpu_memory_mb: NVIDIA, AMD, Intel, then Apple unified memory.
+    """
+    return gpu_memory_mb()[1]
 
 
 _PARAM_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z0-9])")
@@ -5921,36 +5909,134 @@ def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
 
 # ladder / modelPlus: real hardware numbers, or None when the platform won't say.
 
-def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
-    """(used, total) MB of the first NVIDIA GPU, or (None, None) without one.
-
-    ponytail: NVIDIA only, like gpu_vram_mb. AMD (rocm-smi), Intel and Apple
-    unified memory report nothing here; the UI then says "unknown".
-    """
+def _run_probe(argv: list[str]) -> Optional[str]:
+    """stdout of a hardware probe, or None when it is missing or fails."""
     try:
-        output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
-        )
-        if output.returncode == 0 and output.stdout.strip():
-            used, total = output.stdout.strip().splitlines()[0].split(",")[:2]
-            return int(used.strip()), int(total.strip())
+        output = subprocess.run(argv, capture_output=True, text=True, timeout=10,
+                                creationflags=_NO_WINDOW)
     except Exception:
-        pass
-    return None, None
+        return None
+    return output.stdout if output.returncode == 0 and output.stdout.strip() else None
+
+
+def _nvidia_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    out = _run_probe(["nvidia-smi", "--query-gpu=memory.used,memory.total,name",
+                      "--format=csv,noheader,nounits"])
+    if out is None:
+        return None
+    try:
+        used, total, name = [part.strip() for part in out.strip().splitlines()[0].split(",", 2)]
+        return int(used), int(total), name or None
+    except ValueError:
+        return None
+
+
+_DRM_ROOT = Path("/sys/class/drm")
+
+
+def _amd_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """amdgpu's own sysfs counters (Linux): no rocm-smi needed. The card with the
+    most VRAM wins; an APU's small carve-out (under 1 GB) does not count."""
+    best: Optional[tuple[Optional[int], int, Optional[str]]] = None
+    try:
+        cards = sorted(_DRM_ROOT.glob("card[0-9]*/device"))
+    except OSError:
+        return None
+    for device in cards:
+        try:
+            if (device / "vendor").read_text().strip().lower() != "0x1002":
+                continue
+            total = int((device / "mem_info_vram_total").read_text()) // (1024 * 1024)
+            used = int((device / "mem_info_vram_used").read_text()) // (1024 * 1024)
+        except (OSError, ValueError):
+            continue
+        if total < 1024 or (best and best[1] >= total):
+            continue
+        try:
+            name = (device / "product_name").read_text().strip() or None
+        except OSError:
+            name = None
+        best = (used, total, name or "AMD GPU")
+    return best
+
+
+def _intel_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Intel discrete GPUs through xpu-smi (Arc, Data Center GPU)."""
+    out = _run_probe(["xpu-smi", "discovery", "-d", "0", "-j"])
+    if out is None:
+        return None
+    try:
+        found = json.loads(out)
+        total = int(found["memory_physical_size_byte"]) // (1024 * 1024)
+    except (ValueError, KeyError, TypeError):
+        return None
+    if total <= 0:
+        return None
+    used: Optional[int] = None
+    stats = _run_probe(["xpu-smi", "stats", "-d", "0", "-j"])
+    try:
+        for metric in json.loads(stats or "{}").get("device_level") or []:
+            if metric.get("metrics_type") == "XPUM_STATS_MEMORY_USED":
+                used = int(float(metric["value"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        used = None
+    return used, total, _as_text_core(found.get("device_name")) or "Intel GPU"
+
+
+def _apple_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Apple Silicon shares RAM with the GPU. Metal lets the GPU wire about 2/3
+    of it (3/4 above 36 GB) unless iogpu.wired_limit_mb raises the cap, so that is
+    the total. "Used" is left None: the caller takes Ollama's size_vram instead,
+    since system-wide memory use is not GPU use."""
+    if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+        return None
+    out = _run_probe(["sysctl", "-n", "hw.memsize"])
+    try:
+        ram = int((out or "").strip()) // (1024 * 1024)
+    except ValueError:
+        return None
+    if ram <= 0:
+        return None
+    try:
+        wired = int((_run_probe(["sysctl", "-n", "iogpu.wired_limit_mb"]) or "0").strip())
+    except ValueError:
+        wired = 0
+    total = wired if 0 < wired <= ram else (ram * 3 // 4 if ram > 36 * 1024 else ram * 2 // 3)
+    return None, total, "Apple GPU (unified memory)"
+
+
+def _gpu_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """(used MB or None, total MB, name) of the GPU models would run on."""
+    probes = [_nvidia_memory]
+    if os.name != "nt":
+        probes += [_amd_memory, _intel_memory, _apple_memory]
+    else:
+        probes.append(_intel_memory)
+    for probe in probes:
+        try:
+            found = probe()
+        except Exception:
+            found = None
+        if found is not None:
+            return found
+    return None
+
+
+def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
+    """(used, total) MB of the GPU, or (None, None) without one we can read.
+
+    NVIDIA (nvidia-smi), AMD (amdgpu sysfs, Linux), Intel (xpu-smi) and Apple
+    unified memory. Apple reports used=None: there the caller shows the size
+    Ollama itself has in GPU memory. AMD and integrated Intel on Windows still
+    report nothing, and the UI says "unknown".
+    """
+    found = _gpu_memory()
+    return (found[0], found[1]) if found else (None, None)
 
 
 def gpu_name() -> Optional[str]:
-    try:
-        output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
-        )
-        if output.returncode == 0 and output.stdout.strip():
-            return output.stdout.strip().splitlines()[0].strip()
-    except Exception:
-        pass
-    return None
+    found = _gpu_memory()
+    return found[2] if found else None
 
 
 def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optional[int]) -> str:
@@ -15901,10 +15987,14 @@ class OnionmindWindow(QMainWindow):
         self.speed_status.setText(
             f"{self._live_tps:.0f} tok/s" if running and self._live_tps else "Idle")
         used, total = self._model_power.get("vram_used"), self._model_power.get("vram_total")
-        if total:
+        in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
+        if total and used is not None:
             self.vram_status.setText(f"VRAM {used / 1024:.1f} / {total / 1024:.0f} GB")
+        elif total:
+            # Unified memory (Apple): the GPU reports no used figure of its own,
+            # so show what the model server has placed in GPU memory.
+            self.vram_status.setText(f"VRAM {in_vram / 1024 ** 3:.1f} / {total / 1024:.0f} GB")
         else:
-            in_vram = sum(int(item.get("size_vram") or 0) for item in self._model_power.get("loaded") or [])
             self.vram_status.setText(f"{in_vram / 1024 ** 3:.1f} GB in VRAM" if in_vram else "VRAM unknown")
         used_ctx, limit = self._context_numbers()
         fmt = getattr(self.desktop_core, "format_tokens", lambda n: str(n))

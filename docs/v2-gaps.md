@@ -15,7 +15,7 @@ run** = not exercised.
 
 | Feature | What is missing | Backend work needed |
 |---|---|---|
-| modelPlus, ladder | **VRAM in use only on NVIDIA.** Elsewhere the status bar shows "VRAM unknown" (or the size Ollama reports in VRAM). | Read `rocm-smi` (AMD), Intel `xpu-smi`, and Apple unified memory (`vm_stat` plus Ollama `/api/ps`). |
+| modelPlus, ladder | **VRAM is not read for AMD and integrated Intel on Windows.** NVIDIA (nvidia-smi), AMD on Linux (amdgpu sysfs), Intel discrete (xpu-smi) and Apple unified memory are read. Apple shows the Metal-usable share of RAM, with what Ollama placed there as "used". Elsewhere the status bar says "VRAM unknown". The xpu-smi and Apple paths are unit-tested against canned output, not real hardware. | Windows AMD/Intel: DXGI adapter memory (`IDXGIAdapter3::QueryVideoMemoryInfo`). |
 | ladder | **No load percentage.** Ollama's preload call reports nothing while it loads, so the UI shows an indeterminate bar, not the prototype's percentage. | Ollama would need to stream load progress; until then the bar is honest. |
 | ladder | **Fit labels are estimates.** "Fits / Tight / Too big" compares the real file size plus 20% for the KV cache with VRAM, or 85% of RAM. | Ask Ollama for the actual memory estimate per context size, if it ever exposes one. |
 | modelPlus | **No tok/s in Agent mode.** qwen-code's stream reports no token timing, so the status bar says Idle during Agent runs. | Read timing from qwen's `result.usage`, if it starts filling it (it reported zeros in testing). |

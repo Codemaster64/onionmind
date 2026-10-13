@@ -552,6 +552,17 @@ class ModelPlusTests(V2Base):
         finally:
             self._close(window)
 
+    def test_unified_memory_shows_what_the_server_placed_in_gpu_memory(self) -> None:
+        # Apple: a GPU-usable total but no used figure of its own.
+        with mock.patch.object(desktop_core, "gpu_memory_mb", return_value=(None, 21_845)), \
+             mock.patch.object(desktop_core, "gpu_name", return_value="Apple GPU (unified memory)"):
+            window = self._window(core=_PowerCore(), modelPlus=True)
+            try:
+                self.assertTrue(self._wait_until(lambda: window.vram_status.text() == "VRAM 11.0 / 21 GB"),
+                                window.vram_status.text())
+            finally:
+                self._close(window)
+
     def test_on_each_mode_remembers_its_tier_and_stats_are_real(self) -> None:
         core = _PowerCore()
         core.load_model = lambda name, keep_alive="30m": True
