@@ -1409,6 +1409,29 @@ class ErrorsTests(V2Base):
         finally:
             self._close(window)
 
+    def test_a_failed_service_start_says_what_to_run(self) -> None:
+        def down():
+            raise RuntimeError("connection refused")
+        core = SimpleNamespace(MODEL="inferno", BACKEND="ollama", detect_backend=down,
+                               installed_models=lambda: [])
+        window = self._window(core=core, errors=True)
+        plan = [desktop_core.ServerStart("the ollama system service", ("systemctl", "start", "ollama.service"),
+                                         True, "sudo systemctl start ollama")]
+        refused = SimpleNamespace(returncode=1, stderr=b"Interactive authentication required.\n")
+        try:
+            with mock.patch.object(desktop_core, "model_server_start_plan", return_value=plan), \
+                 mock.patch.object(ui.subprocess, "run", return_value=refused) as run, \
+                 mock.patch.object(ui.subprocess, "Popen") as popen:
+                window._report_error("No model server on 11434 (ollama) or 8080 (llama-server). Start one.")
+                _button(_fault_card(window), "Restart model server").click()
+                self.assertTrue(self._wait_until(
+                    lambda: "\nsudo systemctl start ollama" in _fault_card(window).body_label.text()),
+                    _fault_card(window).body_label.text())
+            self.assertEqual(run.call_args.args[0], ["systemctl", "start", "ollama.service"])
+            popen.assert_not_called()                 # never a second server with an empty model store
+        finally:
+            self._close(window)
+
     def test_out_of_memory_switches_to_a_lighter_installed_tier(self) -> None:
         window = self._window(errors=True)
         try:

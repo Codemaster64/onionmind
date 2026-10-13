@@ -19,6 +19,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import urlparse
@@ -122,6 +123,8 @@ __all__ = [
     "revert_hunks",
     "change_stats",
     "gpu_memory_mb",
+    "ServerStart",
+    "model_server_start_plan",
     "gpu_name",
     "model_fit",
     "node_version",
@@ -3366,6 +3369,61 @@ def format_gb(mb: Optional[float]) -> str:
     if mb is None:
         return "?"
     return f"{mb / 1024:.1f}"
+
+
+@dataclass(frozen=True)
+class ServerStart:
+    label: str                 # "the ollama system service", shown to the person
+    argv: tuple[str, ...]
+    waits: bool                # True: the command returns when done; False: it is the server
+    manual: str = ""           # what to run by hand when this way fails
+
+
+def model_server_start_plan(
+    platform: str = "",
+    which: Callable[[str], Optional[str]] = shutil.which,
+    exists: Callable[[str], bool] = os.path.exists,
+    unit_exists: Optional[Callable[[tuple[str, ...]], bool]] = None,
+) -> list[ServerStart]:
+    """How to start the local Ollama this machine already has, best first.
+
+    The installers set Ollama up as a service (Linux: the system ollama.service
+    with its own model store) or as the desktop app (macOS, Windows). Starting
+    `ollama serve` as the user instead would come up with an empty model list,
+    so when a service exists that is the only way offered.
+    """
+    platform = platform or sys.platform
+    if unit_exists is None:
+        def unit_exists(scope: tuple[str, ...]) -> bool:
+            try:
+                return subprocess.run(["systemctl", *scope, "cat", "ollama.service"],
+                                      capture_output=True, timeout=10).returncode == 0
+            except Exception:
+                return False
+    plan: list[ServerStart] = []
+    if platform.startswith("linux") and which("systemctl"):
+        if unit_exists(("--user",)):
+            return [ServerStart("your ollama user service",
+                                ("systemctl", "--user", "start", "ollama.service"), True,
+                                "systemctl --user start ollama")]
+        if unit_exists(()):
+            # Root-owned: polkit asks for a password where a desktop agent runs.
+            return [ServerStart("the ollama system service",
+                                ("systemctl", "start", "ollama.service"), True,
+                                "sudo systemctl start ollama")]
+    elif platform == "darwin":
+        for app in ("/Applications/Ollama.app", os.path.expanduser("~/Applications/Ollama.app")):
+            if exists(app):
+                plan.append(ServerStart("the Ollama app", ("open", "-g", "-a", app), True))
+                break
+    elif platform == "win32":
+        tray = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama app.exe")
+        if os.environ.get("LOCALAPPDATA") and exists(tray):
+            plan.append(ServerStart("the Ollama app", (tray,), False))
+    program = which("ollama")
+    if program:
+        plan.append(ServerStart("ollama serve", (program, "serve"), False, "ollama serve"))
+    return plan
 
 
 def node_version() -> Optional[str]:
