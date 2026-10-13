@@ -101,6 +101,9 @@ __all__ = [
     "agent_task_message",
     "agent_permission_response",
     "agent_interrupt_message",
+    "AGENT_CONTEXT_REQUEST",
+    "agent_context_usage_message",
+    "agent_context_usage",
     "describe_tool_request",
     "edit_size",
     "estimate_tokens",
@@ -2687,9 +2690,11 @@ def parse_agent_line(line: str) -> dict[str, Any]:
                 "request_id": _as_text_core(message.get("request_id"))}
     if kind == "control_response":
         response = message.get("response") or {}
+        payload = response.get("response")
         return {"kind": "control_response",
                 "request_id": _as_text_core(response.get("request_id")),
-                "ok": response.get("subtype") == "success"}
+                "ok": response.get("subtype") == "success",
+                "payload": payload if isinstance(payload, dict) else {}}
     if kind == "system":
         return {"kind": "system", "subtype": _as_text_core(message.get("subtype")),
                 "session_id": _as_text_core(message.get("session_id"))}
@@ -2747,6 +2752,39 @@ def agent_permission_response(
         response["message"] = message or "Denied by the person running Onionmind."
     return json.dumps({"type": "control_response", "response": {
         "subtype": "success", "request_id": request_id, "response": response}}) + "\n"
+
+
+AGENT_CONTEXT_REQUEST = "onionmind-ctx"
+
+
+def agent_context_usage_message(request_id: str = AGENT_CONTEXT_REQUEST) -> str:
+    """Ask qwen how full its context is (it advertises can_get_context_usage)."""
+    return json.dumps({"type": "control_request", "request_id": request_id,
+                       "request": {"subtype": "get_context_usage"}}) + "\n"
+
+
+def agent_context_usage(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """{used, window, overhead, estimated} from a get_context_usage answer, else None.
+
+    overhead is what qwen itself adds to every run - its system prompt, tool
+    schemas and skills - and so is missing from an estimate made before a run.
+    Memory files (AGENTS.md) are left out of it: the estimate counts those already.
+    """
+    if not isinstance(payload, Mapping) or payload.get("subtype") != "get_context_usage":
+        return None
+    try:
+        used, window = int(payload["totalTokens"]), int(payload["contextWindowSize"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    breakdown = payload.get("breakdown") if isinstance(payload.get("breakdown"), Mapping) else {}
+    overhead = 0
+    for key in ("systemPrompt", "builtinTools", "mcpTools", "skills"):
+        try:
+            overhead += max(0, int(breakdown.get(key) or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"used": max(0, used), "window": max(1, window), "overhead": overhead,
+            "estimated": bool(payload.get("isEstimated"))}
 
 
 def agent_interrupt_message(request_id: str = "onionmind-stop") -> str:

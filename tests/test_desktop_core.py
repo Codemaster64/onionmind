@@ -1075,6 +1075,23 @@ class GpuMemoryProbeTests(unittest.TestCase):
             self.assertIsNone(core.gpu_name())
 
 
+class AgentContextUsageTests(unittest.TestCase):
+    def test_request_and_answer(self) -> None:
+        request = json.loads(core.agent_context_usage_message())
+        self.assertEqual(request["request"]["subtype"], "get_context_usage")
+        line = json.dumps({"type": "control_response", "response": {
+            "subtype": "success", "request_id": request["request_id"], "response": {
+                "subtype": "get_context_usage", "totalTokens": 9000, "contextWindowSize": 32768,
+                "isEstimated": True, "breakdown": {"systemPrompt": 4000, "builtinTools": 2500,
+                                                   "mcpTools": 300, "skills": 200, "memoryFiles": 900}}}})
+        event = core.parse_agent_line(line)
+        self.assertEqual(event["request_id"], core.AGENT_CONTEXT_REQUEST)
+        self.assertEqual(core.agent_context_usage(event["payload"]),
+                         {"used": 9000, "window": 32768, "overhead": 7000, "estimated": True})
+        self.assertIsNone(core.agent_context_usage({"subtype": "other"}))
+        self.assertIsNone(core.agent_context_usage({"subtype": "get_context_usage"}))
+
+
 FIXTURES = Path(__file__).resolve().parent
 
 
