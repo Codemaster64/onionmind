@@ -2920,6 +2920,9 @@ __all__ = [
     "RevertRecord",
     "revert_changes",
     "undo_revert",
+    "DiffHunk",
+    "diff_hunks",
+    "revert_hunks",
     "change_stats",
     "gpu_memory_mb",
     "gpu_name",
@@ -5905,6 +5908,95 @@ def undo_revert(record: RevertRecord) -> int:
     return restored
 
 
+@dataclass(frozen=True)
+class DiffHunk:
+    index: int
+    header: str                                   # the "@@ -a,b +c,d @@ ..." line
+    lines: tuple[str, ...]                        # body lines, each with its +/-/space prefix
+    added: int
+    removed: int
+
+
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+
+def _file_diff(root: Path, relative: str) -> tuple[str, list[DiffHunk]]:
+    """(file header, hunks) of one tracked file's worktree diff against HEAD."""
+    result = WorkspaceInspector._git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                                     "-U3", "HEAD", "--", relative)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git diff failed")
+    text = result.stdout.decode("utf-8", "surrogateescape")
+    header: list[str] = []
+    hunks: list[DiffHunk] = []
+    current: Optional[list[str]] = None
+    for line in text.splitlines(keepends=True):
+        if _HUNK_HEADER.match(line):
+            if current is not None:
+                hunks.append(_make_hunk(len(hunks), current))
+            current = [line]
+        elif current is None:
+            if line.startswith(("Binary files", "GIT binary patch")):
+                raise ValueError(f"{relative} is binary; revert the whole file instead")
+            header.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        hunks.append(_make_hunk(len(hunks), current))
+    return "".join(header), hunks
+
+
+def _make_hunk(index: int, raw: list[str]) -> DiffHunk:
+    body = tuple(raw[1:])
+    return DiffHunk(index, raw[0].rstrip("\n"), body,
+                    sum(1 for line in body if line.startswith("+")),
+                    sum(1 for line in body if line.startswith("-")))
+
+
+def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
+    """The hunks of one changed, tracked file, for choosing which to revert."""
+    root = WorkspaceInspector._root(selected)
+    _safe_relative(root, relative)
+    return _file_diff(root, relative)[1]
+
+
+def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
+                 backup_root: PathInput) -> RevertRecord:
+    """Revert only the chosen hunks of one file (git apply -R), with the same
+    whole-file backup as revert_changes so Undo puts back exactly what was there.
+
+    The diff is re-read here, not trusted from the UI: when the file changed
+    since the hunks were shown, the patch no longer applies and nothing is touched.
+    """
+    root = WorkspaceInspector._root(selected)
+    source = _safe_relative(root, relative)
+    header, hunks = _file_diff(root, relative)
+    wanted = sorted(set(int(i) for i in indices))
+    if not wanted or any(i < 0 or i >= len(hunks) for i in wanted):
+        raise ValueError("no such hunk - refresh Changes and choose again")
+    backup = Path(backup_root).expanduser() / uuid4().hex
+    backup.mkdir(parents=True, exist_ok=True)
+    if source.is_file():
+        target = backup / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    patch = backup / ".onionmind-hunks.patch"
+    body = header + "".join(hunks[i].header + "\n" + "".join(hunks[i].lines) for i in wanted)
+    patch.write_bytes(body.encode("utf-8", "surrogateescape"))
+    for check in (("--check",), ()):
+        result = WorkspaceInspector._git(root, "apply", "-R", *check, "--whitespace=nowarn", str(patch))
+        if result.returncode != 0:
+            shutil.rmtree(backup, ignore_errors=True)
+            raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git apply failed")
+    patch.unlink()
+    record = RevertRecord(str(root), str(backup), (relative,), ())
+    (backup / ".onionmind-revert.json").write_text(
+        json.dumps({"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}),
+        encoding="utf-8",
+    )
+    return record
+
+
 def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
     """{path: (+added, -removed)} from `git diff --numstat HEAD`, empty when unknown."""
     try:
@@ -8765,6 +8857,62 @@ class BoundaryPanel(QFrame):
         return values
 
 
+class HunkDialog(QDialog):
+    """Pick which hunks of one file go back to the last commit; the rest stay."""
+
+    PREVIEW_LINES = 14
+
+    def __init__(self, path: str, hunks: list[Any], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Revert parts of {path}")
+        self.resize(640, 480)
+        layout = QVBoxLayout(self)
+        heading = QLabel(f"Revert parts of {path}")
+        heading.setObjectName("brand")
+        intro = QLabel("Tick the changes to put back to the last commit. Unticked changes stay on "
+                       "disk. Undo restores the whole file as it is now.")
+        intro.setObjectName("meta")
+        intro.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(intro)
+        self.list = QListWidget()
+        self.list.setAccessibleName(f"Changes in {path}")
+        self.list.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        for hunk in hunks:
+            lines = [line.rstrip("\n") for line in _field(hunk, "lines", ())]
+            shown = lines[: self.PREVIEW_LINES]
+            if len(lines) > len(shown):
+                shown.append(f"… {len(lines) - len(shown)} more line(s)")
+            added, removed = _field(hunk, "added", 0), _field(hunk, "removed", 0)
+            item = QListWidgetItem(f"{_field(hunk, 'header', '')}  +{added} / −{removed}\n" + "\n".join(shown))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, int(_field(hunk, "index", 0)))
+            self.list.addItem(item)
+        self.list.itemChanged.connect(lambda _item: self._sync())
+        layout.addWidget(self.list, 1)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.revert_button = QPushButton("Revert selected")
+        self.revert_button.setObjectName("primaryButton")
+        self.revert_button.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.revert_button)
+        layout.addLayout(buttons)
+        self._sync()
+
+    def selected(self) -> list[int]:
+        return [int(self.list.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def _sync(self) -> None:
+        count = len(self.selected())
+        self.revert_button.setEnabled(count > 0)
+        self.revert_button.setText(f"Revert {count} change(s)" if count else "Revert selected")
+
+
 class NetworkLogDialog(QDialog):
     """Every connection Onionmind made from this machine today, with exports.
 
@@ -10365,6 +10513,7 @@ class TerminalPane(QFrame):
 class InspectorPane(QWidget):
     refreshRequested = Signal()
     revertRequested = Signal(list)
+    hunksRequested = Signal(str)
     undoRequested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -10619,6 +10768,16 @@ class InspectorPane(QWidget):
                 revert.clicked.connect(lambda _checked=False, p=path: self.revertRequested.emit([p]))
                 row_layout.addWidget(label, 1)
                 row_layout.addWidget(revert)
+                if "M" in status and not set(status) & set("ADRCU?"):
+                    # Hunks only exist for a file that is in HEAD and still on disk.
+                    parts = QToolButton()
+                    parts.setObjectName("bareButton")
+                    parts.setText("Parts…")
+                    parts.setToolTip(f"Choose which changes in {path} to revert")
+                    parts.setAccessibleName(f"Revert parts of {path}")
+                    parts.clicked.connect(lambda _checked=False, p=path: self.hunksRequested.emit(p))
+                    row_layout.insertWidget(1, parts)    # before the revert icon
+
                 self.change_list.setItemWidget(item, row)
         self.undo_note.setVisible(revertable)
         self.revert_all_button.setVisible(revertable and len(changes) > 1)
@@ -12599,6 +12758,7 @@ class OnionmindWindow(QMainWindow):
         self.inspector.run_panel.stopRequested.connect(self.stop_active)
         self.inspector.netlog_button.clicked.connect(self.open_network_log)
         self.inspector.revertRequested.connect(self._revert_paths)
+        self.inspector.hunksRequested.connect(self._choose_hunks)
         self.inspector.undoRequested.connect(self._undo_revert)
         self.main_splitter.addWidget(self.inspector)
         self.main_splitter.setSizes([224, 860, 292])
@@ -16551,6 +16711,55 @@ class OnionmindWindow(QMainWindow):
             self.inspector.undo_bar.show()
             self.set_status(f"Reverted {len(changes)} file(s) to the last commit.")
             self.inspector.append_activity(f"Reverted {label} (git restore)", "machine")
+            self.refresh_workspace()
+
+        worker = self._start_worker(job)
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not revert: {message}"))
+
+    def _choose_hunks(self, path: str) -> None:
+        reader = getattr(self.desktop_core, "diff_hunks", None)
+        if not self.feature("undo") or not callable(reader) or not self.workspace:
+            return
+        if self.active_kind:
+            self.set_status("Stop the active run before reverting changes.")
+            return
+        workspace = self.workspace
+
+        def done(hunks: list[Any]) -> None:
+            if not hunks:
+                self.set_status(f"{path} has no changes to choose from.")
+                return
+            dialog = HunkDialog(path, hunks, self)
+            self._hunk_dialog = dialog
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected():
+                self._revert_hunks(path, dialog.selected())
+
+        worker = self._start_worker(lambda signals: reader(workspace, path))
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda message: self.set_status(f"Could not read the changes: {message}"))
+
+    def _revert_hunks(self, path: str, indices: list[int]) -> None:
+        reverter = getattr(self.desktop_core, "revert_hunks", None)
+        if not callable(reverter) or not self.workspace or self.active_kind:
+            return
+        workspace, backups = self.workspace, self.data_root / "reverts"
+        previous = self._revert_record
+        label = f"{len(indices)} change(s) in {path}"
+
+        def job(signals: WorkerSignals) -> Any:
+            del signals
+            record = reverter(workspace, path, indices, backups)
+            if previous is not None:
+                shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
+            return record
+
+        def done(record: Any) -> None:
+            self._revert_record = record
+            self.inspector.undo_label.setText(f"Reverted {label}")
+            self.inspector.undo_bar.show()
+            self.set_status(f"Reverted {label} to the last commit.")
+            self.inspector.append_activity(f"Reverted {label} (git apply -R)", "machine")
             self.refresh_workspace()
 
         worker = self._start_worker(job)

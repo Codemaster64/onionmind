@@ -1285,6 +1285,34 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 core.revert_changes(root, [{"status": "M", "path": "../escape.txt"}], backups)
 
+    def test_revert_hunks_puts_back_only_the_chosen_parts(self) -> None:
+        if shutil_which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as backups:
+            root = Path(tmp)
+            run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+            run("init", "-q")
+            run("config", "user.email", "t@example.invalid")
+            run("config", "user.name", "t")
+            original = "".join(f"line {n}\n" for n in range(1, 41))
+            (root / "f.txt").write_text(original, encoding="utf-8")
+            run("add", ".")
+            run("commit", "-q", "-m", "init")
+            edited = original.replace("line 3\n", "line three\n").replace("line 30\n", "line thirty\n")
+            (root / "f.txt").write_text(edited, encoding="utf-8")
+            hunks = core.diff_hunks(root, "f.txt")
+            self.assertEqual([(h.added, h.removed) for h in hunks], [(1, 1), (1, 1)])
+            record = core.revert_hunks(root, "f.txt", [1], backups)
+            now = (root / "f.txt").read_text(encoding="utf-8")
+            self.assertIn("line three\n", now)              # unticked: stays
+            self.assertIn("line 30\n", now)                 # ticked: back to HEAD
+            self.assertEqual(core.undo_revert(record), 1)
+            self.assertEqual((root / "f.txt").read_text(encoding="utf-8"), edited)
+            with self.assertRaises(ValueError):
+                core.revert_hunks(root, "f.txt", [5], backups)
+            with self.assertRaises(ValueError):
+                core.diff_hunks(root, "../escape.txt")
+
     def test_model_fit_and_node_version_gate(self) -> None:
         gib = 1024 ** 3
         self.assertEqual(core.model_fit(5 * gib, 12_288, None), "Fits")

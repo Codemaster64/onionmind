@@ -117,6 +117,9 @@ __all__ = [
     "RevertRecord",
     "revert_changes",
     "undo_revert",
+    "DiffHunk",
+    "diff_hunks",
+    "revert_hunks",
     "change_stats",
     "gpu_memory_mb",
     "gpu_name",
@@ -3100,6 +3103,95 @@ def undo_revert(record: RevertRecord) -> int:
         shutil.copy2(source, target)
         restored += 1
     return restored
+
+
+@dataclass(frozen=True)
+class DiffHunk:
+    index: int
+    header: str                                   # the "@@ -a,b +c,d @@ ..." line
+    lines: tuple[str, ...]                        # body lines, each with its +/-/space prefix
+    added: int
+    removed: int
+
+
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+
+def _file_diff(root: Path, relative: str) -> tuple[str, list[DiffHunk]]:
+    """(file header, hunks) of one tracked file's worktree diff against HEAD."""
+    result = WorkspaceInspector._git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                                     "-U3", "HEAD", "--", relative)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git diff failed")
+    text = result.stdout.decode("utf-8", "surrogateescape")
+    header: list[str] = []
+    hunks: list[DiffHunk] = []
+    current: Optional[list[str]] = None
+    for line in text.splitlines(keepends=True):
+        if _HUNK_HEADER.match(line):
+            if current is not None:
+                hunks.append(_make_hunk(len(hunks), current))
+            current = [line]
+        elif current is None:
+            if line.startswith(("Binary files", "GIT binary patch")):
+                raise ValueError(f"{relative} is binary; revert the whole file instead")
+            header.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        hunks.append(_make_hunk(len(hunks), current))
+    return "".join(header), hunks
+
+
+def _make_hunk(index: int, raw: list[str]) -> DiffHunk:
+    body = tuple(raw[1:])
+    return DiffHunk(index, raw[0].rstrip("\n"), body,
+                    sum(1 for line in body if line.startswith("+")),
+                    sum(1 for line in body if line.startswith("-")))
+
+
+def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
+    """The hunks of one changed, tracked file, for choosing which to revert."""
+    root = WorkspaceInspector._root(selected)
+    _safe_relative(root, relative)
+    return _file_diff(root, relative)[1]
+
+
+def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
+                 backup_root: PathInput) -> RevertRecord:
+    """Revert only the chosen hunks of one file (git apply -R), with the same
+    whole-file backup as revert_changes so Undo puts back exactly what was there.
+
+    The diff is re-read here, not trusted from the UI: when the file changed
+    since the hunks were shown, the patch no longer applies and nothing is touched.
+    """
+    root = WorkspaceInspector._root(selected)
+    source = _safe_relative(root, relative)
+    header, hunks = _file_diff(root, relative)
+    wanted = sorted(set(int(i) for i in indices))
+    if not wanted or any(i < 0 or i >= len(hunks) for i in wanted):
+        raise ValueError("no such hunk - refresh Changes and choose again")
+    backup = Path(backup_root).expanduser() / uuid4().hex
+    backup.mkdir(parents=True, exist_ok=True)
+    if source.is_file():
+        target = backup / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    patch = backup / ".onionmind-hunks.patch"
+    body = header + "".join(hunks[i].header + "\n" + "".join(hunks[i].lines) for i in wanted)
+    patch.write_bytes(body.encode("utf-8", "surrogateescape"))
+    for check in (("--check",), ()):
+        result = WorkspaceInspector._git(root, "apply", "-R", *check, "--whitespace=nowarn", str(patch))
+        if result.returncode != 0:
+            shutil.rmtree(backup, ignore_errors=True)
+            raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git apply failed")
+    patch.unlink()
+    record = RevertRecord(str(root), str(backup), (relative,), ())
+    (backup / ".onionmind-revert.json").write_text(
+        json.dumps({"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}),
+        encoding="utf-8",
+    )
+    return record
 
 
 def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
