@@ -76,6 +76,19 @@ jobs:
           sh -n onionmind-install.cmd
           printf 'q\n' | sh onionmind-install.cmd --dry-run
 
+      - name: The updater installs into a fresh folder, audits clean, then finds it current
+        # A real run, not a text check: it resolves main, downloads the
+        # sources, builds the desktop runtime and writes the launchers.
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/onionmind-update"
+          bash update-onionmind.sh --install-dir "$dir" --allow-network --yes
+          bash update-onionmind.sh --install-dir "$dir" --audit | tee audit.txt
+          if grep -E '^  (onionmind|dsh-|desktop runtime)' audit.txt | grep -E 'MISSING|OUTDATED'; then exit 1; fi
+          bash update-onionmind.sh --install-dir "$dir" --allow-network --yes | tee again.txt
+          grep -q 'skipping pip' again.txt
+          head -3 /usr/local/bin/onionmind
+
   windows:
     name: Windows standalone bundle
     runs-on: windows-latest
@@ -133,6 +146,19 @@ jobs:
             Write-Host "Failed suites: $($failed -join ', ')"
             exit 1
           }
+
+      - name: The updater installs into a fresh folder and audits clean
+        shell: powershell
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'onionmind-update'
+          .\update-onionmind.ps1 -InstallDir $dir -AllowDirectNetwork -Yes
+          .\update-onionmind.ps1 -InstallDir $dir -Audit
+          if ($LASTEXITCODE -ne 0) { Write-Host "audit exit $LASTEXITCODE"; exit 1 }
+          .\update-onionmind.ps1 -InstallDir $dir -AllowDirectNetwork -Yes
+
+      - name: The universal installer's Windows half dry-runs
+        shell: cmd
+        run: echo q| onionmind-install.cmd --dry-run
 
       - name: Validate desktop build inputs
         shell: powershell
