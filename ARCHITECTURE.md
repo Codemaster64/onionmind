@@ -27,7 +27,11 @@ Onionmind
 ├── Core inference + CLI + agent      onionmind.py            (no Qt, no Android)
 ├── Desktop workbench (PySide6)
 │   ├── logic, no Qt import           onionmind_desktop_core.py   (unit-tested)
-│   └── Qt widget tree + workers      onionmind_desktop.py
+│   └── Qt widget tree + workers      onionmind_desktop.py  (the window; re-exports the parts)
+│       ├── palette, style, helpers   onionmind_desktop_theme.py
+│       ├── reusable widgets          onionmind_desktop_widgets.py
+│       ├── bridges + side panes      onionmind_desktop_panes.py
+│       └── settings + model dialogs  onionmind_desktop_dialogs.py
 ├── Terminal UI (Textual)            onionmind_tui.py   (reuses the desktop core's SessionStore)
 ├── Android app (Kotlin)             android/
 │   ├── platform-free core            core/  (Agent, Socks5, ModelSource, …)
@@ -119,6 +123,15 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   all plug into it through their `*Bridge` classes, so its fan-in is the
   design, not drift; `ThinkingStreamFilter` / `ThinkingIndicator` implement
   the buffer-until-sanitized *Thinking* state.
+
+  The UI is five files that import in one direction: `onionmind_desktop_theme.py`
+  (constants, palette, style sheet, text helpers, icons, fonts, workers, motion)
+  ← `onionmind_desktop_widgets.py` (reusable widgets and overlays) ←
+  `onionmind_desktop_panes.py` (the `*Bridge` classes, left rail, terminal,
+  inspector) ← `onionmind_desktop_dialogs.py` (model manager, features,
+  settings) ← `onionmind_desktop.py` (`OnionmindWindow`, `run`). The window module
+  re-exports every name from the other four, so `onionmind_desktop.X` keeps
+  working. In tests, patch a name in the module that calls it.
 
 - **`onionmind.py`** — inference stays here. The desktop calls `turn_stream` etc.;
   it does not reimplement inference or Tor.
@@ -228,7 +241,7 @@ feature → add the check that proves it, or mark it unverified
 |---|---|---|
 | Change inference / Tor / search / agent egress | `onionmind.py` | `python build.py`, `tests/test_backends.py`, `test_coding_agent.py`, `test_privacy_contracts.py` |
 | Change desktop logic (settings, sessions, update, git snapshot) | `onionmind_desktop_core.py` | `tests/test_desktop_core.py` |
-| Change desktop UI | `onionmind_desktop.py` | `tools/build-desktop.ps1 -Check`, the `test_desktop_*_ui.py` set |
+| Change desktop UI | `onionmind_desktop.py` (window) or the `onionmind_desktop_{theme,widgets,panes,dialogs}.py` part that owns the widget, then `python build.py` | `tools/build-desktop.ps1 -Check`, the `test_desktop_*_ui.py` set |
 | Change Android behaviour | `android/core` (logic) / `android/app` (shell) | the Kotlin `test/` suites |
 | Change the USB image | `usb/` | `usb/tests/` |
 | Change an installer | **source** (`onionmind.py`/icon/logo) — never the embedded copy | `python build.py && python build.py --check` |

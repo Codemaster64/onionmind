@@ -56,7 +56,7 @@ jobs:
                        tests/test_desktop_core.py tests/test_installer_contracts.py \
                        tests/test_release_version_contracts.py tests/test_desktop_ui.py \
                        tests/test_desktop_thinking_ui.py tests/test_desktop_tor_ui.py \
-                       tests/test_desktop_v2_ui.py; do
+                       tests/test_desktop_v2_ui.py tests/test_e2e_smoke.py; do
             echo "::group::$suite"
             python -m unittest "$suite" || failed+=("$suite")
             echo "::endgroup::"

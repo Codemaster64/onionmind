@@ -20,6 +20,10 @@ $RevisionFile = ".onionmind-source-revision"
 $PythonSources = @(
     "onionmind.py",
     "onionmind_desktop.py",
+    "onionmind_desktop_theme.py",
+    "onionmind_desktop_widgets.py",
+    "onionmind_desktop_panes.py",
+    "onionmind_desktop_dialogs.py",
     "onionmind_desktop_core.py"
 )
 $RuntimeAssets = @(
@@ -265,6 +269,10 @@ $NuitkaArguments = @(
     "--product-version=1.4.0",
     "--include-module=onionmind",
     "--include-module=onionmind_desktop_core",
+    "--include-module=onionmind_desktop_theme",
+    "--include-module=onionmind_desktop_widgets",
+    "--include-module=onionmind_desktop_panes",
+    "--include-module=onionmind_desktop_dialogs",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor-search.js')=dsh-onionmind-tor-search.js",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor.patch.yml')=dsh-onionmind-tor.patch.yml",
     "--include-data-files=$(Join-Path $RepoRoot 'onionmind.ico')=onionmind.ico",

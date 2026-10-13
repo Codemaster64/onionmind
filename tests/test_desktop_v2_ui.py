@@ -30,6 +30,7 @@ try:
     from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QWidget
 
     import onionmind_desktop as ui
+    import onionmind_desktop_theme as theme
     import onionmind_desktop_core as desktop_core
 
     QT_AVAILABLE = True
@@ -862,7 +863,7 @@ class KeyboardTests(V2Base):
             self.app.processEvents()
             window._question_shortcut()
             self.assertEqual(opened, ["Keyboard"])
-            self.assertTrue(ui._SYSTEM_MOTION_PROBE)
+            self.assertTrue(theme._SYSTEM_MOTION_PROBE)
         finally:
             ui.set_system_motion_probe(False)
             self._close(window)

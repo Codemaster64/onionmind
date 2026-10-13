@@ -52,4 +52,7 @@ Repository = "https://github.com/Codemaster64/onionmind"
 
 [tool.setuptools]
 include-package-data = false
-py-modules = ["onionmind", "onionmind_desktop", "onionmind_desktop_core", "onionmind_tui"]
+py-modules = [
+    "onionmind", "onionmind_desktop", "onionmind_desktop_core", "onionmind_desktop_theme",
+    "onionmind_desktop_widgets", "onionmind_desktop_panes", "onionmind_desktop_dialogs", "onionmind_tui",
+]

@@ -30,6 +30,7 @@ try:
     )
 
     import onionmind_desktop as ui
+    import onionmind_desktop_theme as theme
     import onionmind_desktop_core as desktop_core
 
     QT_AVAILABLE = True
@@ -1166,7 +1167,7 @@ class WorkbenchPreferencesTests(unittest.TestCase):
                 window.set_preference("reduce_motion", "full")
                 self.assertTrue(ui._ui_animations_enabled())
                 window.set_preference("reduce_motion", "system")
-                self.assertIsNone(ui._MOTION_OVERRIDE)
+                self.assertIsNone(theme._MOTION_OVERRIDE)
 
                 window.set_preference("text_scale", "system")
                 if base_size > 0:

@@ -193,6 +193,26 @@ class InstallerContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_every_desktop_module_is_shipped_and_updated(self) -> None:
+        """The desktop UI is split across sibling modules; a part left out of any
+        list installs or updates into an app that dies on import."""
+        modules = sorted(path.name for path in ROOT.glob("onionmind_desktop*.py"))
+        self.assertGreaterEqual(len(modules), 6)
+        build = self.text("build.py")
+        bundle = self.text("tools/build-desktop.ps1")
+        pyproject = self.text("pyproject.toml")
+        updaters = {name: self.text(name) for name in ("update-onionmind.sh", "update-onionmind.ps1")}
+        for module in modules:
+            with self.subTest(module=module):
+                for installer in ("onionmind-setup.cmd", "install-onionmind.sh"):
+                    self.assertRegex(build, rf'\("{re.escape(module)}",\s+"{re.escape(installer)}"')
+                self.assertIn(f'"{module}"', bundle)
+                self.assertIn(f'"{module[:-3]}"', pyproject)
+                for name, updater in updaters.items():
+                    # Listed for download and syntax-checked before replacement.
+                    self.assertGreaterEqual(updater.count(module), 2, name)
+        self.assertEqual(self.text("install-onionmind.sh").count('"$DIR/onionmind_desktop'), len(modules) * 2)
+
     def test_desktop_runtime_is_used_only_after_an_import_check(self) -> None:
         for name in (
             "onionmind-setup.cmd",

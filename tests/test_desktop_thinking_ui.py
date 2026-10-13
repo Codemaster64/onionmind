@@ -15,9 +15,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication
     import onionmind_desktop as desktop
+    import onionmind_desktop_widgets as widgets
 except ModuleNotFoundError:
     QApplication = None
     desktop = None
+    widgets = None
 
 
 @unittest.skipIf(desktop is None, "PySide6 is not installed in this test environment")
@@ -179,7 +181,7 @@ class ThinkingIndicatorTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_reduced_motion_keeps_a_static_textual_indicator(self) -> None:
-        with mock.patch.object(desktop, "_ui_animations_enabled", return_value=False):
+        with mock.patch.object(widgets, "_ui_animations_enabled", return_value=False):
             indicator = desktop.ThinkingIndicator()
         indicator.show()
         indicator.start()
