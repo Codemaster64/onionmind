@@ -1330,23 +1330,25 @@ def _ui_animations_enabled() -> bool:
     return True
 
 
-def _apply_native_dark_title_bar(window: Any) -> None:
-    """Pin the Windows title bar to dark regardless of the system scheme.
+def _apply_native_dark_title_bar(window: Any, dark: Optional[bool] = None) -> None:
+    """Match the Windows title bar to the app's theme, not the system scheme.
 
-    The workbench is dark by design on every platform, so on a light-mode
-    Windows install the native frame would be the one bright surface in the
-    room. DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20; 19 on pre-2004 builds)
-    matches it to the body. Purely cosmetic: every failure path is silent and
-    the app runs identically without it.
+    Otherwise a light-mode Windows install puts a bright frame around the dark
+    workbench, and a dark one a dark frame around the light theme.
+    DWMWA_USE_IMMERSIVE_DARK_MODE (attribute 20; 19 on pre-2004 builds) sets
+    it. Purely cosmetic: every failure path is silent and the app runs
+    identically without it.
     """
     if os.name != "nt":
         return
+    if dark is None:
+        dark = current_theme() == "dark"
     try:
         import ctypes
 
         for attribute in (20, 19):
             if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                int(window.winId()), attribute, ctypes.byref(ctypes.c_int(1)), 4
+                int(window.winId()), attribute, ctypes.byref(ctypes.c_int(1 if dark else 0)), 4
             ) == 0:
                 return
     except (AttributeError, OSError, TypeError, ValueError):
@@ -10768,6 +10770,7 @@ class OnionmindWindow(QMainWindow):
         self._applied_look = look
         if theme != current_theme():
             set_theme(theme)
+            _apply_native_dark_title_bar(self)
             _retheme_icons(self)
             self.tor_status._update_state_icon()
             self.model_status.refresh_theme()

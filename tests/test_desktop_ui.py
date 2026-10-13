@@ -1810,6 +1810,19 @@ class NativeTitleBarTests(unittest.TestCase):
             [c.args[1] for c in dwm.DwmSetWindowAttribute.call_args_list], [20, 19]
         )
 
+    def test_the_frame_follows_the_light_theme(self) -> None:
+        window = mock.Mock()
+        window.winId.return_value = 4242
+        dwm = mock.Mock()
+        dwm.DwmSetWindowAttribute.return_value = 0
+        with mock.patch.object(ui.os, "name", "nt"), \
+             mock.patch("ctypes.windll", new=mock.Mock(dwmapi=dwm), create=True):
+            ui._apply_native_dark_title_bar(window, dark=False)
+            light = dwm.DwmSetWindowAttribute.call_args.args[2]._obj.value
+            ui._apply_native_dark_title_bar(window, dark=True)
+            dark = dwm.DwmSetWindowAttribute.call_args.args[2]._obj.value
+        self.assertEqual((light, dark), (0, 1))
+
     def test_non_windows_platforms_touch_nothing(self) -> None:
         window = mock.Mock()
         with mock.patch.object(ui.os, "name", "posix"):
