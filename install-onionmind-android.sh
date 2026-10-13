@@ -226,19 +226,38 @@ def _tor_browser_roots():
     return unique
 
 
-def _await_tor_ready(timeout, stop_event=None):
-    """Block until our managed tor answers on a SOCKS port, or explain why not."""
+def _bootstrapped(notices):
+    """True once tor's notice log says it has a working circuit."""
+    try:
+        with open(notices, encoding="utf-8", errors="replace") as handle:
+            return "Bootstrapped 100%" in handle.read()
+    except OSError:
+        return False
+
+
+def _await_tor_ready(timeout, stop_event=None, notices=None):
+    """Block until our managed tor answers on a SOCKS port, or explain why not.
+
+    With `notices` (the log of a tor we launched) it also waits for
+    "Bootstrapped 100%": the SOCKS port opens at once, but a cold tor needs
+    one to two minutes to fetch the directory and build a circuit (110 s
+    measured on a cold Linux start), and tor_check() asked
+    before then failed every first start. At the deadline the port is returned
+    anyway; tor_check() still decides, and still fails closed."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if stop_event is not None and stop_event.is_set():
             stop_managed_tor()
             raise RuntimeError("Background Tor start was stopped.")
         port = tor_proxy_port()
-        if port:
+        if port and (notices is None or _bootstrapped(notices)):
             return port
         if _managed_tor_process is not None and _managed_tor_process.poll() is not None:
             break
         time.sleep(0.25)
+    port = tor_proxy_port() if notices is not None else None
+    if port and (_managed_tor_process is None or _managed_tor_process.poll() is None):
+        return port
     stop_managed_tor()
     raise RuntimeError("The background Tor process did not become ready.")
 
@@ -264,7 +283,7 @@ def _linux_tor_binary():
     )
 
 
-def _start_darwin_tor(stop_event=None, timeout=30):
+def _start_darwin_tor(stop_event=None, timeout=180):
     """Launch Homebrew's tor with a generated torrc this session owns (macOS).
 
     The Tor Browser bundle layout is deliberately not parsed here; `brew
@@ -277,7 +296,7 @@ def _start_darwin_tor(stop_event=None, timeout=30):
         stop_event, timeout)
 
 
-def _start_linux_tor(stop_event=None, timeout=30):
+def _start_linux_tor(stop_event=None, timeout=180):
     """Launch the distribution's tor as this user, under a torrc this session owns.
 
     The system service (tor.service) is still preferred: when it listens,
@@ -292,7 +311,7 @@ def _start_linux_tor(stop_event=None, timeout=30):
         stop_event, timeout)
 
 
-def _start_owned_tor(tor, install_hint, stop_event=None, timeout=30):
+def _start_owned_tor(tor, install_hint, stop_event=None, timeout=180):
     """Run `tor` under a generated torrc. It mirrors Android's ProcessManager
     (SOCKS on 9050, a private data dir, no control cookie), and
     stop_managed_tor() still only ever touches the process started here."""
@@ -306,23 +325,33 @@ def _start_owned_tor(tor, install_hint, stop_event=None, timeout=30):
     data = os.path.join(os.path.expanduser("~"), ".onionmind", "tor")
     os.makedirs(data, exist_ok=True)
     torrc = os.path.join(data, "torrc")
+    notices = os.path.join(data, "notices.log")
+    try:
+        os.remove(notices)                       # this start's progress only
+    except OSError:
+        pass
     with open(torrc, "w", encoding="utf-8") as handle:
         handle.write(
             "SocksPort 9050\n"
             f"DataDirectory \"{data}\"\n"
             "CookieAuthentication 0\n"
             "AvoidDiskWrites 1\n"
+            # Tor takes this path unquoted and splits on spaces; a home folder
+            # with one just skips the bootstrap wait.
+            + (f"Log notice file {notices}\n" if not re.search(r"\s", notices) else "")
         )
+    if re.search(r"\s", notices):
+        notices = None
     _managed_tor_process = subprocess.Popen(
         [tor, "-f", torrc],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return _await_tor_ready(timeout, stop_event)
+    return _await_tor_ready(timeout, stop_event, notices=notices)
 
 
-def start_tor_hidden(timeout=30, stop_event=None):
+def start_tor_hidden(timeout=180, stop_event=None):
     """Start Tor Browser's Tor daemon without opening a browser or console window.
 
     Called only after the user opts into Tor search. Existing Tor proxies are
