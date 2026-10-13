@@ -278,8 +278,8 @@ denies Onionmind's own MCP search tools.
 **What v2 writes to disk**, all under the desktop data folder:
 
 - `settings.json` gains `features`, `model_by_mode`, `agent_rules` (per
-  project), `preset`/`preset_texts`, `appearance`, `lock` (with the
-  passphrase stored only as a salted scrypt hash) and `setup_done`.
+  project), `preset`/`preset_texts`, `appearance`, `lock` (auto-delete and
+  idle-lock times; the lock asks for the Encryption password) and `setup_done`.
 - `network-log.jsonl` - one line per connection that left the machine
   (time, route, destination; never a prompt or a query), written **only
   while the network-log or boundary-map feature is on**.
@@ -287,6 +287,49 @@ denies Onionmind's own MCP search tools.
   them back; replaced by the next revert and removed on Undo.
 
 Wipe everything shreds the network log and the revert copies with the rest.
+
+**Encryption at rest.** Every file above, and every session, is encrypted
+with AES-256-GCM (pyca/`cryptography`) under one random 256-bit data key.
+`vault.json` in the data folder is the only plaintext file and holds no
+secret: the key store's name, or the password-wrapped key. Where the key lives:
+
+- **No password (default):** in the operating system's key store for this
+  user - Windows DPAPI (`device-key.dpapi`, sealed to the account),
+  the macOS login Keychain, or the desktop keyring through `secret-tool`
+  (GNOME Keyring/KWallet) on Linux. Linux without a keyring falls back to
+  `~/.config/onionmind/keys/<id>.key` (mode 0600), and Settings says that only
+  a password fully protects it. A copied disk, a backup or another account
+  reads nothing; a program running as this same user could ask the key store
+  for the key, as it could read your session in memory.
+- **Password (optional, Settings → Privacy → Encryption):** the data key is
+  wrapped with scrypt (N=2^15, r=8, p=1) + AES-GCM and removed from the key
+  store. Onionmind asks for the password when it opens (the desktop with a
+  dialog, the TUI with a prompt). Changing it rewraps the key; nothing is
+  re-encrypted. **A forgotten password cannot be recovered**: the unlock
+  screen offers to erase the data and start over. The idle lock asks for the
+  same password; the key stays in memory while the app runs.
+- **Upgrading:** the first start of this version encrypts any plaintext file
+  already in the folder in place (the plaintext bytes are overwritten first,
+  with `shred_file`'s limits on SSDs and copy-on-write filesystems). A lock
+  passphrase from an older version is offered as the new password.
+- **Fail closed:** encrypted data is never read or overwritten as plaintext.
+  Without `cryptography` the app refuses to open an encrypted folder and only
+  runs unencrypted (with a visible notice) when nothing was encrypted yet; a
+  missing key is reported, never silently replaced.
+- **Outside the vault:** the agent writes its network log
+  (`~/.onionmind/agent-net.log`) in plaintext while it runs, because it has no
+  key; the desktop moves it into the encrypted log (or drops it when logging is
+  off) and shreds it when the run ends. qwen-code keeps its own chat history
+  under `~/.qwen` in plaintext, because qwen reads it back. Models, project
+  folders, Tor's state and the context-size number in `~/.onionmind/code-ctx`
+  are not encrypted either. Full-disk encryption covers all of those.
+
+Verified by `tests/test_vault.py` (round trips, migration, password set,
+change and remove, wrong password, lost key, erase, tampering, revert copies,
+the agent log, the desktop unlock flow and the TUI prompt), and live on Linux
+against GNOME Keyring: the running app wrote only ciphertext and the key went
+into, then out of, the keyring. DPAPI and the Keychain are exercised by the
+same tests on the Windows and macOS CI runners.
 
 **New local processes:** `nvidia-smi` (GPU memory, as the catalog already
 used), `git restore`/`git diff --numstat` (undo), `node --version` (setup),
@@ -533,9 +576,27 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   served only under a high-entropy capability URL handed to this app's own
   WebView, and the JSON API additionally requires a header token that never
   appears in a URL; both secrets are random per app start and not persisted.
+- **Encryption at rest:** the conversation, the network log and every
+  SharedPreferences value (preferences, feature flags, the active and custom
+  models) are AES-256-GCM encrypted in the desktop's file format
+  (`core/.../Vault.kt`). The data key is wrapped by an AES key created inside
+  the **Android Keystore** (`KeystoreWrap`; it never leaves the keystore and is
+  not in backups, so a backup or a copied data folder reads nothing). An
+  optional password (Settings → Encryption) wraps the key with
+  PBKDF2-HMAC-SHA256 (310,000 rounds) instead and deletes the Keystore copy;
+  the app then starts on an unlock screen, and every data route answers 423
+  until `/api/vault/unlock`. A forgotten password cannot be recovered: the
+  unlock screen erases the conversation, log and settings (models stay) after
+  a confirmation. An older install's plaintext is encrypted on first start.
+  Outside the vault: model files, Tor's state and llama-server's own log
+  (truncated each start; load and request lines, no prompts without `-v`).
+  Verified by `VaultTest` (12 JVM tests) and on an Android 14 emulator:
+  upgrade from the previous APK (every seeded secret gone from disk, values
+  `enc1:` and files `OMENC1`), set password, restart to the unlock screen,
+  wrong then right password, erase.
 - **Workbench preferences:** text size, the send key, and animation
   (`/api/preferences`, behind the same token) are presentation-only, persist
-  in the app's private storage, and never cross the network. The Tor boundary
+  (encrypted) in the app's private storage, and never cross the network. The Tor boundary
   and the per-turn search permission are deliberately not preferences.
 - **Workbench v2 features:** 14 of the desktop's 24 flags, adapted for a phone.
   They use the same keys, and every flag is off except "Ask before searching
@@ -635,7 +696,7 @@ means changing **the host**, not just this tool.
 | Ad networks, data brokers | Onionmind search uses Tor and local inference emits no telemetry; normal host applications remain outside this boundary. |
 | Your ISP / network admin | They see *that* you use Tor, not what you search. Bridges hide even that. |
 | The search engine | Handled — onion service, fresh circuit per query, no account |
-| Someone with your disk | Full-disk encryption, encrypted swap. Tor is irrelevant here. |
+| Someone with your disk | Onionmind's own data is encrypted (see Encryption at rest); a password keeps the key off the disk too. Full-disk encryption and encrypted swap for everything else. Tor is irrelevant here. |
 | A global passive adversary | Traffic-correlation attacks defeat Tor. Accept this or don't do the thing. |
 
 Most privacy advice is wasted effort aimed at the wrong row.

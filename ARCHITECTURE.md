@@ -110,7 +110,10 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   command (`HarnessSpec`, `HarnessCommand`, `HarnessAvailability`), and the
   self-updater (`BundleUpdater`, `UpdateManifest`, `parse_update_manifest`,
   `update_state`), and the remote-compute SSH tunnel (`SshTunnel`,
-  `parse_ssh_target`, `ssh_tunnel_argv`, `load_remote_settings`). **All of this is covered by `tests/test_desktop_core.py`** — if
+  `parse_ssh_target`, `ssh_tunnel_argv`, `load_remote_settings`), and encryption
+  at rest (`open_vault`, `Vault`, the key stores `DpapiKeystore`/`MacKeychain`/
+  `SecretServiceKeystore`/`FileKeystore`; every store above takes `vault=`,
+  tested in `tests/test_vault.py`). **All of this is covered by `tests/test_desktop_core.py`** — if
   you add logic here, add a test; don't reach for Qt.
 
 - **`onionmind_desktop.py`** — the Qt widget tree and async workers. Model
@@ -243,5 +246,6 @@ feature → add the check that proves it, or mark it unverified
 | Change desktop logic (settings, sessions, update, git snapshot) | `onionmind_desktop_core.py` | `tests/test_desktop_core.py` |
 | Change desktop UI | `onionmind_desktop.py` (window) or the `onionmind_desktop_{theme,widgets,panes,dialogs}.py` part that owns the widget, then `python build.py` | `tools/build-desktop.ps1 -Check`, the `test_desktop_*_ui.py` set |
 | Change Android behaviour | `android/core` (logic) / `android/app` (shell) | the Kotlin `test/` suites |
+| Change encryption at rest | `onionmind_desktop_core.py` (vault) and `android/core/.../Vault.kt` - keep the file format identical | `tests/test_vault.py`, `VaultTest` |
 | Change the USB image | `usb/` | `usb/tests/` |
 | Change an installer | **source** (`onionmind.py`/icon/logo) — never the embedded copy | `python build.py && python build.py --check` |

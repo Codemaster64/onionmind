@@ -237,10 +237,10 @@ fi
 if [ "$ROLE" != server ]; then
   plan todo "Write the Onionmind program files (always refreshed)"
   if [ -f "$DIR/desktop-env/.onionmind-desktop-ready" ] &&
-     "$DIR/desktop-env/bin/python" -c 'import requests, socks, PySide6.QtWidgets' >/dev/null 2>&1; then
+     "$DIR/desktop-env/bin/python" -c 'import requests, socks, PySide6.QtWidgets, cryptography.hazmat.primitives.ciphers.aead' >/dev/null 2>&1; then
     plan ok "Native desktop runtime (PySide6)"
   else
-    plan todo "Native desktop runtime (PySide6, ~50 MB from PyPI)"
+    plan todo "Native desktop runtime (PySide6 + cryptography, ~55 MB from PyPI)"
   fi
   plan todo "Commands and desktop launcher (always refreshed)"
 fi
@@ -2971,6 +2971,22 @@ __all__ = [
     "describe_ssh_failure",
     "load_remote_settings",
     "SshTunnel",
+    "VAULT_FILE",
+    "Vault",
+    "VaultError",
+    "WrongPassword",
+    "KeystoreUnavailable",
+    "encryption_available",
+    "open_vault",
+    "vault_header",
+    "vault_needs_password",
+    "encrypt_data_folder",
+    "erase_data_folder",
+    "keystore_for",
+    "is_encrypted",
+    "read_data_file",
+    "write_data_file",
+    "absorb_agent_net_log",
 ]
 
 
@@ -3125,9 +3141,22 @@ def _utc_now() -> str:
     )
 
 
-def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
-    """Write a JSON object next to its destination, then atomically replace it."""
+def _atomic_write_json(path: Path, value: Mapping[str, Any], vault: Any = None) -> None:
+    """Write a JSON object next to its destination, then atomically replace it.
 
+    With a vault the file is written encrypted. Without one, an encrypted file
+    is never overwritten with plaintext: that would be a silent downgrade."""
+
+    if vault is not None:
+        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        _atomic_write_bytes(path, vault.encrypt(text.encode("utf-8")))
+        return
+    try:
+        with path.open("rb") as existing:
+            if is_encrypted(existing.read(len(_ENC_MAGIC))):
+                raise VaultError(f"{path.name} is encrypted; it can only be written through the open vault")
+    except OSError:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     handle = None
@@ -3191,12 +3220,21 @@ def _quarantine_corrupt(path: Path) -> Path | None:
     return destination
 
 
-def _read_json_object(path: Path) -> dict[str, Any] | None:
+def _read_json_object(path: Path, vault: Any = None) -> dict[str, Any] | None:
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except FileNotFoundError:
+        raw = path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError):
         return None
+    if is_encrypted(raw):
+        # Without the right key the file is unreadable, not corrupt: leave it.
+        if vault is None:
+            return None
+        try:
+            raw = vault.decrypt(raw)
+        except VaultError:
+            return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
         _quarantine_corrupt(path)
         return None
@@ -3214,14 +3252,16 @@ class SettingsStore:
         self,
         path: PathInput,
         defaults: Mapping[str, Any] | None = None,
+        vault: Any = None,
     ) -> None:
         self.path = Path(path).expanduser()
+        self.vault = vault
         if defaults is not None and not isinstance(defaults, Mapping):
             raise TypeError("settings defaults must be a mapping")
         self._defaults = copy.deepcopy(dict(defaults or {}))
 
     def load(self) -> dict[str, Any]:
-        loaded = _read_json_object(self.path)
+        loaded = _read_json_object(self.path, self.vault)
         result = copy.deepcopy(self._defaults)
         if loaded is not None:
             result.update(loaded)
@@ -3232,7 +3272,7 @@ class SettingsStore:
             raise TypeError("settings must be a mapping")
         result = copy.deepcopy(self._defaults)
         result.update(copy.deepcopy(dict(settings)))
-        _atomic_write_json(self.path, result)
+        _atomic_write_json(self.path, result, self.vault)
         return copy.deepcopy(result)
 
 
@@ -3865,9 +3905,10 @@ def _message_dicts(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
 class SessionStore:
     """Own creation, persistence, discovery, and archiving of local sessions."""
 
-    def __init__(self, root: PathInput) -> None:
+    def __init__(self, root: PathInput, vault: Any = None) -> None:
         self.root = Path(root).expanduser()
         self.archive_root = self.root / "archive"
+        self.vault = vault
 
     @staticmethod
     def _validate_id(session_id: str) -> str:
@@ -3946,12 +3987,12 @@ class SessionStore:
             created_at=now,
             updated_at=now,
         )
-        _atomic_write_json(self._path(session.id), session.to_dict())
+        _atomic_write_json(self._path(session.id), session.to_dict(), self.vault)
         return session
 
     def load(self, session_id: str, *, archived: bool = False) -> ChatSession | None:
         path = self._path(session_id, archived=archived)
-        value = _read_json_object(path)
+        value = _read_json_object(path, self.vault)
         if value is None:
             return None
         try:
@@ -3985,7 +4026,7 @@ class SessionStore:
         )
         target = self._path(normalized.id, archived=normalized.archived_at is not None)
         payload = normalized.to_dict()
-        stored = _read_json_object(target)
+        stored = _read_json_object(target, self.vault)
         if stored is not None and stored.get("messages") == payload["messages"]:
             # Sessions list newest-conversation-first, so a write that adds no
             # history - a rename, a model swap, re-saving one just opened -
@@ -3994,7 +4035,7 @@ class SessionStore:
             if isinstance(kept, str) and kept:
                 normalized = replace(normalized, updated_at=kept)
                 payload["updated_at"] = kept
-        _atomic_write_json(target, payload)
+        _atomic_write_json(target, payload, self.vault)
 
         # Keep the mutable value object useful to callers that retain it.
         session.title = normalized.title
@@ -4030,7 +4071,7 @@ class SessionStore:
         session.updated_at = now
         session.archived_at = now
         destination = self._path(session.id, archived=True)
-        _atomic_write_json(destination, session.to_dict())
+        _atomic_write_json(destination, session.to_dict(), self.vault)
         try:
             self._path(session.id).unlink()
         except FileNotFoundError:
@@ -5797,14 +5838,544 @@ def verify_passphrase(passphrase: str, record: Mapping[str, Any]) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+# --- Encryption at rest --------------------------------------------------
+#
+# Everything under the desktop data folder (settings, sessions, the network
+# log, revert backups) is AES-256-GCM encrypted with one random data key.
+# vault.json beside it is the only plaintext file and holds no secret: which
+# key store keeps the data key, or - once the person sets a password - the
+# data key wrapped with a key derived from that password (scrypt). A password
+# is optional; without one the operating system's key store releases the key
+# to this user account, so a copied disk or another account reads nothing,
+# but programs running as this same user could ask for it. With a password the
+# key is nowhere on disk in usable form, and a forgotten password means the
+# data is gone: there is no recovery, by design.
+
+VAULT_FILE = "vault.json"
+_ENC_MAGIC = b"OMENC1\n"
+_ENC_LINE = "enc1:"
+_ENC_AAD = b"onionmind/v1"
+_NONCE_BYTES = 12
+_SCRYPT = {"n": 2 ** 15, "r": 8, "p": 1}
+
+
+class VaultError(RuntimeError):
+    """The data folder's encryption could not be opened or changed."""
+
+
+class WrongPassword(VaultError):
+    pass
+
+
+class KeystoreUnavailable(VaultError):
+    pass
+
+
+def encryption_available() -> bool:
+    """True when the `cryptography` package (AES-GCM) can be imported."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _aesgcm(key: bytes) -> Any:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    return AESGCM(key)
+
+
+def _key_tag(root: Path) -> str:
+    """A stable, non-identifying name for one data folder's key."""
+    return hashlib.sha256(str(Path(root).expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+class FileKeystore:
+    """Fallback: a key file only this user can read, kept outside the data folder.
+
+    It stops another account and a copied data folder, not a program running as
+    this user - the settings say so and recommend a password."""
+
+    name = "file"
+    label = "a key file only your user account can read"
+    strong = False
+
+    def __init__(self, tag: str, directory: Optional[Path] = None) -> None:
+        base = directory or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "onionmind" / "keys"
+        self.path = base / f"{tag}.key"
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = bytes.fromhex(self.path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.path.parent, 0o700)
+        except OSError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(key.hex())
+        os.chmod(self.path, 0o600)
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class SecretServiceKeystore:
+    """Linux desktops: GNOME Keyring / KWallet through `secret-tool` (libsecret).
+    The key goes in on stdin, never on a command line."""
+
+    name = "secret-service"
+    label = "your desktop keyring (Secret Service)"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.attributes = ["service", "onionmind", "key", tag]
+
+    def _run(self, *args: str, data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["secret-tool", *args, *self.attributes], input=data, capture_output=True,
+                                  text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"secret-tool failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run("lookup")
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        result = self._run("store", "--label=Onionmind data key", data=key.hex())
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the keyring did not keep the key")
+
+    def delete(self) -> None:
+        self._run("clear")
+
+
+class MacKeychain:
+    """macOS: the login keychain through `security`. Commands go in on stdin
+    (`security -i`), so the key never appears in a process listing."""
+
+    name = "keychain"
+    label = "the macOS Keychain"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.service, self.account = "Onionmind", f"data-key-{tag}"
+
+    def _run(self, args: list[str], data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["security", *args], input=data, capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"security failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run(["find-generic-password", "-s", self.service, "-a", self.account, "-w"])
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        command = (f"add-generic-password -U -s {self.service} -a {self.account} "
+                   f"-l \"Onionmind data key\" -w {key.hex()}\n")
+        result = self._run(["-i"], data=command)
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the Keychain did not keep the key")
+
+    def delete(self) -> None:
+        self._run(["delete-generic-password", "-s", self.service, "-a", self.account])
+
+
+class DpapiKeystore:
+    """Windows: the key sealed with DPAPI (CryptProtectData) for this user
+    account, stored beside vault.json. The sealed blob is useless to another
+    account or on another machine."""
+
+    name = "dpapi"
+    label = "Windows Data Protection (DPAPI) for your account"
+    strong = True
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    @staticmethod
+    def _call(function_name: str, data: bytes) -> bytes:
+        import ctypes
+        from ctypes import wintypes
+
+        class Blob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = getattr(crypt32, function_name)
+        function.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+        function.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        buffer = ctypes.create_string_buffer(data, len(data))
+        source = Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        result = Blob()
+        # 0x1 = CRYPTPROTECT_UI_FORBIDDEN: never show a prompt.
+        if not function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result)):
+            raise KeystoreUnavailable(f"{function_name} failed ({ctypes.get_last_error()})")
+        try:
+            return ctypes.string_at(result.pbData, result.cbData)
+        finally:
+            kernel32.LocalFree(result.pbData)
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = self._call("CryptUnprotectData", self.path.read_bytes())
+        except (OSError, KeystoreUnavailable):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        sealed = self._call("CryptProtectData", key)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_bytes(sealed)
+        os.replace(temporary, self.path)
+        if self.get() != key:
+            raise KeystoreUnavailable("DPAPI did not return the key it sealed")
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def keystore_for(root: PathInput, name: Optional[str] = None) -> Any:
+    """The key store a vault uses: `name` from its header, else this platform's best."""
+    root = Path(root).expanduser()
+    tag = _key_tag(root)
+    choice = name or ("dpapi" if os.name == "nt" else
+                      "keychain" if sys.platform == "darwin" else
+                      "secret-service" if shutil.which("secret-tool") else "file")
+    if choice == "dpapi":
+        return DpapiKeystore(root / "device-key.dpapi")
+    if choice == "keychain":
+        return MacKeychain(tag)
+    if choice == "secret-service":
+        return SecretServiceKeystore(tag)
+    return FileKeystore(tag)
+
+
+def _wrap_key(key: bytes, password: str) -> dict[str, Any]:
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=128 * 1024 * 1024, **_SCRYPT)
+    wrapped = _aesgcm(kek).encrypt(nonce, key, b"onionmind/key")
+    return {"kdf": "scrypt", **_SCRYPT, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped": wrapped.hex()}
+
+
+def _unwrap_key(record: Mapping[str, Any], password: str) -> bytes:
+    from cryptography.exceptions import InvalidTag
+
+    try:
+        salt, nonce = bytes.fromhex(record["salt"]), bytes.fromhex(record["nonce"])
+        wrapped = bytes.fromhex(record["wrapped"])
+        params = {key: int(record[key]) for key in ("n", "r", "p")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VaultError("vault.json is damaged") from exc
+    if record.get("kdf") != "scrypt":
+        raise VaultError("vault.json names an unknown key derivation")
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=256 * 1024 * 1024, **params)
+    try:
+        return _aesgcm(kek).decrypt(nonce, wrapped, b"onionmind/key")
+    except InvalidTag:
+        raise WrongPassword("That password is not right.") from None
+
+
+class Vault:
+    """An open vault: the data key in memory, and the header describing it."""
+
+    def __init__(self, root: PathInput, key: bytes, header: Mapping[str, Any], keystore: Any = None) -> None:
+        self.root = Path(root).expanduser()
+        self._key = key
+        self._cipher = _aesgcm(key)
+        self.header = dict(header)
+        self.keystore = keystore
+
+    # data
+
+    def encrypt(self, data: bytes) -> bytes:
+        nonce = os.urandom(_NONCE_BYTES)
+        return _ENC_MAGIC + nonce + self._cipher.encrypt(nonce, data, _ENC_AAD)
+
+    def decrypt(self, blob: bytes) -> bytes:
+        from cryptography.exceptions import InvalidTag
+
+        if not is_encrypted(blob):
+            raise VaultError("not an Onionmind encrypted file")
+        start = len(_ENC_MAGIC)
+        try:
+            return self._cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
+        except InvalidTag:
+            raise VaultError("the file was not encrypted with this data key, or it was changed") from None
+
+    def encrypt_line(self, text: str) -> str:
+        import base64
+
+        return _ENC_LINE + base64.b64encode(self.encrypt(text.encode("utf-8"))).decode("ascii")
+
+    def decrypt_line(self, line: str) -> str:
+        import base64
+
+        if not line.startswith(_ENC_LINE):
+            return line
+        return self.decrypt(base64.b64decode(line[len(_ENC_LINE):])).decode("utf-8")
+
+    # password
+
+    @property
+    def mode(self) -> str:
+        return "password" if isinstance(self.header.get("password"), dict) else "device"
+
+    @property
+    def has_password(self) -> bool:
+        return self.mode == "password"
+
+    def describe(self) -> str:
+        if self.has_password:
+            return "Encrypted (AES-256-GCM). The key is unlocked by your password, which is never stored."
+        store = self.keystore or keystore_for(self.root, self.header.get("keystore"))
+        text = f"Encrypted (AES-256-GCM). The key is kept in {store.label}."
+        if not store.strong:
+            text += " Set a password for full protection: without one, programs running as you could read that file."
+        return text
+
+    def check_password(self, password: str) -> bool:
+        record = self.header.get("password")
+        if not isinstance(record, dict):
+            return False
+        try:
+            return _unwrap_key(record, password) == self._key
+        except VaultError:
+            return False
+
+    def set_password(self, password: str, current: Optional[str] = None) -> None:
+        """Set or change the password. Changing needs the current one."""
+        if not password:
+            raise VaultError("The password cannot be empty.")
+        if self.has_password and not self.check_password(current or ""):
+            raise WrongPassword("The current password is not right.")
+        header = {**self.header, "mode": "password", "password": _wrap_key(self._key, password)}
+        header.pop("keystore", None)
+        _write_header(self.root, header)            # the wrapped key first...
+        old = self.header.get("keystore")
+        self.header = header
+        if old:                                     # ...then the unwrapped copy goes
+            try:
+                keystore_for(self.root, old).delete()
+            except KeystoreUnavailable:
+                pass
+        self.keystore = None
+
+    def remove_password(self, current: str) -> None:
+        """Back to the key store: the data stays encrypted, no login needed."""
+        if not self.check_password(current):
+            raise WrongPassword("That password is not right.")
+        store = keystore_for(self.root)
+        store.put(self._key)                        # the key store first...
+        header = {key: value for key, value in self.header.items() if key != "password"}
+        header.update(mode="device", keystore=store.name)
+        _write_header(self.root, header)            # ...then the header stops asking
+        self.header, self.keystore = header, store
+
+
+def is_encrypted(blob: bytes) -> bool:
+    return blob[:len(_ENC_MAGIC)] == _ENC_MAGIC
+
+
+def _write_header(root: Path, header: Mapping[str, Any]) -> None:
+    _atomic_write_json(Path(root) / VAULT_FILE, header)
+
+
+def vault_header(root: PathInput) -> Optional[dict[str, Any]]:
+    """The plaintext header, or None when this data folder was never encrypted."""
+    path = Path(root).expanduser() / VAULT_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise VaultError(f"{path} is unreadable") from exc
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise VaultError(f"{path} is not a vault header this version understands")
+    return value
+
+
+def vault_needs_password(root: PathInput) -> bool:
+    header = vault_header(root)
+    return bool(header and isinstance(header.get("password"), dict))
+
+
+def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = None) -> Vault:
+    """Open (or, the first time, create) the vault of a data folder.
+
+    First run: a new random data key goes into the platform key store and every
+    plaintext file already in the folder is encrypted in place. Afterwards the
+    key comes from the key store, or from `password` once one is set. Raises
+    WrongPassword, KeystoreUnavailable or VaultError - never falls back to
+    plaintext on its own."""
+    if not encryption_available():
+        raise VaultError("The cryptography package is missing; run the updater to install it.")
+    root = Path(root).expanduser()
+    header = vault_header(root)
+    if header is None:
+        key = os.urandom(32)
+        store = keystore or keystore_for(root)
+        try:
+            store.put(key)
+        except KeystoreUnavailable:
+            if store.name == "file":
+                raise
+            store = FileKeystore(_key_tag(root))
+            store.put(key)
+        header = {"version": 1, "cipher": "AES-256-GCM", "mode": "device", "keystore": store.name,
+                  "created_at": _utc_now()}
+        _write_header(root, header)
+        vault = Vault(root, key, header, store)
+        encrypt_data_folder(root, vault)
+        return vault
+    if isinstance(header.get("password"), dict):
+        if password is None:
+            raise WrongPassword("A password is needed to open Onionmind's data.")
+        return Vault(root, _unwrap_key(header["password"], password), header)
+    store = keystore or keystore_for(root, header.get("keystore"))
+    key = store.get()
+    if key is None:
+        raise KeystoreUnavailable(
+            f"The data key is missing from {store.label}. Without it the encrypted data cannot be read.")
+    vault = Vault(root, key, header, store)
+    encrypt_data_folder(root, vault)                # anything an older version left in plaintext
+    return vault
+
+
+_VAULT_OWN_FILES = {VAULT_FILE, "device-key.dpapi"}
+
+
+def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
+    """Encrypt in place every plaintext file under the data folder. Returns the count."""
+    root = Path(root).expanduser()
+    done = 0
+    if not root.is_dir():
+        return done
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink() or path.name in _VAULT_OWN_FILES and path.parent == root:
+            continue
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            with path.open("rb") as handle:
+                if is_encrypted(handle.read(len(_ENC_MAGIC))) and path.suffix != ".jsonl":
+                    continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if path.suffix == ".jsonl":
+            lines = raw.decode("utf-8", "replace").splitlines()
+            if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
+                continue
+            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
+            _atomic_write_bytes(path, body.encode("ascii"))
+        elif is_encrypted(raw):
+            continue
+        else:
+            _atomic_write_bytes(path.with_name(f".{path.name}.migrating.tmp"), vault.encrypt(raw))
+            # Overwrite the plaintext bytes before the encrypted copy takes the
+            # name, so they do not simply linger in freed blocks (same limits as
+            # shred_file: SSDs and copy-on-write filesystems may keep a copy).
+            try:
+                with open(path, "r+b", buffering=0) as handle:
+                    handle.write(os.urandom(len(raw)))
+                    os.fsync(handle.fileno())
+            except OSError:
+                pass
+            os.replace(path.with_name(f".{path.name}.migrating.tmp"), path)
+        done += 1
+    return done
+
+
+def erase_data_folder(root: PathInput) -> None:
+    """Forgotten password: delete the encrypted data, its header and the key."""
+    root = Path(root).expanduser()
+    if not (root / VAULT_FILE).is_file():
+        raise VaultError(f"{root} is not an Onionmind data folder")
+    try:
+        header = vault_header(root) or {}
+    except VaultError:
+        header = {}
+    if header.get("keystore"):
+        try:
+            keystore_for(root, header["keystore"]).delete()
+        except KeystoreUnavailable:
+            pass
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_data_file(path: PathInput, vault: Optional[Vault]) -> bytes:
+    """A file from the data folder, decrypted when it is encrypted."""
+    raw = Path(path).read_bytes()
+    if is_encrypted(raw):
+        if vault is None:
+            raise VaultError("this file is encrypted and the vault is not open")
+        return vault.decrypt(raw)
+    return raw
+
+
+def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> None:
+    """Write a file into the data folder, encrypted when a vault is open."""
+    _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
+
+
 # netlog: what left this machine, written by the desktop when it happens.
 # Times and destinations only - a prompt or a search query is never stored.
 
 class EgressLog:
     ROUTES = ("Tor", "Direct", "Refused")
 
-    def __init__(self, path: PathInput) -> None:
+    def __init__(self, path: PathInput, vault: Any = None) -> None:
         self.path = Path(path).expanduser()
+        self.vault = vault
 
     def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
         """Record one connection. Never raises: logging must not break the action."""
@@ -5815,8 +6386,11 @@ class EgressLog:
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry, ensure_ascii=False)
+            if self.vault is not None:
+                line = self.vault.encrypt_line(line)
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                handle.write(line + "\n")
         except OSError:
             pass
 
@@ -5829,8 +6403,12 @@ class EgressLog:
         rows = []
         for line in lines:
             try:
+                if line.startswith(_ENC_LINE):
+                    if self.vault is None:
+                        continue
+                    line = self.vault.decrypt_line(line)
                 entry = json.loads(line)
-            except ValueError:
+            except (ValueError, VaultError):
                 continue
             if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
                 continue
@@ -5877,6 +6455,28 @@ def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[s
     return rows
 
 
+def absorb_agent_net_log(path: PathInput, egress: Optional["EgressLog"]) -> int:
+    """Move the agent's plaintext network log into the encrypted one, then shred it.
+
+    The agent runs in its own process without the data key, so it can only
+    write plaintext; the desktop takes the lines over after each run. With
+    logging off (`egress` None) the lines are dropped - no log unless asked.
+    Returns the rows moved."""
+    target = Path(path)
+    if not target.is_file():
+        return 0
+    rows = agent_net_entries(target)
+    if egress is not None:
+        for row in rows:
+            try:
+                when = datetime.fromisoformat(row["time"])
+            except ValueError:
+                when = None
+            egress.append(row["route"], row["what"], when)
+    shred_file(target)
+    return len(rows) if egress is not None else 0
+
+
 def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
     import csv
     import io
@@ -5912,8 +6512,24 @@ def _safe_relative(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _backup_copy(source: Path, target: Path, vault: Any) -> None:
+    """copy2, encrypted when a vault is open; the file mode rides on the backup."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if vault is None:
+        shutil.copy2(source, target)
+        return
+    write_data_file(target, source.read_bytes(), vault)
+    shutil.copystat(source, target)
+
+
+def _restore_copy(source: Path, target: Path, vault: Any) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(read_data_file(source, vault))
+    shutil.copystat(source, target)
+
+
 def revert_changes(
-    selected: PathInput, changes: Iterable[Any], backup_root: PathInput
+    selected: PathInput, changes: Iterable[Any], backup_root: PathInput, vault: Any = None
 ) -> RevertRecord:
     """Back up each changed file, then restore it from HEAD (or remove it when untracked).
 
@@ -5932,9 +6548,7 @@ def revert_changes(
         source = _safe_relative(root, relative)
         (untracked if status == "??" else tracked).append(relative)
         if source.is_file():
-            target = backup / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            _backup_copy(source, backup / relative, vault)
     if tracked:
         result = WorkspaceInspector._git(root, "restore", "--source=HEAD", "--staged", "--worktree", "--", *tracked)
         if result.returncode != 0:
@@ -5955,14 +6569,13 @@ def revert_changes(
             target.unlink()
     (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
     record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
-    (backup / ".onionmind-revert.json").write_text(
-        json.dumps({"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)}),
-        encoding="utf-8",
-    )
+    _atomic_write_json(backup / ".onionmind-revert.json",
+                       {"root": record.root, "paths": list(record.paths), "untracked": list(record.untracked)},
+                       vault)
     return record
 
 
-def undo_revert(record: RevertRecord) -> int:
+def undo_revert(record: RevertRecord, vault: Any = None) -> int:
     """Copy the backed-up files back into the project. Returns files restored."""
     root = Path(record.root)
     backup = Path(record.backup)
@@ -5971,9 +6584,7 @@ def undo_revert(record: RevertRecord) -> int:
         source = backup / relative
         if not source.is_file():
             continue
-        target = _safe_relative(root, relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _restore_copy(source, _safe_relative(root, relative), vault)
         restored += 1
     return restored
 
@@ -6031,7 +6642,7 @@ def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
 
 
 def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
-                 backup_root: PathInput) -> RevertRecord:
+                 backup_root: PathInput, vault: Any = None) -> RevertRecord:
     """Revert only the chosen hunks of one file (git apply -R), with the same
     whole-file backup as revert_changes so Undo puts back exactly what was there.
 
@@ -6047,9 +6658,9 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
     backup = Path(backup_root).expanduser() / uuid4().hex
     backup.mkdir(parents=True, exist_ok=True)
     if source.is_file():
-        target = backup / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _backup_copy(source, backup / relative, vault)
+    # The patch is the project's own diff, already in plaintext in the project;
+    # it exists only for the git apply below.
     patch = backup / ".onionmind-hunks.patch"
     body = header + "".join(hunks[i].header + "\n" + "".join(hunks[i].lines) for i in wanted)
     patch.write_bytes(body.encode("utf-8", "surrogateescape"))
@@ -6060,10 +6671,8 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
             raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git apply failed")
     patch.unlink()
     record = RevertRecord(str(root), str(backup), (relative,), ())
-    (backup / ".onionmind-revert.json").write_text(
-        json.dumps({"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}),
-        encoding="utf-8",
-    )
+    _atomic_write_json(backup / ".onionmind-revert.json",
+                       {"root": record.root, "paths": [relative], "untracked": [], "hunks": wanted}, vault)
     return record
 
 
@@ -6744,6 +7353,7 @@ from onionmind_desktop_dialogs import (  # noqa: F401
     FeatureToggles,
     ModelManagerDialog,
     SettingsDialog,
+    UnlockDialog,
 )
 _SCREENSHOT_PATH: Optional[str] = None
 
@@ -6829,22 +7439,32 @@ def _set_tor_action(
         set_action(text, enabled=enabled, tooltip=tooltip, accessible=accessible)
 
 
+def desktop_data_root() -> Path:
+    """The desktop data folder (Qt's AppDataLocation + /desktop); the TUI mirrors it."""
+    data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    return Path(data_location or (Path.home() / ".onionmind")) / "desktop"
+
+
 class OnionmindWindow(QMainWindow):
     IS_ONIONMIND_WINDOW = True
     featuresChanged = Signal(object)
     remoteChanged = Signal()
+    passwordChanged = Signal()
 
-    def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
+    def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False, vault: Any = None) -> None:
         super().__init__()
         self.core = core
         self.desktop_core = desktop_core
         self.demo = demo
+        # The open data vault (encryption at rest), or None: then files are
+        # plaintext, as before - tests, demo, or a missing cryptography package.
+        self.vault = vault
+        self.encryption_notice = ""
         self._workers: set[SafeWorker] = set()
-        data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.data_root = Path(data_location or (Path.home() / ".onionmind")) / "desktop"
+        self.data_root = desktop_data_root()
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self.settings_bridge = SettingsBridge(desktop_core, self.data_root)
-        self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions")
+        self.settings_bridge = SettingsBridge(desktop_core, self.data_root, vault)
+        self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions", vault)
         self.workspace_bridge = WorkspaceBridge(desktop_core)
         self.harness_bridge = HarnessBridge(desktop_core, core)
         self.update_bridge = UpdateBridge(core, desktop_core)
@@ -9717,6 +10337,7 @@ class OnionmindWindow(QMainWindow):
         if self.active_kind != "agent":
             return
         self.tor_in_use = False
+        self._absorb_agent_log()
         normal = status == QProcess.ExitStatus.NormalExit
         if not normal and self._agent_outcome != "stopped":
             self._report_error("Agent runtime crashed", "node")
@@ -10813,18 +11434,41 @@ class OnionmindWindow(QMainWindow):
         log_type = getattr(self.desktop_core, "EgressLog", None)
         if log_type is None:
             return
-        log_type(self.egress_path).append(route, what)
+        self._egress_log().append(route, what)
         counts = self._today_counts()
         counts["tor" if route == "Tor" else "direct"] = counts.get("tor" if route == "Tor" else "direct", 0) + 1
         if what.startswith("Chat search"):
             counts["search"] = counts.get("search", 0) + 1
         self._refresh_boundary()
 
+    def _vault_kw(self) -> dict[str, Any]:
+        """`vault=` for core calls, only when one is open (older cores lack the keyword)."""
+        return {"vault": self.vault} if self.vault is not None else {}
+
+    def _egress_log(self) -> Any:
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        return log_type(self.egress_path, **self._vault_kw()) if log_type is not None else None
+
+    def _absorb_agent_log(self) -> None:
+        """Take the agent's plaintext network log into the encrypted one (when a
+        log is wanted) and shred it. Only with a vault: without one the file is
+        the log, as before."""
+        absorb = _optional_callable(self.desktop_core, "absorb_agent_net_log")
+        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
+        if self.vault is None or absorb is None or not net_log or not Path(net_log).is_file():
+            return
+        logging = self.feature("netlog") or self.feature("boundary")
+        try:
+            absorb(net_log, self._egress_log() if logging else None)
+        except OSError:
+            return
+        self._egress_counts = None
+
     def _today_counts(self) -> dict[str, int]:
         today = datetime.now().strftime("%Y-%m-%d")
         if self._egress_counts is None or getattr(self, "_egress_counts_day", "") != today:
-            log_type = getattr(self.desktop_core, "EgressLog", None)
-            self._egress_counts = log_type(self.egress_path).counts(today) if log_type else {}
+            log = self._egress_log()
+            self._egress_counts = log.counts(today) if log is not None else {}
             self._egress_counts_day = today
         return self._egress_counts
 
@@ -10973,9 +11617,10 @@ class OnionmindWindow(QMainWindow):
     def network_log_rows(self) -> list[dict[str, str]]:
         today = datetime.now().strftime("%Y-%m-%d")
         rows: list[dict[str, str]] = []
-        log_type = getattr(self.desktop_core, "EgressLog", None)
-        if log_type is not None:
-            rows.extend(log_type(self.egress_path).entries(today))
+        self._absorb_agent_log()
+        log = self._egress_log()
+        if log is not None:
+            rows.extend(log.entries(today))
         agent_rows = getattr(self.desktop_core, "agent_net_entries", None)
         net_log = _as_text(getattr(self.core, "NET_LOG", ""))
         if callable(agent_rows) and net_log:
@@ -11156,7 +11801,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> Any:
             del signals
-            record = reverter(workspace, changes, backups)
+            record = reverter(workspace, changes, backups, **self._vault_kw())
             if previous is not None:
                 shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
             return record
@@ -11205,7 +11850,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> Any:
             del signals
-            record = reverter(workspace, path, indices, backups)
+            record = reverter(workspace, path, indices, backups, **self._vault_kw())
             if previous is not None:
                 shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
             return record
@@ -11230,7 +11875,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> int:
             del signals
-            restored = undo(record)
+            restored = undo(record, **self._vault_kw())
             shutil.rmtree(_field(record, "backup"), ignore_errors=True)
             return restored
 
@@ -11690,6 +12335,13 @@ class OnionmindWindow(QMainWindow):
         self._apply_feature_lock(self.feature("lock"))
 
     def set_passphrase(self, passphrase: str) -> bool:
+        if self.vault is not None:
+            # With encryption the lock's passphrase is the vault password.
+            if self.vault.has_password or not passphrase:
+                return False
+            self.vault.set_password(passphrase)
+            self.passwordChanged.emit()
+            return True
         hasher = getattr(self.desktop_core, "hash_passphrase", None)
         if not passphrase or not callable(hasher):
             return False
@@ -11697,9 +12349,13 @@ class OnionmindWindow(QMainWindow):
         return True
 
     def has_passphrase(self) -> bool:
+        if self.vault is not None:
+            return self.vault.has_password
         return isinstance(self._lock_settings().get("passphrase"), dict)
 
     def _verify_passphrase(self, text: str) -> bool:
+        if self.vault is not None:
+            return self.vault.check_password(text)
         verify = getattr(self.desktop_core, "verify_passphrase", None)
         record = self._lock_settings().get("passphrase")
         return bool(callable(verify) and isinstance(record, dict) and verify(text, record))
@@ -12053,6 +12709,87 @@ def _load_desktop_core() -> Any:
         return None
 
 
+_QUIT = object()
+
+
+def _open_vault_for_startup(desktop_core: Any, root: Path) -> tuple[Any, str]:
+    """Open the encrypted data folder before the window reads anything from it.
+
+    Returns (vault, notice): the vault, None to run unencrypted (with the reason
+    in notice), or _QUIT when the person chose to quit or the data cannot be
+    opened. Never silently falls back to plaintext over existing encrypted data."""
+    opener = _optional_callable(desktop_core, "open_vault")
+    available = _optional_callable(desktop_core, "encryption_available")
+    if opener is None or available is None:
+        return None, ""
+    root.mkdir(parents=True, exist_ok=True)
+    vault_file = root / desktop_core.VAULT_FILE
+    if not available():
+        if vault_file.is_file():
+            QMessageBox.critical(None, "Onionmind", "Your Onionmind data is encrypted, but the cryptography "
+                                 "package that opens it is missing. Run the Onionmind updater to install it.")
+            return _QUIT, ""
+        return None, ("Not encrypted: the cryptography package is missing. "
+                      "Run the Onionmind updater to install it.")
+    while True:
+        try:
+            if desktop_core.vault_needs_password(root):
+                opened: list[Any] = []
+
+                def attempt(text: str) -> Optional[str]:
+                    try:
+                        opened.append(opener(root, password=text))
+                    except desktop_core.WrongPassword:
+                        return "That password is not right."
+                    return None
+
+                dialog = UnlockDialog("password", attempt)
+                dialog.exec()
+                if dialog.outcome == "erase":
+                    desktop_core.erase_data_folder(root)
+                    continue
+                if dialog.outcome != "unlocked" or not opened:
+                    return _QUIT, ""
+                return opened[0], ""
+            vault = opener(root)
+        except desktop_core.KeystoreUnavailable as exc:
+            dialog = UnlockDialog("missing-key", detail=_as_text(exc))
+            dialog.exec()
+            if dialog.outcome == "erase":
+                desktop_core.erase_data_folder(root)
+                continue
+            return _QUIT, ""
+        except desktop_core.VaultError as exc:
+            QMessageBox.critical(None, "Onionmind", f"Onionmind's data could not be opened: {exc}")
+            return _QUIT, ""
+        _upgrade_lock_passphrase(desktop_core, root, vault)
+        return vault, ""
+
+
+def _upgrade_lock_passphrase(desktop_core: Any, root: Path, vault: Any) -> None:
+    """An older version kept a lock passphrase as a hash; offer it as the password."""
+    settings_store = desktop_core.SettingsStore(root / "settings.json", defaults={}, vault=vault)
+    settings = settings_store.load()
+    lock = settings.get("lock")
+    record = lock.get("passphrase") if isinstance(lock, dict) else None
+    if not isinstance(record, dict):
+        return
+
+    def attempt(text: str) -> Optional[str]:
+        if not desktop_core.verify_passphrase(text, record):
+            return "That passphrase is not right."
+        vault.set_password(text)
+        return None
+
+    dialog = UnlockDialog("upgrade", attempt)
+    dialog.exec()
+    if dialog.outcome in {"unlocked", "skip"}:
+        lock = dict(lock)
+        lock.pop("passphrase", None)
+        settings["lock"] = lock
+        settings_store.save(settings)
+
+
 def run(core_module: Any = None, demo: bool = False) -> int:
     """Run the standalone native Onionmind workbench."""
     if core_module is None:
@@ -12067,7 +12804,15 @@ def run(core_module: Any = None, demo: bool = False) -> int:
     app.setStyle("Fusion")
     _register_system_fonts(app)
     app.setStyleSheet(STYLE_SHEET)
-    window = OnionmindWindow(core_module, _load_desktop_core(), demo=demo)
+    desktop_core = _load_desktop_core()
+    vault, notice = (None, "") if demo else _open_vault_for_startup(desktop_core, desktop_data_root())
+    if vault is _QUIT:
+        return 1
+    window = OnionmindWindow(core_module, desktop_core, demo=demo, vault=vault)
+    window.encryption_notice = notice
+    if notice:
+        window.set_status(notice)
+    window._absorb_agent_log()                      # a run that ended with the app closed
     app.setProperty("onionmindWindow", window)
     window.show()
     _apply_native_dark_title_bar(window)
@@ -15121,13 +15866,14 @@ from onionmind_desktop_widgets import RunPanel
 class SessionBridge:
     """Use onionmind_desktop_core when present; keep a small QSettings fallback."""
 
-    def __init__(self, desktop_core: Any, root: Path) -> None:
+    def __init__(self, desktop_core: Any, root: Path, vault: Any = None) -> None:
         self.desktop_core = desktop_core
         self.root = root
         self.store = None
         if desktop_core is not None and hasattr(desktop_core, "SessionStore"):
             try:
-                self.store = desktop_core.SessionStore(root)
+                self.store = (desktop_core.SessionStore(root, vault) if vault is not None
+                              else desktop_core.SessionStore(root))
             except Exception:
                 self.store = None
         self.fallback = QSettings(APP_NAME, APP_ID)
@@ -15261,12 +16007,14 @@ class SessionBridge:
 
 
 class SettingsBridge:
-    def __init__(self, desktop_core: Any, root: Path) -> None:
+    def __init__(self, desktop_core: Any, root: Path, vault: Any = None) -> None:
         self.store = None
+        self.vault = vault
         self.fallback = QSettings(APP_NAME, APP_ID)
         if desktop_core is not None and hasattr(desktop_core, "SettingsStore"):
             try:
-                self.store = desktop_core.SettingsStore(root / "settings.json", defaults={})
+                self.store = desktop_core.SettingsStore(root / "settings.json", defaults={},
+                                                        **({"vault": vault} if vault is not None else {}))
             except Exception:
                 self.store = None
 
@@ -15287,7 +16035,9 @@ class SettingsBridge:
                 self.store.save(settings)
                 return
             except Exception:
-                pass
+                # Encrypted data never falls back to Qt's plaintext settings file.
+                if self.vault is not None:
+                    return
         self.fallback.setValue("settings_json", json.dumps(settings))
 
 
@@ -17090,6 +17840,107 @@ class SettingsDialog(QDialog):
         if window is not None:
             window.open_setup()
 
+    def _encryption_section(self) -> QWidget:
+        """Encryption at rest: what protects the data now, and the optional
+        password that unlocks it when Onionmind opens."""
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+        heading = QLabel("Encryption")
+        heading.setObjectName("brand")
+        layout.addWidget(heading)
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        self.encryption_status = QLabel("")
+        self.encryption_status.setWordWrap(True)
+        layout.addWidget(self.encryption_status)
+        self.password_current = QLineEdit()
+        self.password_new = QLineEdit()
+        self.password_repeat = QLineEdit()
+        for field, text in ((self.password_current, "Current password"), (self.password_new, "New password"),
+                            (self.password_repeat, "Repeat the new password")):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText(text)
+            field.setAccessibleName(text)
+            layout.addWidget(field)
+        buttons = QHBoxLayout()
+        self.password_set_button = QPushButton("Set password")
+        self.password_set_button.setObjectName("primaryButton")
+        self.password_remove_button = QPushButton("Remove password")
+        buttons.addWidget(self.password_set_button)
+        buttons.addWidget(self.password_remove_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.password_feedback = QLabel(
+            "Optional. With a password, Onionmind asks for it each time it opens and the key is "
+            "nowhere on this machine. If you forget it, your conversations and settings cannot "
+            "be recovered - not by you, not by anyone.")
+        self.password_feedback.setObjectName("meta")
+        self.password_feedback.setWordWrap(True)
+        layout.addWidget(self.password_feedback)
+        if vault is None:
+            for widget in (self.password_current, self.password_new, self.password_repeat,
+                           self.password_set_button, self.password_remove_button, self.password_feedback):
+                widget.hide()
+            notice = _as_text(getattr(window, "encryption_notice", "")) if window is not None else ""
+            self.encryption_status.setText(notice or "Not encrypted: files in the data folder are plain text.")
+            self.encryption_status.setObjectName("danger")
+        else:
+            self.password_set_button.clicked.connect(self._set_password)
+            self.password_remove_button.clicked.connect(self._remove_password)
+            self._describe_encryption()
+        return section
+
+    def _describe_encryption(self) -> None:
+        vault = getattr(self._window(), "vault", None)
+        if vault is None:
+            return
+        self.encryption_status.setText(vault.describe())
+        has = vault.has_password
+        self.password_current.setVisible(has)
+        self.password_remove_button.setVisible(has)
+        self.password_set_button.setText("Change password" if has else "Set password")
+
+    def _set_password(self) -> None:
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        new, repeat = self.password_new.text(), self.password_repeat.text()
+        if vault is None:
+            return
+        if len(new) < 8:
+            self.password_feedback.setText("Use at least 8 characters; a few words are easier to remember.")
+            return
+        if new != repeat:
+            self.password_feedback.setText("The two new passwords do not match.")
+            return
+        try:
+            vault.set_password(new, current=self.password_current.text() if vault.has_password else None)
+        except Exception as exc:
+            self.password_feedback.setText(_as_text(exc) or "The password could not be set.")
+            return
+        for field in (self.password_current, self.password_new, self.password_repeat):
+            field.clear()
+        self.password_feedback.setText("Password set. Onionmind will ask for it each time it opens. "
+                                       "Keep it somewhere safe: it cannot be reset.")
+        self._describe_encryption()
+        window.passwordChanged.emit()
+
+    def _remove_password(self) -> None:
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        if vault is None or not vault.has_password:
+            return
+        try:
+            vault.remove_password(self.password_current.text())
+        except Exception as exc:
+            self.password_feedback.setText(_as_text(exc) or "The password could not be removed.")
+            return
+        self.password_current.clear()
+        self.password_feedback.setText("Password removed. The data stays encrypted; "
+                                       "the key is back in this machine's key store.")
+        self._describe_encryption()
+        window.passwordChanged.emit()
+
     def _lock_section(self) -> QWidget:
         section = QWidget()
         layout = QVBoxLayout(section)
@@ -17134,7 +17985,17 @@ class SettingsDialog(QDialog):
         self.lock_now_button = QPushButton("Lock now")
         form.addRow("", self.lock_now_button)
         layout.addLayout(form)
-        self.lock_feedback = QLabel("Only a salted scrypt hash of the passphrase is stored.")
+        encrypted = getattr(window, "vault", None) is not None
+        if encrypted:
+            # One secret: the idle lock asks for the Encryption password above.
+            self.passphrase_field.hide()
+            self.passphrase_button.hide()
+            label = form.labelForField(pass_row)
+            if label is not None:
+                label.hide()
+        self.lock_feedback = QLabel(
+            "The lock asks for your Encryption password (above)." if encrypted
+            else "Only a salted scrypt hash of the passphrase is stored.")
         self.lock_feedback.setObjectName("meta")
         self.lock_feedback.setWordWrap(True)
         layout.addWidget(self.lock_feedback)
@@ -17191,7 +18052,10 @@ class SettingsDialog(QDialog):
         if window is None:
             return
         if not window.has_passphrase():
-            self.lock_feedback.setText("Set a passphrase first; without one anybody could unlock.")
+            self.lock_feedback.setText(
+                "Set a password under Encryption first; without one anybody could unlock."
+                if getattr(window, "vault", None) is not None
+                else "Set a passphrase first; without one anybody could unlock.")
             return
         self.done(0)
         window.lock_now()
@@ -17714,6 +18578,7 @@ class SettingsDialog(QDialog):
         form.addRow("Agent", agent)
         form.addRow("Telemetry", QLabel("No Onionmind telemetry or account"))
         outer.addLayout(form)
+        outer.addWidget(self._encryption_section())
 
         on_disk_heading = QLabel("What is written to disk")
         on_disk_heading.setObjectName("brand")
@@ -18180,6 +19045,121 @@ class SettingsDialog(QDialog):
         self.storage_feedback.setText(
             "Opened Onionmind storage." if opened else "The system could not open the storage folder."
         )
+
+
+class UnlockDialog(QDialog):
+    """Before the window opens: the password for the encrypted data folder,
+    or what to do when its key is gone.
+
+    kind "password": unlock, or erase everything after a forgotten password.
+    kind "missing-key": the key store lost the key; quit or erase.
+    kind "upgrade": an older lock passphrase becomes the password, or is dropped.
+    `attempt(text)` returns an error to show, or None when it worked.
+    `outcome` ends as "unlocked", "erase", "skip" or "quit"."""
+
+    def __init__(self, kind: str, attempt: Optional[Callable[[str], Optional[str]]] = None,
+                 detail: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.attempt = attempt
+        self.outcome = "quit"
+        self.setWindowTitle("Onionmind")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        titles = {
+            "password": "Unlock Onionmind",
+            "missing-key": "The key to your data is missing",
+            "upgrade": "Use your lock passphrase as your password",
+        }
+        copies = {
+            "password": "Your conversations, projects and settings are encrypted on this machine. "
+                        "Enter your password to open them.",
+            "missing-key": (detail or "The data key is no longer in this machine's key store.")
+                           + " The encrypted data cannot be read without it.",
+            "upgrade": "Onionmind now encrypts everything it keeps. You had set a lock passphrase: "
+                       "enter it to make it your password. Onionmind will then ask for it each time "
+                       "it opens, and the data cannot be read without it.",
+        }
+        title = QLabel(titles[kind])
+        title.setObjectName("brand")
+        body = QLabel(copies[kind])
+        body.setObjectName("meta")
+        body.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Passphrase" if kind == "upgrade" else "Password")
+        self.password.setAccessibleName(self.password.placeholderText())
+        self.password.returnPressed.connect(self._submit)
+        self.error = QLabel("")
+        self.error.setObjectName("danger")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        buttons = QHBoxLayout()
+        self.secondary = QPushButton({"password": "Forgot your password?", "missing-key": "Erase and start over",
+                                      "upgrade": "Don't use a password"}[kind])
+        self.secondary.setObjectName("dangerButton" if kind != "upgrade" else "")
+        self.secondary.clicked.connect(self._secondary)
+        self.primary = QPushButton({"password": "Unlock", "missing-key": "Quit", "upgrade": "Use as password"}[kind])
+        self.primary.setObjectName("primaryButton")
+        self.primary.setDefault(True)
+        self.primary.clicked.connect(self._submit)
+        buttons.addWidget(self.secondary)
+        buttons.addStretch(1)
+        buttons.addWidget(self.primary)
+        if kind != "missing-key":
+            layout.addWidget(self.password)
+        layout.addWidget(self.error)
+        layout.addLayout(buttons)
+        self.password.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _submit(self) -> None:
+        if self.kind == "missing-key":
+            self.outcome = "quit"
+            self.reject()
+            return
+        text = self.password.text()
+        if not text:
+            self._show_error("Enter your password." if self.kind == "password" else "Enter your passphrase.")
+            return
+        problem = self.attempt(text) if self.attempt is not None else None
+        if problem:
+            self._show_error(problem)
+            self.password.selectAll()
+            return
+        self.password.clear()
+        self.outcome = "unlocked"
+        self.accept()
+
+    def _show_error(self, text: str) -> None:
+        self.error.setText(text)
+        self.error.show()
+
+    def _secondary(self) -> None:
+        if self.kind == "upgrade":
+            self.outcome = "skip"
+            self.accept()
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Erase all Onionmind data?",
+            "This permanently deletes every conversation, project list, network log and setting "
+            "Onionmind keeps, and its key. There is no way to get them back. Your project folders "
+            "and models are not touched.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Discard,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Discard:
+            self.outcome = "erase"
+            self.accept()
+
+    def reject(self) -> None:
+        self.outcome = "quit"                       # Esc or the close box
+        super().reject()
 DESKTOPDIALOGSEOF
 chmod 644 "$DIR/onionmind_desktop_core.py" "$DIR/onionmind_desktop.py" \
   "$DIR/onionmind_desktop_theme.py" "$DIR/onionmind_desktop_widgets.py" "$DIR/onionmind_desktop_panes.py" "$DIR/onionmind_desktop_dialogs.py"
@@ -18188,17 +19168,17 @@ DESKTOP_ENV="$DIR/desktop-env"
 DESKTOP_MARKER="$DESKTOP_ENV/.onionmind-desktop-ready"
 say "Step: native desktop runtime"
 if [ -f "$DESKTOP_MARKER" ] &&
-   "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets' >/dev/null 2>&1; then
+   "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets, cryptography.hazmat.primitives.ciphers.aead' >/dev/null 2>&1; then
   skip "the PySide6 runtime is installed and imports cleanly"
 else
 rm -f -- "$DESKTOP_MARKER"
 say "Preparing native desktop runtime (PySide6 from PyPI)"
 if python3 -m venv "$DESKTOP_ENV"; then
   if ! "$DESKTOP_ENV/bin/python" -m pip install --quiet --disable-pip-version-check \
-      requests PySocks PySide6-Essentials==6.11.1; then
+      requests PySocks PySide6-Essentials==6.11.1 'cryptography>=42,<51'; then
     warn "native desktop dependency download failed; checking the existing environment"
   fi
-  if "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets'; then
+  if "$DESKTOP_ENV/bin/python" -c 'import requests, socks, PySide6.QtWidgets, cryptography.hazmat.primitives.ciphers.aead'; then
     : > "$DESKTOP_MARKER"
   else
     warn "native desktop dependencies could not be imported; the classic UI remains available"

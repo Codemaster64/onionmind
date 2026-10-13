@@ -46,8 +46,9 @@ def version(name):
 rv, r = version("requests")
 sv, s = version("PySocks")
 qv, q = version("PySide6-Essentials")
-ok = (2, 32) <= r < (3,) and (1, 7) <= s < (2,) and (6, 11) <= q < (6, 12)
-print(f"requests={rv}, PySocks={sv}, PySide6-Essentials={qv} ({'SUPPORTED' if ok else 'OUTDATED/INCOMPATIBLE'})")
+cv, c = version("cryptography")
+ok = (2, 32) <= r < (3,) and (1, 7) <= s < (2,) and (6, 11) <= q < (6, 12) and (42,) <= c < (51,)
+print(f"requests={rv}, PySocks={sv}, PySide6-Essentials={qv}, cryptography={cv} ({'SUPPORTED' if ok else 'OUTDATED/INCOMPATIBLE'})")
 PY
     )
     desktop_state=${desktop_state:-MISSING/INCOMPATIBLE}
@@ -64,7 +65,7 @@ echo "  - https://api.github.com/repos/Codemaster64/onionmind/commits/main"
 echo "      resolve one immutable source revision"
 echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/{onionmind.py,onionmind_desktop_core.py,onionmind_desktop.py,onionmind_desktop_theme.py,onionmind_desktop_widgets.py,onionmind_desktop_panes.py,onionmind_desktop_dialogs.py,dsh-onionmind-tor-search.js,dsh-onionmind-tor.patch.yml}"
 echo "      download only when the recorded local revision differs or files are missing"
-echo "  - https://pypi.org/simple/requests/, https://pypi.org/simple/pysocks/, https://pypi.org/simple/pyside6-essentials/"
+echo "  - https://pypi.org/simple/requests/, https://pypi.org/simple/pysocks/, https://pypi.org/simple/pyside6-essentials/, https://pypi.org/simple/cryptography/"
 echo "      repair the isolated desktop runtime only when local version/import checks fail"
 echo "  No Tor or Ollama service will be enabled, started, or restarted."
 if [ "$ALLOW_NETWORK" != 1 ] || [ "$ASSUME_YES" != 1 ]; then
@@ -239,7 +240,8 @@ def version(name):
 assert (2, 32) <= version("requests") < (3,)
 assert (1, 7) <= version("PySocks") < (2,)
 assert (6, 11) <= version("PySide6-Essentials") < (6, 12)
-import requests, socks, PySide6.QtWidgets
+assert (42,) <= version("cryptography") < (51,)
+import requests, socks, PySide6.QtWidgets, cryptography.hazmat.primitives.ciphers.aead
 PY
 }
 if desktop_runtime_ready; then
@@ -248,7 +250,7 @@ if desktop_runtime_ready; then
 elif python3 -m venv "$DIR/desktop-env"; then
   rm -f -- "$desktop_marker"
   if ! "$desktop_python" -m pip install --quiet --disable-pip-version-check \
-      'requests>=2.32,<3' 'PySocks>=1.7,<2' 'PySide6-Essentials>=6.11,<6.12'; then
+      'requests>=2.32,<3' 'PySocks>=1.7,<2' 'PySide6-Essentials>=6.11,<6.12' 'cryptography>=42,<51'; then
     echo "Native desktop dependency download failed; checking the existing environment." >&2
   fi
   if desktop_runtime_ready; then

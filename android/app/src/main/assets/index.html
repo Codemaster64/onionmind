@@ -113,7 +113,7 @@
   .sheet h2 { font-size: 20px; margin-bottom: 4px; color: var(--strong); }
   .sheet > p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
   .sheet > * { max-width: 560px; margin-left: auto; margin-right: auto; }
-  #manager input, #setup input { width: 100%; background: var(--field); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
+  #manager input, #setup input, .sheet input[type=password] { width: 100%; background: var(--field); border: 1px solid var(--line); color: inherit; border-radius: 9px; padding: 10px; margin: 4px 0; font: inherit; }
   .manage-head { display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px; }
   .model-actions { display:flex; gap:8px; flex-wrap:wrap; } .model-actions button { padding: 8px 11px; font-size: 13px; }
   .danger { background: var(--danger); color: #fff; } .muted { background: transparent; border: 1px solid var(--line); color: var(--text); }
@@ -184,6 +184,21 @@
   <div id="zones"></div>
 </section>
 
+<section id="unlock" class="sheet" hidden>
+  <h2>Unlock Onionmind</h2>
+  <p id="unlock-text">Your conversation and settings are encrypted on this phone. Enter your password to open them.</p>
+  <div class="model-card" id="unlock-form">
+    <input id="unlock-password" type="password" placeholder="Password" autocomplete="current-password" aria-label="Password">
+    <p class="model-meta" id="unlock-error" role="alert" hidden></p>
+    <div class="model-actions"><button id="unlock-btn" onclick="unlockVault()">Unlock</button></div>
+  </div>
+  <div class="model-card">
+    <strong id="erase-title">Forgot your password?</strong>
+    <p class="model-meta">There is no way to recover it. You can erase the conversation, the network log and the settings and start over. Downloaded models stay.</p>
+    <div class="model-actions"><button class="danger" onclick="eraseVault()">Erase and start over</button></div>
+  </div>
+</section>
+
 <section id="settings" class="sheet" hidden>
   <div class="manage-head"><h2>Settings</h2><button class="muted" onclick="closeSettings()">Done</button></div>
   <p>These choices apply immediately and stay on this phone. Privacy behavior — Tor and the per-turn search permission — is not a setting.</p>
@@ -217,6 +232,18 @@
     <div class="model-actions">
       <button onclick="shareConversation()">Share as text</button>
       <button class="danger" onclick="clearConversation()">Clear</button>
+    </div>
+  </div>
+  <div class="model-card">
+    <strong>Encryption</strong>
+    <p class="model-meta" id="vault-describe"></p>
+    <input id="vault-current" type="password" placeholder="Current password" autocomplete="current-password" aria-label="Current password" hidden>
+    <input id="vault-new" type="password" placeholder="New password" autocomplete="new-password" aria-label="New password">
+    <input id="vault-repeat" type="password" placeholder="Repeat the new password" autocomplete="new-password" aria-label="Repeat the new password">
+    <p class="model-meta" id="vault-feedback" role="status">Optional. With a password Onionmind asks for it each time it starts, and nothing on the phone can open the data without it. If you forget it, the data cannot be recovered.</p>
+    <div class="model-actions">
+      <button id="vault-set" onclick="setVaultPassword()">Set password</button>
+      <button id="vault-remove" class="muted" onclick="removeVaultPassword()" hidden>Remove password</button>
     </div>
   </div>
   <div class="model-card" data-feature="lock" hidden>
@@ -348,9 +375,75 @@ async function poll() {
 }
 // Restore the saved conversation before the first poll so the greeting and
 // the restored turns appear in the right order.
-loadPrefs();
-loadFeatures();
-loadConversation().finally(() => { setInterval(poll, 2000); poll(); });
+// Encryption at rest: with a password set, nothing loads until it is typed.
+let vaultInfo = {}, pollTimer = null;
+async function loadVault() {
+  try { vaultInfo = await (await api('/api/vault')).json(); } catch {}
+  return vaultInfo;
+}
+function boot() {
+  $('unlock').hidden = true;
+  loadPrefs();
+  loadFeatures();
+  loadConversation().finally(() => { if (!pollTimer) pollTimer = setInterval(poll, 2000); poll(); });
+}
+function showUnlock() {
+  const problem = vaultInfo.problem && !vaultInfo.hasPassword;
+  $('unlock-text').textContent = problem
+    ? vaultInfo.problem + ' The encrypted data cannot be read without it.'
+    : 'Your conversation and settings are encrypted on this phone. Enter your password to open them.';
+  $('unlock-form').hidden = !!problem;
+  $('erase-title').textContent = problem ? 'Start over' : 'Forgot your password?';
+  $('unlock').hidden = false;
+  if (!problem) $('unlock-password').focus();
+}
+async function unlockVault() {
+  const password = $('unlock-password').value, error = $('unlock-error');
+  if (!password) { error.textContent = 'Enter your password.'; error.hidden = false; return; }
+  $('unlock-btn').disabled = true;
+  try {
+    const r = await api('/api/vault/unlock', form(new URLSearchParams({password})));
+    const body = await r.json();
+    if (!r.ok) { error.textContent = body.error || 'Could not unlock.'; error.hidden = false; $('unlock-password').select(); return; }
+    vaultInfo = body; $('unlock-password').value = ''; error.hidden = true;
+    boot();
+  } catch (err) { error.textContent = errorText(err); error.hidden = false; }
+  finally { $('unlock-btn').disabled = false; }
+}
+async function eraseVault() {
+  if (!confirm('Erase the conversation, the network log and all settings on this phone? There is no way to get them back. Downloaded models stay.')) return;
+  try { vaultInfo = await (await api('/api/vault/erase', form('confirm=erase'))).json(); } catch {}
+  history = []; renderHistory();
+  boot();
+}
+function renderVault() {
+  $('vault-describe').textContent = vaultInfo.describe || '';
+  $('vault-current').hidden = $('vault-remove').hidden = !vaultInfo.hasPassword;
+  $('vault-set').textContent = vaultInfo.hasPassword ? 'Change password' : 'Set password';
+}
+async function setVaultPassword() {
+  const feedback = $('vault-feedback'), password = $('vault-new').value;
+  if (password.length < 8) { feedback.textContent = 'Use at least 8 characters; a few words are easier to remember.'; return; }
+  if (password !== $('vault-repeat').value) { feedback.textContent = 'The two new passwords do not match.'; return; }
+  const r = await api('/api/vault/password', form(new URLSearchParams({password, current: $('vault-current').value})));
+  const body = await r.json();
+  if (!r.ok) { feedback.textContent = body.error || 'The password could not be set.'; return; }
+  vaultInfo = body;
+  for (const id of ['vault-current', 'vault-new', 'vault-repeat']) $(id).value = '';
+  feedback.textContent = 'Password set. Onionmind will ask for it each time it starts. Keep it somewhere safe: it cannot be reset.';
+  renderVault();
+}
+async function removeVaultPassword() {
+  const feedback = $('vault-feedback');
+  const r = await api('/api/vault/remove', form(new URLSearchParams({current: $('vault-current').value})));
+  const body = await r.json();
+  if (!r.ok) { feedback.textContent = body.error || 'The password could not be removed.'; return; }
+  vaultInfo = body; $('vault-current').value = '';
+  feedback.textContent = 'Password removed. The data stays encrypted; the key is back in the Android Keystore.';
+  renderVault();
+}
+$('unlock-password').addEventListener('keydown', e => { if (e.key === 'Enter') unlockVault(); });
+loadVault().then(v => { if (v.locked) showUnlock(); else boot(); });
 
 function recommendedTier() {
   const ram = Number(status.ramMb || 0);
@@ -424,7 +517,7 @@ function confirmModelDownload() {
 
 function openManager() { $('manager').hidden = false; managerHtml = null; renderManager(); }
 function closeManager() { $('manager').hidden = true; }
-function openSettings() { $('settings').hidden = false; renderFeatureList(); refreshNetlogCount(); }
+function openSettings() { $('settings').hidden = false; renderFeatureList(); refreshNetlogCount(); loadVault().then(renderVault); }
 function closeSettings() { $('settings').hidden = true; }
 function openBoundary() { $('boundary').hidden = false; renderBoundary(); }
 function closeBoundary() { $('boundary').hidden = true; }

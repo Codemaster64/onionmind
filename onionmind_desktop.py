@@ -196,6 +196,7 @@ from onionmind_desktop_dialogs import (  # noqa: F401
     FeatureToggles,
     ModelManagerDialog,
     SettingsDialog,
+    UnlockDialog,
 )
 _SCREENSHOT_PATH: Optional[str] = None
 
@@ -281,22 +282,32 @@ def _set_tor_action(
         set_action(text, enabled=enabled, tooltip=tooltip, accessible=accessible)
 
 
+def desktop_data_root() -> Path:
+    """The desktop data folder (Qt's AppDataLocation + /desktop); the TUI mirrors it."""
+    data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    return Path(data_location or (Path.home() / ".onionmind")) / "desktop"
+
+
 class OnionmindWindow(QMainWindow):
     IS_ONIONMIND_WINDOW = True
     featuresChanged = Signal(object)
     remoteChanged = Signal()
+    passwordChanged = Signal()
 
-    def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False) -> None:
+    def __init__(self, core: Any, desktop_core: Any = None, demo: bool = False, vault: Any = None) -> None:
         super().__init__()
         self.core = core
         self.desktop_core = desktop_core
         self.demo = demo
+        # The open data vault (encryption at rest), or None: then files are
+        # plaintext, as before - tests, demo, or a missing cryptography package.
+        self.vault = vault
+        self.encryption_notice = ""
         self._workers: set[SafeWorker] = set()
-        data_location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self.data_root = Path(data_location or (Path.home() / ".onionmind")) / "desktop"
+        self.data_root = desktop_data_root()
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self.settings_bridge = SettingsBridge(desktop_core, self.data_root)
-        self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions")
+        self.settings_bridge = SettingsBridge(desktop_core, self.data_root, vault)
+        self.session_bridge = SessionBridge(desktop_core, self.data_root / "sessions", vault)
         self.workspace_bridge = WorkspaceBridge(desktop_core)
         self.harness_bridge = HarnessBridge(desktop_core, core)
         self.update_bridge = UpdateBridge(core, desktop_core)
@@ -3169,6 +3180,7 @@ class OnionmindWindow(QMainWindow):
         if self.active_kind != "agent":
             return
         self.tor_in_use = False
+        self._absorb_agent_log()
         normal = status == QProcess.ExitStatus.NormalExit
         if not normal and self._agent_outcome != "stopped":
             self._report_error("Agent runtime crashed", "node")
@@ -4265,18 +4277,41 @@ class OnionmindWindow(QMainWindow):
         log_type = getattr(self.desktop_core, "EgressLog", None)
         if log_type is None:
             return
-        log_type(self.egress_path).append(route, what)
+        self._egress_log().append(route, what)
         counts = self._today_counts()
         counts["tor" if route == "Tor" else "direct"] = counts.get("tor" if route == "Tor" else "direct", 0) + 1
         if what.startswith("Chat search"):
             counts["search"] = counts.get("search", 0) + 1
         self._refresh_boundary()
 
+    def _vault_kw(self) -> dict[str, Any]:
+        """`vault=` for core calls, only when one is open (older cores lack the keyword)."""
+        return {"vault": self.vault} if self.vault is not None else {}
+
+    def _egress_log(self) -> Any:
+        log_type = getattr(self.desktop_core, "EgressLog", None)
+        return log_type(self.egress_path, **self._vault_kw()) if log_type is not None else None
+
+    def _absorb_agent_log(self) -> None:
+        """Take the agent's plaintext network log into the encrypted one (when a
+        log is wanted) and shred it. Only with a vault: without one the file is
+        the log, as before."""
+        absorb = _optional_callable(self.desktop_core, "absorb_agent_net_log")
+        net_log = _as_text(getattr(self.core, "NET_LOG", ""))
+        if self.vault is None or absorb is None or not net_log or not Path(net_log).is_file():
+            return
+        logging = self.feature("netlog") or self.feature("boundary")
+        try:
+            absorb(net_log, self._egress_log() if logging else None)
+        except OSError:
+            return
+        self._egress_counts = None
+
     def _today_counts(self) -> dict[str, int]:
         today = datetime.now().strftime("%Y-%m-%d")
         if self._egress_counts is None or getattr(self, "_egress_counts_day", "") != today:
-            log_type = getattr(self.desktop_core, "EgressLog", None)
-            self._egress_counts = log_type(self.egress_path).counts(today) if log_type else {}
+            log = self._egress_log()
+            self._egress_counts = log.counts(today) if log is not None else {}
             self._egress_counts_day = today
         return self._egress_counts
 
@@ -4425,9 +4460,10 @@ class OnionmindWindow(QMainWindow):
     def network_log_rows(self) -> list[dict[str, str]]:
         today = datetime.now().strftime("%Y-%m-%d")
         rows: list[dict[str, str]] = []
-        log_type = getattr(self.desktop_core, "EgressLog", None)
-        if log_type is not None:
-            rows.extend(log_type(self.egress_path).entries(today))
+        self._absorb_agent_log()
+        log = self._egress_log()
+        if log is not None:
+            rows.extend(log.entries(today))
         agent_rows = getattr(self.desktop_core, "agent_net_entries", None)
         net_log = _as_text(getattr(self.core, "NET_LOG", ""))
         if callable(agent_rows) and net_log:
@@ -4608,7 +4644,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> Any:
             del signals
-            record = reverter(workspace, changes, backups)
+            record = reverter(workspace, changes, backups, **self._vault_kw())
             if previous is not None:
                 shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
             return record
@@ -4657,7 +4693,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> Any:
             del signals
-            record = reverter(workspace, path, indices, backups)
+            record = reverter(workspace, path, indices, backups, **self._vault_kw())
             if previous is not None:
                 shutil.rmtree(_field(previous, "backup"), ignore_errors=True)
             return record
@@ -4682,7 +4718,7 @@ class OnionmindWindow(QMainWindow):
 
         def job(signals: WorkerSignals) -> int:
             del signals
-            restored = undo(record)
+            restored = undo(record, **self._vault_kw())
             shutil.rmtree(_field(record, "backup"), ignore_errors=True)
             return restored
 
@@ -5142,6 +5178,13 @@ class OnionmindWindow(QMainWindow):
         self._apply_feature_lock(self.feature("lock"))
 
     def set_passphrase(self, passphrase: str) -> bool:
+        if self.vault is not None:
+            # With encryption the lock's passphrase is the vault password.
+            if self.vault.has_password or not passphrase:
+                return False
+            self.vault.set_password(passphrase)
+            self.passwordChanged.emit()
+            return True
         hasher = getattr(self.desktop_core, "hash_passphrase", None)
         if not passphrase or not callable(hasher):
             return False
@@ -5149,9 +5192,13 @@ class OnionmindWindow(QMainWindow):
         return True
 
     def has_passphrase(self) -> bool:
+        if self.vault is not None:
+            return self.vault.has_password
         return isinstance(self._lock_settings().get("passphrase"), dict)
 
     def _verify_passphrase(self, text: str) -> bool:
+        if self.vault is not None:
+            return self.vault.check_password(text)
         verify = getattr(self.desktop_core, "verify_passphrase", None)
         record = self._lock_settings().get("passphrase")
         return bool(callable(verify) and isinstance(record, dict) and verify(text, record))
@@ -5505,6 +5552,87 @@ def _load_desktop_core() -> Any:
         return None
 
 
+_QUIT = object()
+
+
+def _open_vault_for_startup(desktop_core: Any, root: Path) -> tuple[Any, str]:
+    """Open the encrypted data folder before the window reads anything from it.
+
+    Returns (vault, notice): the vault, None to run unencrypted (with the reason
+    in notice), or _QUIT when the person chose to quit or the data cannot be
+    opened. Never silently falls back to plaintext over existing encrypted data."""
+    opener = _optional_callable(desktop_core, "open_vault")
+    available = _optional_callable(desktop_core, "encryption_available")
+    if opener is None or available is None:
+        return None, ""
+    root.mkdir(parents=True, exist_ok=True)
+    vault_file = root / desktop_core.VAULT_FILE
+    if not available():
+        if vault_file.is_file():
+            QMessageBox.critical(None, "Onionmind", "Your Onionmind data is encrypted, but the cryptography "
+                                 "package that opens it is missing. Run the Onionmind updater to install it.")
+            return _QUIT, ""
+        return None, ("Not encrypted: the cryptography package is missing. "
+                      "Run the Onionmind updater to install it.")
+    while True:
+        try:
+            if desktop_core.vault_needs_password(root):
+                opened: list[Any] = []
+
+                def attempt(text: str) -> Optional[str]:
+                    try:
+                        opened.append(opener(root, password=text))
+                    except desktop_core.WrongPassword:
+                        return "That password is not right."
+                    return None
+
+                dialog = UnlockDialog("password", attempt)
+                dialog.exec()
+                if dialog.outcome == "erase":
+                    desktop_core.erase_data_folder(root)
+                    continue
+                if dialog.outcome != "unlocked" or not opened:
+                    return _QUIT, ""
+                return opened[0], ""
+            vault = opener(root)
+        except desktop_core.KeystoreUnavailable as exc:
+            dialog = UnlockDialog("missing-key", detail=_as_text(exc))
+            dialog.exec()
+            if dialog.outcome == "erase":
+                desktop_core.erase_data_folder(root)
+                continue
+            return _QUIT, ""
+        except desktop_core.VaultError as exc:
+            QMessageBox.critical(None, "Onionmind", f"Onionmind's data could not be opened: {exc}")
+            return _QUIT, ""
+        _upgrade_lock_passphrase(desktop_core, root, vault)
+        return vault, ""
+
+
+def _upgrade_lock_passphrase(desktop_core: Any, root: Path, vault: Any) -> None:
+    """An older version kept a lock passphrase as a hash; offer it as the password."""
+    settings_store = desktop_core.SettingsStore(root / "settings.json", defaults={}, vault=vault)
+    settings = settings_store.load()
+    lock = settings.get("lock")
+    record = lock.get("passphrase") if isinstance(lock, dict) else None
+    if not isinstance(record, dict):
+        return
+
+    def attempt(text: str) -> Optional[str]:
+        if not desktop_core.verify_passphrase(text, record):
+            return "That passphrase is not right."
+        vault.set_password(text)
+        return None
+
+    dialog = UnlockDialog("upgrade", attempt)
+    dialog.exec()
+    if dialog.outcome in {"unlocked", "skip"}:
+        lock = dict(lock)
+        lock.pop("passphrase", None)
+        settings["lock"] = lock
+        settings_store.save(settings)
+
+
 def run(core_module: Any = None, demo: bool = False) -> int:
     """Run the standalone native Onionmind workbench."""
     if core_module is None:
@@ -5519,7 +5647,15 @@ def run(core_module: Any = None, demo: bool = False) -> int:
     app.setStyle("Fusion")
     _register_system_fonts(app)
     app.setStyleSheet(STYLE_SHEET)
-    window = OnionmindWindow(core_module, _load_desktop_core(), demo=demo)
+    desktop_core = _load_desktop_core()
+    vault, notice = (None, "") if demo else _open_vault_for_startup(desktop_core, desktop_data_root())
+    if vault is _QUIT:
+        return 1
+    window = OnionmindWindow(core_module, desktop_core, demo=demo, vault=vault)
+    window.encryption_notice = notice
+    if notice:
+        window.set_status(notice)
+    window._absorb_agent_log()                      # a run that ended with the app closed
     app.setProperty("onionmindWindow", window)
     window.show()
     _apply_native_dark_title_bar(window)

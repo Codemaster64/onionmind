@@ -63,7 +63,7 @@ object ProcessManager {
     fun installedModels(ctx: Context) = models(ctx).filter { isInstalled(ctx, it) }
     fun installedModel(ctx: Context): Model? {
         val installed = installedModels(ctx)
-        val active = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(ACTIVE, null)
+        val active = Workbench.readSecret(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE), ACTIVE)
         return installed.firstOrNull { it.id == active } ?: installed.firstOrNull()
     }
 
@@ -92,7 +92,7 @@ object ProcessManager {
 
     fun selectModel(ctx: Context, id: String): Boolean {
         val model = installedModels(ctx).firstOrNull { it.id == id } ?: return false
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(ACTIVE, model.id).apply()
+        Workbench.writeSecret(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE), ACTIVE, model.id)
         stopLlama()
         return true
     }
@@ -106,7 +106,7 @@ object ProcessManager {
         cleanupParallelParts(part)
         if (!model.builtin) writeCustom(ctx, readCustom(ctx).filterNot { it.id == id })
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (prefs.getString(ACTIVE, null) == id) prefs.edit().remove(ACTIVE).apply()
+        if (Workbench.readSecret(prefs, ACTIVE) == id) prefs.edit().remove(ACTIVE).apply()
         return true
     }
 
@@ -403,11 +403,12 @@ object ProcessManager {
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }
 
-    private fun readCustom(ctx: Context): List<Model> = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(CUSTOM, "")!!.lineSequence().mapNotNull {
+    // The custom catalog names what was downloaded from where: encrypted like the rest.
+    private fun readCustom(ctx: Context): List<Model> = Workbench.readSecret(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE), CUSTOM).orEmpty().lineSequence().mapNotNull {
         // Re-validate on the way OUT too: whatever sits in the store, only a
         // plain name may ever be joined onto modelDir.
         val p = it.split('\t')
         if (p.size == 5 && p[2].matches(FILENAME)) Model(p[0], p[1], p[2], p[3], p[4].toLongOrNull() ?: 0) else null
     }.toList()
-    private fun writeCustom(ctx: Context, models: List<Model>) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(CUSTOM, models.joinToString("\n") { listOf(it.id, it.name, it.file, it.url, it.bytes).joinToString("\t") }).apply()
+    private fun writeCustom(ctx: Context, models: List<Model>) = Workbench.writeSecret(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE), CUSTOM, models.joinToString("\n") { listOf(it.id, it.name, it.file, it.url, it.bytes).joinToString("\t") })
 }

@@ -544,6 +544,107 @@ class SettingsDialog(QDialog):
         if window is not None:
             window.open_setup()
 
+    def _encryption_section(self) -> QWidget:
+        """Encryption at rest: what protects the data now, and the optional
+        password that unlocks it when Onionmind opens."""
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+        heading = QLabel("Encryption")
+        heading.setObjectName("brand")
+        layout.addWidget(heading)
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        self.encryption_status = QLabel("")
+        self.encryption_status.setWordWrap(True)
+        layout.addWidget(self.encryption_status)
+        self.password_current = QLineEdit()
+        self.password_new = QLineEdit()
+        self.password_repeat = QLineEdit()
+        for field, text in ((self.password_current, "Current password"), (self.password_new, "New password"),
+                            (self.password_repeat, "Repeat the new password")):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText(text)
+            field.setAccessibleName(text)
+            layout.addWidget(field)
+        buttons = QHBoxLayout()
+        self.password_set_button = QPushButton("Set password")
+        self.password_set_button.setObjectName("primaryButton")
+        self.password_remove_button = QPushButton("Remove password")
+        buttons.addWidget(self.password_set_button)
+        buttons.addWidget(self.password_remove_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.password_feedback = QLabel(
+            "Optional. With a password, Onionmind asks for it each time it opens and the key is "
+            "nowhere on this machine. If you forget it, your conversations and settings cannot "
+            "be recovered - not by you, not by anyone.")
+        self.password_feedback.setObjectName("meta")
+        self.password_feedback.setWordWrap(True)
+        layout.addWidget(self.password_feedback)
+        if vault is None:
+            for widget in (self.password_current, self.password_new, self.password_repeat,
+                           self.password_set_button, self.password_remove_button, self.password_feedback):
+                widget.hide()
+            notice = _as_text(getattr(window, "encryption_notice", "")) if window is not None else ""
+            self.encryption_status.setText(notice or "Not encrypted: files in the data folder are plain text.")
+            self.encryption_status.setObjectName("danger")
+        else:
+            self.password_set_button.clicked.connect(self._set_password)
+            self.password_remove_button.clicked.connect(self._remove_password)
+            self._describe_encryption()
+        return section
+
+    def _describe_encryption(self) -> None:
+        vault = getattr(self._window(), "vault", None)
+        if vault is None:
+            return
+        self.encryption_status.setText(vault.describe())
+        has = vault.has_password
+        self.password_current.setVisible(has)
+        self.password_remove_button.setVisible(has)
+        self.password_set_button.setText("Change password" if has else "Set password")
+
+    def _set_password(self) -> None:
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        new, repeat = self.password_new.text(), self.password_repeat.text()
+        if vault is None:
+            return
+        if len(new) < 8:
+            self.password_feedback.setText("Use at least 8 characters; a few words are easier to remember.")
+            return
+        if new != repeat:
+            self.password_feedback.setText("The two new passwords do not match.")
+            return
+        try:
+            vault.set_password(new, current=self.password_current.text() if vault.has_password else None)
+        except Exception as exc:
+            self.password_feedback.setText(_as_text(exc) or "The password could not be set.")
+            return
+        for field in (self.password_current, self.password_new, self.password_repeat):
+            field.clear()
+        self.password_feedback.setText("Password set. Onionmind will ask for it each time it opens. "
+                                       "Keep it somewhere safe: it cannot be reset.")
+        self._describe_encryption()
+        window.passwordChanged.emit()
+
+    def _remove_password(self) -> None:
+        window = self._window()
+        vault = getattr(window, "vault", None)
+        if vault is None or not vault.has_password:
+            return
+        try:
+            vault.remove_password(self.password_current.text())
+        except Exception as exc:
+            self.password_feedback.setText(_as_text(exc) or "The password could not be removed.")
+            return
+        self.password_current.clear()
+        self.password_feedback.setText("Password removed. The data stays encrypted; "
+                                       "the key is back in this machine's key store.")
+        self._describe_encryption()
+        window.passwordChanged.emit()
+
     def _lock_section(self) -> QWidget:
         section = QWidget()
         layout = QVBoxLayout(section)
@@ -588,7 +689,17 @@ class SettingsDialog(QDialog):
         self.lock_now_button = QPushButton("Lock now")
         form.addRow("", self.lock_now_button)
         layout.addLayout(form)
-        self.lock_feedback = QLabel("Only a salted scrypt hash of the passphrase is stored.")
+        encrypted = getattr(window, "vault", None) is not None
+        if encrypted:
+            # One secret: the idle lock asks for the Encryption password above.
+            self.passphrase_field.hide()
+            self.passphrase_button.hide()
+            label = form.labelForField(pass_row)
+            if label is not None:
+                label.hide()
+        self.lock_feedback = QLabel(
+            "The lock asks for your Encryption password (above)." if encrypted
+            else "Only a salted scrypt hash of the passphrase is stored.")
         self.lock_feedback.setObjectName("meta")
         self.lock_feedback.setWordWrap(True)
         layout.addWidget(self.lock_feedback)
@@ -645,7 +756,10 @@ class SettingsDialog(QDialog):
         if window is None:
             return
         if not window.has_passphrase():
-            self.lock_feedback.setText("Set a passphrase first; without one anybody could unlock.")
+            self.lock_feedback.setText(
+                "Set a password under Encryption first; without one anybody could unlock."
+                if getattr(window, "vault", None) is not None
+                else "Set a passphrase first; without one anybody could unlock.")
             return
         self.done(0)
         window.lock_now()
@@ -1168,6 +1282,7 @@ class SettingsDialog(QDialog):
         form.addRow("Agent", agent)
         form.addRow("Telemetry", QLabel("No Onionmind telemetry or account"))
         outer.addLayout(form)
+        outer.addWidget(self._encryption_section())
 
         on_disk_heading = QLabel("What is written to disk")
         on_disk_heading.setObjectName("brand")
@@ -1634,3 +1749,118 @@ class SettingsDialog(QDialog):
         self.storage_feedback.setText(
             "Opened Onionmind storage." if opened else "The system could not open the storage folder."
         )
+
+
+class UnlockDialog(QDialog):
+    """Before the window opens: the password for the encrypted data folder,
+    or what to do when its key is gone.
+
+    kind "password": unlock, or erase everything after a forgotten password.
+    kind "missing-key": the key store lost the key; quit or erase.
+    kind "upgrade": an older lock passphrase becomes the password, or is dropped.
+    `attempt(text)` returns an error to show, or None when it worked.
+    `outcome` ends as "unlocked", "erase", "skip" or "quit"."""
+
+    def __init__(self, kind: str, attempt: Optional[Callable[[str], Optional[str]]] = None,
+                 detail: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.attempt = attempt
+        self.outcome = "quit"
+        self.setWindowTitle("Onionmind")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        titles = {
+            "password": "Unlock Onionmind",
+            "missing-key": "The key to your data is missing",
+            "upgrade": "Use your lock passphrase as your password",
+        }
+        copies = {
+            "password": "Your conversations, projects and settings are encrypted on this machine. "
+                        "Enter your password to open them.",
+            "missing-key": (detail or "The data key is no longer in this machine's key store.")
+                           + " The encrypted data cannot be read without it.",
+            "upgrade": "Onionmind now encrypts everything it keeps. You had set a lock passphrase: "
+                       "enter it to make it your password. Onionmind will then ask for it each time "
+                       "it opens, and the data cannot be read without it.",
+        }
+        title = QLabel(titles[kind])
+        title.setObjectName("brand")
+        body = QLabel(copies[kind])
+        body.setObjectName("meta")
+        body.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("Passphrase" if kind == "upgrade" else "Password")
+        self.password.setAccessibleName(self.password.placeholderText())
+        self.password.returnPressed.connect(self._submit)
+        self.error = QLabel("")
+        self.error.setObjectName("danger")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        buttons = QHBoxLayout()
+        self.secondary = QPushButton({"password": "Forgot your password?", "missing-key": "Erase and start over",
+                                      "upgrade": "Don't use a password"}[kind])
+        self.secondary.setObjectName("dangerButton" if kind != "upgrade" else "")
+        self.secondary.clicked.connect(self._secondary)
+        self.primary = QPushButton({"password": "Unlock", "missing-key": "Quit", "upgrade": "Use as password"}[kind])
+        self.primary.setObjectName("primaryButton")
+        self.primary.setDefault(True)
+        self.primary.clicked.connect(self._submit)
+        buttons.addWidget(self.secondary)
+        buttons.addStretch(1)
+        buttons.addWidget(self.primary)
+        if kind != "missing-key":
+            layout.addWidget(self.password)
+        layout.addWidget(self.error)
+        layout.addLayout(buttons)
+        self.password.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _submit(self) -> None:
+        if self.kind == "missing-key":
+            self.outcome = "quit"
+            self.reject()
+            return
+        text = self.password.text()
+        if not text:
+            self._show_error("Enter your password." if self.kind == "password" else "Enter your passphrase.")
+            return
+        problem = self.attempt(text) if self.attempt is not None else None
+        if problem:
+            self._show_error(problem)
+            self.password.selectAll()
+            return
+        self.password.clear()
+        self.outcome = "unlocked"
+        self.accept()
+
+    def _show_error(self, text: str) -> None:
+        self.error.setText(text)
+        self.error.show()
+
+    def _secondary(self) -> None:
+        if self.kind == "upgrade":
+            self.outcome = "skip"
+            self.accept()
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Erase all Onionmind data?",
+            "This permanently deletes every conversation, project list, network log and setting "
+            "Onionmind keeps, and its key. There is no way to get them back. Your project folders "
+            "and models are not touched.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Discard,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Discard:
+            self.outcome = "erase"
+            self.accept()
+
+    def reject(self) -> None:
+        self.outcome = "quit"                       # Esc or the close box
+        super().reject()

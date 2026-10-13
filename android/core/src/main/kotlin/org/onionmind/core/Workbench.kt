@@ -280,7 +280,7 @@ class TurnStats {
  * text, no URL path. Written only while netlog or boundary is on, so the
  * default app keeps no such record (same choice as the desktop).
  */
-class EgressLog(private val file: File, private val maxEntries: Int = 1000) {
+class EgressLog(private val file: File, private val maxEntries: Int = 1000, private val vault: Vault? = null) {
     data class Entry(val time: Instant, val route: String, val destination: String, val kind: String, val detail: String)
 
     companion object {
@@ -297,16 +297,26 @@ class EgressLog(private val file: File, private val maxEntries: Int = 1000) {
             put("destination", clean(destination)); put("kind", clean(kind)); put("detail", clean(detail))
         }.toString()
         file.parentFile?.mkdirs()
-        val lines = (if (file.isFile) file.readLines() else emptyList()) + line
+        val lines = readLines() + line
+        val body = lines.takeLast(maxEntries).joinToString("\n", postfix = "\n").toByteArray(Charsets.UTF_8)
+        if (vault == null && file.isFile && Vault.isEncrypted(file.readBytes()))
+            throw IllegalStateException("the network log is encrypted; it can only be written through the open vault")
         val tmp = File(file.path + ".tmp")
-        tmp.writeText(lines.takeLast(maxEntries).joinToString("\n", postfix = "\n"))
+        tmp.writeBytes(vault?.encrypt(body) ?: body)
         if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
+    }
+
+    /** The log's lines; an encrypted log without its vault reads as empty. */
+    private fun readLines(): List<String> {
+        if (!file.isFile) return emptyList()
+        var bytes = file.readBytes()
+        if (Vault.isEncrypted(bytes)) bytes = try { vault?.decrypt(bytes) } catch (_: Exception) { null } ?: return emptyList()
+        return bytes.toString(Charsets.UTF_8).lines().filter { it.isNotBlank() }
     }
 
     @Synchronized
     fun entries(): List<Entry> {
-        if (!file.isFile) return emptyList()
-        return file.readLines().mapNotNull { line ->
+        return readLines().mapNotNull { line ->
             try {
                 val o = Json.parseToJsonElement(line).jsonObject
                 fun s(k: String) = (o[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
