@@ -350,6 +350,7 @@ class WebInstallerTests(unittest.TestCase):
         windows = {asset for asset, _sha in _pins("onionmind-setup-web.cmd", self.text("onionmind-setup-web.cmd"))}
         self.assertEqual(desktop - {"logo.svg"} | {"onionmind.ico"}, windows)
 
+    @unittest.skipIf(sys.platform == "win32", "bash on a Windows runner is WSL's, which cannot open D:\\ paths")
     def test_the_web_shell_installers_parse(self) -> None:
         for web in ("install-onionmind-web.sh", "install-onionmind-android-web.sh"):
             result = subprocess.run(["bash", "-n", str(ROOT / web)], capture_output=True, text=True)
