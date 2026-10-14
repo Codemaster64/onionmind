@@ -319,13 +319,23 @@ secret: the key store's name, or the password-wrapped key. Where the key lives:
   Without `cryptography` the app refuses to open an encrypted folder and only
   runs unencrypted (with a visible notice) when nothing was encrypted yet; a
   missing key is reported, never silently replaced.
-- **Outside the vault:** the agent writes its network log
-  (`~/.onionmind/agent-net.log`) in plaintext while it runs, because it has no
-  key; the desktop moves it into the encrypted log (or drops it when logging is
-  off) and shreds it when the run ends. qwen-code keeps its own chat history
-  under `~/.qwen` in plaintext, because qwen reads it back. Models, project
-  folders, Tor's state and the context-size number in `~/.onionmind/code-ctx`
-  are not encrypted either. Full-disk encryption covers all of those.
+- **Agent runs:** the agent process has no key, and qwen-code reads its own
+  session back, so each run gets a private scratch folder (mode 0700, under
+  `$XDG_RUNTIME_DIR` - RAM-backed on most Linux systems - else the temp
+  folder). qwen's runtime data (`QWEN_RUNTIME_DIR`: chats, tool output, todos,
+  checkpoints) and the agent's network log (`ONIONMIND_NET_LOG`) go there.
+  When the run ends the log moves into the encrypted log (or is dropped when
+  logging is off), qwen's data is sealed into `agent-runtime/<session>.tar` in
+  the vault, and the folder is shredded; "Continue this run" decrypts that
+  session into a fresh folder. A folder left by a crash is swept at the next
+  start. Without encryption the agent keeps using `~/.qwen` and
+  `~/.onionmind/agent-net.log` as before.
+- **Outside the vault:** `~/.qwen/settings.json` (Onionmind's own settings for
+  qwen, no conversation), `~/.qwen/usage_record.jsonl` (qwen's per-run token
+  counts with the session id and project path, no content), and anything
+  qwen's `save_memory` tool writes to `~/.qwen/memory.md`. Models, project folders, Tor's state and the
+  context-size number in `~/.onionmind/code-ctx` are not encrypted either.
+  Full-disk encryption covers all of those.
 
 Verified by `tests/test_vault.py` (round trips, migration, password set,
 change and remove, wrong password, lost key, erase, tampering, revert copies,

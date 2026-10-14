@@ -201,6 +201,22 @@ class NetLogTests(unittest.TestCase):
         with mock.patch.object(onionmind, "NET_LOG", ""):
             onionmind._net_log("anything")       # must not raise
 
+    def test_the_desktop_can_point_the_log_at_a_private_folder(self):
+        # An encrypted desktop sets ONIONMIND_NET_LOG to the run's scratch
+        # folder; a relative value is ignored rather than trusted.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        probe = ["-c", "import onionmind; print(onionmind.NET_LOG)"]
+        with tempfile.TemporaryDirectory() as folder:
+            target = os.path.join(folder, "agent-net.log")
+            for value, expected in ((target, target), ("relative.log", None)):
+                env = dict(os.environ, ONIONMIND_NET_LOG=value)
+                out = subprocess.run([sys.executable, *probe], cwd=root, env=env,
+                                     capture_output=True, text=True, check=True).stdout.strip()
+                if expected:
+                    self.assertEqual(out, expected)
+                else:
+                    self.assertTrue(out.endswith(os.path.join(".onionmind", "agent-net.log")), out)
+
 
 class ContainmentTests(unittest.TestCase):
     """Nothing reaches the network except through the proxy, which is Tor."""
