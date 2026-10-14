@@ -25,6 +25,12 @@
 
 **Matchstick — [download the pre-built USB image](https://github.com/Codemaster64/onionmind/releases/tag/matchstick-pocket)** · [Windows launcher `.cmd`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.cmd) · [Linux/macOS launcher `.sh`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/matchstick.sh)
 
+Every installer also comes as a small web variant (`onionmind-setup-web.cmd`,
+`install-onionmind-web.sh`, `install-onionmind-android-web.sh`, ~40 KB): it
+downloads the program files from the same release and refuses any whose SHA-256
+differs from the one pinned inside it. The full installers carry everything and
+need no download for Onionmind's own files.
+
 Windows ships two routes: the one-click `onionmind-setup.cmd` above, and the
 rolling [`Onionmind-Windows-x64.zip`](https://github.com/Codemaster64/onionmind/releases/download/desktop-latest/Onionmind-Windows-x64.zip)
 the desktop workflow rebuilds after every push to `main` — that rolling release
