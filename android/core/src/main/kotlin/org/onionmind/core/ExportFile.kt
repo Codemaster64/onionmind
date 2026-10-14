@@ -1,6 +1,7 @@
 package org.onionmind.core
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -8,7 +9,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.Instant
 import java.util.Base64
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
@@ -80,6 +83,54 @@ object ExportFile {
         return try { Json.parseToJsonElement(plain.toString(Charsets.UTF_8)).jsonObject } catch (_: Exception) {
             throw Invalid("The export file is damaged.")
         }
+    }
+
+    /**
+     * The phone's one conversation as an export with one session, in the
+     * desktop's session shape. Only the user and assistant turns travel (a
+     * reply's _meta stays here). The id is a hash of the turns, so importing
+     * the same export twice adds it once, and a conversation that grew since
+     * imports as a new session beside the old one.
+     */
+    fun fromConversation(messages: List<JsonObject>, now: Instant = Instant.now()): JsonObject {
+        val turns = turns(messages)
+        val digest = MessageDigest.getInstance("SHA-256").digest(JsonArray(turns).toString().toByteArray(Charsets.UTF_8))
+        val first = turns.firstOrNull { text(it, "role") == "user" }?.let { text(it, "content") }.orEmpty()
+        val title = first.lineSequence().firstOrNull().orEmpty().trim().take(60).ifEmpty { "Phone conversation" }
+        val stamp = now.toString()
+        val sessions = if (turns.isEmpty()) JsonArray(emptyList()) else JsonArray(listOf(buildJsonObject {
+            put("version", 1)
+            put("id", "android-" + digest.take(16).joinToString("") { "%02x".format(it) })
+            put("title", title); put("model", ""); put("workspace", null as String?)
+            put("messages", JsonArray(turns))
+            put("created_at", stamp); put("updated_at", stamp); put("archived_at", null as String?)
+        }))
+        return buildJsonObject {
+            put("version", 1); put("from", "android"); put("exported_at", stamp)
+            put("sessions", sessions); put("settings", buildJsonObject {})
+        }
+    }
+
+    /**
+     * What the phone takes from an export: the newest session that is not
+     * archived (the phone keeps one conversation), as user/assistant turns,
+     * and how many sessions the file holds. null when it has none.
+     */
+    fun newestConversation(payload: JsonObject): Pair<List<JsonObject>, Int>? {
+        val sessions = (payload["sessions"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        val live = sessions.filter { (it["archived_at"] as? JsonPrimitive)?.contentOrNull == null }
+        val newest = live.maxByOrNull { text(it, "updated_at").orEmpty() } ?: return null
+        val turns = turns((newest["messages"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject })
+        return if (turns.isEmpty()) null else turns to sessions.size
+    }
+
+    private fun text(obj: JsonObject, name: String) = (obj[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun turns(messages: List<JsonObject>): List<JsonObject> = messages.mapNotNull { message ->
+        val role = text(message, "role")
+        val content = text(message, "content")
+        if ((role == "user" || role == "assistant") && !content.isNullOrEmpty())
+            buildJsonObject { put("role", role); put("content", content) } else null
     }
 
     private fun key(password: String, salt: ByteArray, iterations: Int): ByteArray {

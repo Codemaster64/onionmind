@@ -45,8 +45,46 @@ class ExportFileTest {
     @Test fun writesWhatTheDesktopReads() {
         // A phone-made file in build/, for a by-hand check that the desktop opens it.
         File("build").mkdirs()
-        File("build/export-from-jvm.onionmind").writeBytes(ExportFile.write(password, buildJsonObject {
-            put("version", 1); put("from", "android"); put("note", "made on the JVM")
-        }))
+        File("build/export-from-jvm.onionmind").writeBytes(ExportFile.write(password, ExportFile.fromConversation(listOf(
+            buildJsonObject { put("role", "user"); put("content", "made on the JVM") },
+            buildJsonObject { put("role", "assistant"); put("content", "and opened on the desktop") },
+        ))))
+    }
+
+    @Test fun thePhonesConversationTravelsAsOneDesktopSession() {
+        val messages = listOf(
+            buildJsonObject { put("role", "user"); put("content", "Plan a trip\nto Bergen") },
+            buildJsonObject { put("role", "assistant"); put("content", "Take the train."); put("_meta", "kept here") },
+            buildJsonObject { put("role", "tool"); put("content", "dropped") },
+        )
+        val payload = ExportFile.fromConversation(messages, java.time.Instant.parse("2026-10-14T12:00:00Z"))
+        val session = payload["sessions"]!!.jsonArray.single().jsonObject
+        assertEquals("Plan a trip", session["title"]!!.jsonPrimitive.content)
+        assertEquals(Regex("android-[0-9a-f]{32}").matches(session["id"]!!.jsonPrimitive.content), true)
+        assertEquals(2, session["messages"]!!.jsonArray.size)
+        assertFalse(session["messages"].toString().contains("_meta"))
+        // Same turns, same id: importing twice on the desktop adds it once.
+        assertEquals(session["id"], ExportFile.fromConversation(messages)["sessions"]!!.jsonArray[0].jsonObject["id"])
+        val (back, total) = ExportFile.newestConversation(ExportFile.read(ExportFile.write(password, payload), password))!!
+        assertEquals(listOf("user", "assistant"), back.map { it["role"]!!.jsonPrimitive.content })
+        assertEquals(1, total)
+        assertEquals(0, ExportFile.fromConversation(emptyList())["sessions"]!!.jsonArray.size)
+    }
+
+    @Test fun thePhoneTakesTheNewestLiveSessionFromADesktopExport() {
+        fun session(id: String, updated: String, archived: String?) = buildJsonObject {
+            put("id", id); put("updated_at", updated); put("archived_at", archived)
+            put("messages", kotlinx.serialization.json.JsonArray(listOf(buildJsonObject { put("role", "user"); put("content", id) })))
+        }
+        val payload = buildJsonObject {
+            put("sessions", kotlinx.serialization.json.JsonArray(listOf(
+                session("old", "2026-01-01", null), session("newest-archived", "2026-12-01", "2026-12-02"),
+                session("new", "2026-06-01", null))))
+        }
+        val (turns, total) = ExportFile.newestConversation(payload)!!
+        assertEquals("new", turns.single()["content"]!!.jsonPrimitive.content)
+        assertEquals(3, total)
+        val sample = ExportFile.read(File(fixtures, "export-sample.onionmind").readBytes(), password)
+        assertEquals(2, ExportFile.newestConversation(sample)!!.first.size)
     }
 }

@@ -32,6 +32,9 @@ object Workbench {
 
     fun locked(): Boolean = vault == null
 
+    /** Set by MainActivity: ask where to save a sealed export, then write it there. */
+    @Volatile var onExport: ((ByteArray) -> Unit)? = null
+
     /** Open (or create) the vault; a password is needed only when one is set. */
     @Synchronized
     fun openVault(ctx: Context, password: String? = null): Vault {

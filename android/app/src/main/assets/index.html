@@ -233,6 +233,15 @@
       <button onclick="shareConversation()">Share as text</button>
       <button class="danger" onclick="clearConversation()">Clear</button>
     </div>
+    <p class="model-meta">Export it to one encrypted file that opens in Onionmind on a computer or another phone, or import one. The file has its own password; without it nobody can open the file.</p>
+    <input id="xfer-password" type="password" placeholder="Export file password" autocomplete="new-password" aria-label="Export file password">
+    <input id="xfer-repeat" type="password" placeholder="Repeat it (to export)" autocomplete="new-password" aria-label="Repeat the export password">
+    <input id="xfer-file" type="file" hidden onchange="importFile(this.files[0])">
+    <p class="model-meta" id="xfer-feedback" role="status"></p>
+    <div class="model-actions">
+      <button onclick="exportConversation()">Export…</button>
+      <button onclick="$('xfer-file').click()">Import…</button>
+    </div>
   </div>
   <div class="model-card">
     <strong>Encryption</strong>
@@ -884,6 +893,53 @@ async function shareConversation() {
   try { await shareText(text, 'Onionmind conversation'); return; } catch {}
   try { await navigator.clipboard.writeText(text); alert('Conversation copied to the clipboard.'); }
   catch { alert('Sharing is not available here; copy a message instead.'); }
+}
+// Export and import: the desktop's .onionmind format. The phone keeps one
+// conversation, so an import replaces it with the newest one in the file.
+async function exportConversation() {
+  const feedback = $('xfer-feedback'), password = $('xfer-password').value;
+  if (!history.length) { feedback.textContent = 'There is no conversation to export.'; return; }
+  if (password.length < 8) { feedback.textContent = 'Use at least 8 characters for the file\'s password.'; return; }
+  if (password !== $('xfer-repeat').value) { feedback.textContent = 'The two passwords do not match.'; return; }
+  feedback.textContent = 'Encrypting…';
+  try {
+    const r = await api('/api/export', form(new URLSearchParams({password})));
+    const body = await r.json();
+    feedback.textContent = r.ok ? 'Choose where to save the file.' : (body.error || 'The export failed.');
+  } catch (err) { feedback.textContent = errorText(err); }
+}
+function exportSaved(saved) {
+  $('xfer-feedback').textContent = saved
+    ? 'Exported. Anyone with the file and its password can read the conversation.'
+    : 'Not saved.';
+  if (saved) $('xfer-password').value = $('xfer-repeat').value = '';
+}
+async function importFile(file) {
+  const feedback = $('xfer-feedback'), password = $('xfer-password').value;
+  $('xfer-file').value = '';
+  if (!file) return;
+  if (busy) { feedback.textContent = 'Wait for the reply to finish, then import.'; return; }
+  if (!password) { feedback.textContent = 'Type the file\'s password first, then choose Import.'; return; }
+  if (history.length && !confirm('Replace the conversation on this phone with the one in the file? The current one cannot be recovered.')) return;
+  feedback.textContent = 'Opening…';
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    const r = await api('/api/import', form(new URLSearchParams({password, data})));
+    const body = await r.json();
+    if (!r.ok) { feedback.textContent = body.error || 'The import failed.'; return; }
+    $('xfer-password').value = $('xfer-repeat').value = '';
+    feedback.textContent = body.sessions > 1
+      ? `Imported the newest of ${body.sessions} conversations in the file; the phone keeps one at a time.`
+      : 'Imported.';
+    contextUse = null;
+    await loadConversation();
+    if (!history.length) renderHistory();
+  } catch (err) { feedback.textContent = errorText(err); }
 }
 async function clearConversation() {
   if (!confirm('Clear this conversation from the phone? It cannot be recovered.')) return;
