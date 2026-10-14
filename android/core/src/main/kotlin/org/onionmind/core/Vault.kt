@@ -53,12 +53,30 @@ class Vault private constructor(
 
     val hasPassword: Boolean get() = header["password"] is JsonObject
 
-    fun encrypt(plain: ByteArray): ByteArray = seal(key, plain, AAD)
+    @Volatile var closed: Boolean = false
+        private set
 
+    /**
+     * Overwrite the key in memory. Only the password (through [open]) brings it
+     * back; after this every encrypt or decrypt throws [Unavailable], so nothing
+     * is ever written under a zeroed key.
+     */
+    @Synchronized
+    fun close() {
+        key.fill(0)
+        closed = true
+    }
+
+    @Synchronized
+    fun encrypt(plain: ByteArray): ByteArray = seal(liveKey(), plain, AAD)
+
+    @Synchronized
     fun decrypt(blob: ByteArray): ByteArray {
         require(isEncrypted(blob)) { "not an Onionmind encrypted file" }
-        return open(key, blob, AAD) ?: throw Unavailable("the file was not encrypted with this key, or it was changed")
+        return open(liveKey(), blob, AAD) ?: throw Unavailable("the file was not encrypted with this key, or it was changed")
     }
+
+    private fun liveKey(): ByteArray = if (closed) throw Unavailable("Onionmind is locked") else key
 
     /** One value for a text store (SharedPreferences): "enc1:" + base64. */
     fun encryptString(text: String): String =
@@ -223,5 +241,35 @@ class Vault private constructor(
 
         private fun b64(bytes: ByteArray) = Base64.getEncoder().encodeToString(bytes)
         private fun unb64(text: String) = Base64.getDecoder().decode(text)
+    }
+}
+
+/**
+ * Back-off after wrong passwords: 1 s, then 2, 4, 8 ... up to 5 minutes, reset
+ * by a right one. The API is already token-gated against other apps; this
+ * keeps guessing slow even for a caller that has the token.
+ */
+class PasswordThrottle(private val now: () -> Long = System::currentTimeMillis) {
+    private var failures = 0
+    private var until = 0L
+
+    /** How long to refuse password checks for; 0 when one may be tried now. */
+    @Synchronized
+    fun waitMillis(): Long = maxOf(0L, until - now())
+
+    @Synchronized
+    fun failed() {
+        failures++
+        until = now() + minOf(1000L shl minOf(failures - 1, 9), MAX_WAIT_MS)
+    }
+
+    @Synchronized
+    fun succeeded() {
+        failures = 0
+        until = 0L
+    }
+
+    companion object {
+        const val MAX_WAIT_MS = 300_000L
     }
 }

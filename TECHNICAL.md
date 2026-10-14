@@ -307,7 +307,10 @@ secret: the key store's name, or the password-wrapped key. Where the key lives:
   dialog, the TUI with a prompt). Changing it rewraps the key; nothing is
   re-encrypted. **A forgotten password cannot be recovered**: the unlock
   screen offers to erase the data and start over. The idle lock asks for the
-  same password; the key stays in memory while the app runs.
+  same password and drops the data key from memory while locked (a run still
+  going keeps it until it has ended and saved its result); unlocking derives
+  it from the password again. Python cannot overwrite the old key bytes, so
+  they are released to the allocator rather than wiped.
 - **Upgrading:** the first start of this version encrypts any plaintext file
   already in the folder in place (the plaintext bytes are overwritten first,
   with `shred_file`'s limits on SSDs and copy-on-write filesystems). A lock
@@ -585,12 +588,17 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   optional password (Settings → Encryption) wraps the key with
   PBKDF2-HMAC-SHA256 (310,000 rounds) instead and deletes the Keystore copy;
   the app then starts on an unlock screen, and every data route answers 423
-  until `/api/vault/unlock`. A forgotten password cannot be recovered: the
+  until `/api/vault/unlock`. With a password, five minutes in the background
+  locks the app again: the key is overwritten in memory (a reply still being
+  written keeps it until it ends and the page has saved it), and the page
+  forgets the conversation it holds and shows the unlock screen. Wrong
+  passwords back off (1 s, doubling, up to 5 minutes; answered with 429) on
+  top of the per-launch API token that already keeps other apps out. A forgotten password cannot be recovered: the
   unlock screen erases the conversation, log and settings (models stay) after
   a confirmation. An older install's plaintext is encrypted on first start.
   Outside the vault: model files, Tor's state and llama-server's own log
   (truncated each start; load and request lines, no prompts without `-v`).
-  Verified by `VaultTest` (12 JVM tests) and on an Android 14 emulator:
+  Verified by `VaultTest` (14 JVM tests) and on an Android 14 emulator:
   upgrade from the previous APK (every seeded secret gone from disk, values
   `enc1:` and files `OMENC1`), set password, restart to the unlock screen,
   wrong then right password, erase.
