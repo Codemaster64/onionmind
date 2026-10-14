@@ -91,7 +91,7 @@ if ($Audit) {
 
 Write-Host ''
 Write-Host 'Direct-network update plan' -ForegroundColor Yellow
-Write-Host '  1. Resolve one fixed revision from https://api.github.com/'
+Write-Host '  1. Resolve one fixed revision from https://api.github.com/ (or github.com/.../info/refs when rate-limited)'
 Write-Host '  2. Download only the named source files from https://raw.githubusercontent.com/'
 if ($desktopDependenciesReady) {
   Write-Host '  3. Native desktop packages satisfy the supported ranges; pip will not run'
@@ -111,7 +111,21 @@ if (-not $Yes) {
   }
 }
 
-$revision = [string](Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/Codemaster64/onionmind/commits/main').sha
+function Resolve-MainRevision {
+  # api.github.com answers 403 after 60 unauthenticated calls an hour from one
+  # address (a shared NAT, a CI runner); git's own ref advertisement has no
+  # such limit and names the same commit.
+  try {
+    return [string](Invoke-RestMethod -UseBasicParsing 'https://api.github.com/repos/Codemaster64/onionmind/commits/main').sha
+  } catch {
+    $refs = (Invoke-WebRequest -UseBasicParsing 'https://github.com/Codemaster64/onionmind.git/info/refs?service=git-upload-pack').Content
+    if ($refs -is [byte[]]) { $refs = [Text.Encoding]::ASCII.GetString($refs) }
+    $found = [regex]::Match([string]$refs, '([0-9a-f]{40}) refs/heads/main(?![-/\w])')
+    if ($found.Success) { return $found.Groups[1].Value }
+    return ''
+  }
+}
+$revision = Resolve-MainRevision
 if ($revision -notmatch '^[0-9a-fA-F]{40}$') { throw 'Could not resolve a fixed update revision.' }
 if ($localRevision -eq $revision -and $present.Count -eq $files.Count -and $desktopDependenciesReady) {
   Write-Host "Onionmind sources are already current at $revision."

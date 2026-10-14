@@ -62,6 +62,7 @@ fi
 
 echo "Direct-network plan (nothing has contacted the network yet):"
 echo "  - https://api.github.com/repos/Codemaster64/onionmind/commits/main"
+echo "      (or https://github.com/Codemaster64/onionmind.git/info/refs when the API is rate-limited)"
 echo "      resolve one immutable source revision"
 echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/{onionmind.py,onionmind_desktop_core.py,onionmind_desktop.py,onionmind_desktop_theme.py,onionmind_desktop_widgets.py,onionmind_desktop_panes.py,onionmind_desktop_dialogs.py,dsh-onionmind-tor-search.js,dsh-onionmind-tor.patch.yml}"
 echo "      download only when the recorded local revision differs or files are missing"
@@ -105,8 +106,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-revision=$(curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+resolve_main() {
+  # api.github.com answers 403 after 60 unauthenticated calls an hour from one
+  # address (a shared NAT, a CI runner); git's own ref advertisement has no
+  # such limit and names the same commit.
+  curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null ||
+  curl -fsSL 'https://github.com/Codemaster64/onionmind.git/info/refs?service=git-upload-pack' |
+    python3 -c 'import re,sys; m=re.search(rb"([0-9a-f]{40}) refs/heads/main(?![-/\w])", sys.stdin.buffer.read()); print(m.group(1).decode() if m else "")'
+}
+revision=$(resolve_main)
 [[ "$revision" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Could not resolve a fixed update revision." >&2; exit 1; }
 base="https://raw.githubusercontent.com/Codemaster64/onionmind/$revision"
 FILES=(

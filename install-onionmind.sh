@@ -19515,8 +19515,16 @@ LAUNCH
 sudo chmod 755 /usr/local/bin/onionmind
 
 # Repository-aware coding agent, kept separate from Onionmind's local Tor chat.
-DSH_REVISION=$(curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+resolve_main() {
+  # api.github.com answers 403 after 60 unauthenticated calls an hour from one
+  # address (a shared NAT, a CI runner); git's own ref advertisement has no
+  # such limit and names the same commit.
+  curl -fsSL 'https://api.github.com/repos/Codemaster64/onionmind/commits/main' 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null ||
+  curl -fsSL 'https://github.com/Codemaster64/onionmind.git/info/refs?service=git-upload-pack' |
+    python3 -c 'import re,sys; m=re.search(rb"([0-9a-f]{40}) refs/heads/main(?![-/\w])", sys.stdin.buffer.read()); print(m.group(1).decode() if m else "")'
+}
+DSH_REVISION=$(resolve_main)
 [[ "$DSH_REVISION" =~ ^[0-9a-fA-F]{40}$ ]] || die "could not resolve a fixed DSH asset revision"
 DSH_BASE="https://raw.githubusercontent.com/Codemaster64/onionmind/$DSH_REVISION"
 curl -fsSL "$DSH_BASE/dsh-onionmind-tor-search.js" \
