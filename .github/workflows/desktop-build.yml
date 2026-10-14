@@ -286,9 +286,13 @@ jobs:
         run: |
           set -euo pipefail
           # onionmind-install.cmd checks what it downloads against this file.
+          # The web installers fetch the program files below from this release
+          # and check each against a SHA-256 build.py pinned inside them.
           sha256sum "${BUNDLE_ASSET}" "${MANIFEST_ASSET}" onionmind-install.cmd \
             onionmind-setup.cmd install-onionmind.sh install-onionmind-android.sh \
-            matchstick.cmd matchstick.sh > SHA256SUMS
+            onionmind-setup-web.cmd install-onionmind-web.sh install-onionmind-android-web.sh \
+            matchstick.cmd matchstick.sh \
+            onionmind.py onionmind_desktop*.py logo.svg onionmind.ico > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
@@ -310,6 +314,10 @@ jobs:
             onionmind-setup.cmd \
             install-onionmind.sh \
             install-onionmind-android.sh \
+            onionmind-setup-web.cmd \
+            install-onionmind-web.sh \
+            install-onionmind-android-web.sh \
             matchstick.cmd \
             matchstick.sh \
+            onionmind.py onionmind_desktop*.py logo.svg onionmind.ico \
             SHA256SUMS

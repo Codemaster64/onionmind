@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import http.server
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
+import threading
 import sys
 import re
 import unittest
@@ -291,6 +296,130 @@ class InstallerContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 text = self.text(name)
                 self.assertIn("Node.js ^22.19 or 24+", text)
+
+
+
+WEB = {"install-onionmind-web.sh": "install-onionmind.sh",
+       "install-onionmind-android-web.sh": "install-onionmind-android.sh",
+       "onionmind-setup-web.cmd": "onionmind-setup.cmd"}
+PIN_SH = re.compile(r"^fetch_source (\S+) (\S+) ([0-9a-f]{64})$", re.M)
+PIN_CMD = re.compile(r"Get-Onionmind(?:Source|Bytes) '([^']+)' '([0-9a-f]{64})'")
+
+
+def _pins(name: str, text: str) -> list[tuple[str, str]]:
+    if name.endswith(".sh"):
+        return [(asset, sha) for _dest, asset, sha in PIN_SH.findall(text)]
+    return PIN_CMD.findall(text)
+
+
+class _Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args) -> None:
+        pass
+
+
+class WebInstallerTests(unittest.TestCase):
+    """The small installers: the full ones, with each file downloaded from the
+    release and refused unless it matches the SHA-256 pinned at build time."""
+
+    def text(self, name: str) -> str:
+        return (ROOT / name).read_text(encoding="utf-8")
+
+    def test_every_embedded_file_became_a_pinned_download(self) -> None:
+        workflow = self.text(".github/workflows/desktop-build.yml")
+        sums = workflow[workflow.index("sha256sum \"${BUNDLE_ASSET}\""):workflow.index("> SHA256SUMS")]
+        release = workflow[workflow.index("gh release create desktop-latest"):]
+        for web, full in WEB.items():
+            with self.subTest(web=web):
+                text = self.text(web)
+                self.assertLess(len(text.encode()), 64 * 1024)
+                self.assertGreater(len(self.text(full).encode()), len(text.encode()))
+                for marker in ("<<'PYEOF'", "<<'DESKTOP", "<<'SVGEOF'", "$search = @'", "$desktopCore = @'",
+                               "$OnionIco = @'"):
+                    self.assertNotIn(marker, text)
+                pins = _pins(web, text)
+                self.assertTrue(pins)
+                for asset, sha in pins:
+                    self.assertEqual(hashlib.sha256((ROOT / asset).read_bytes()).hexdigest(), sha, asset)
+                    published = "onionmind_desktop*.py" if asset.startswith("onionmind_desktop") else asset
+                    self.assertIn(published, sums, asset)
+                    self.assertIn(published, release, asset)
+                self.assertIn(web, sums)
+                self.assertIn(web, release)
+        desktop = {asset for asset, _sha in _pins("install-onionmind-web.sh", self.text("install-onionmind-web.sh"))}
+        self.assertEqual({p.name for p in ROOT.glob("onionmind_desktop*.py")} | {"onionmind.py", "logo.svg"}, desktop)
+        windows = {asset for asset, _sha in _pins("onionmind-setup-web.cmd", self.text("onionmind-setup-web.cmd"))}
+        self.assertEqual(desktop - {"logo.svg"} | {"onionmind.ico"}, windows)
+
+    @unittest.skipIf(sys.platform == "win32", "bash on a Windows runner is WSL's, which cannot open D:\\ paths")
+    def test_the_web_shell_installers_parse(self) -> None:
+        for web in ("install-onionmind-web.sh", "install-onionmind-android-web.sh"):
+            result = subprocess.run(["bash", "-n", str(ROOT / web)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def serve(self, directory: Path) -> str:
+        handler = lambda *a, **k: _Quiet(*a, directory=str(directory), **k)  # noqa: E731
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def release_dir(self, tamper: str = "") -> Path:
+        temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temp, True)
+        (temp / "release").mkdir()
+        for name in ("onionmind.py", "logo.svg"):
+            shutil.copy(ROOT / name, temp / "release" / name)
+        if tamper:
+            with open(temp / "release" / tamper, "a", encoding="utf-8") as handle:
+                handle.write("\n# changed after the installer was built\n")
+        return temp
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("curl") and sys.platform != "win32",
+                         "needs bash and curl")
+    def test_the_shell_fetch_writes_a_matching_file_and_refuses_a_changed_one(self) -> None:
+        text = self.text("install-onionmind-web.sh")
+        helpers = text[text.index("\ndie()") + 1:text.index("\n}\n", text.index("fetch_source() {")) + 3]
+        pin = next(line for line in text.splitlines() if line.startswith("fetch_source \"$DIR/onionmind.py\""))
+        for tamper in ("", "onionmind.py"):
+            with self.subTest(tampered=bool(tamper)):
+                temp = self.release_dir(tamper)
+                script = "set -euo pipefail\n" + helpers + f"DIR={temp}/install\nmkdir -p \"$DIR\"\n" + pin + "\n"
+                env = {"PATH": "/usr/bin:/bin", "ONIONMIND_RELEASE": self.serve(temp / "release")}
+                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+                installed = temp / "install" / "onionmind.py"
+                self.assertFalse((temp / "install" / "onionmind.py.download").exists())
+                if tamper:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("does not match this installer", result.stderr)
+                    self.assertFalse(installed.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(installed.read_bytes(), (ROOT / "onionmind.py").read_bytes())
+
+    @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "needs PowerShell")
+    def test_the_powershell_fetch_returns_a_matching_file_and_refuses_a_changed_one(self) -> None:
+        text = self.text("onionmind-setup-web.cmd")
+        start = text.index("$OnionmindRelease = ")
+        helpers = text[start:text.index("\n}\n", text.index("function Get-OnionmindSource")) + 3]
+        pin = next(line for line in text.splitlines() if line.startswith("$search = Get-OnionmindSource"))
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        for tamper in ("", "onionmind.py"):
+            with self.subTest(tampered=bool(tamper)):
+                temp = self.release_dir(tamper)
+                out = temp / "onionmind.py"
+                script = ("$ErrorActionPreference = 'Stop'\n" + helpers + pin + "\n"
+                          f"[IO.File]::WriteAllText('{out}', $search, (New-Object Text.UTF8Encoding($false)))\n")
+                env = {**__import__("os").environ, "ONIONMIND_RELEASE": self.serve(temp / "release")}
+                result = subprocess.run([shell, "-NoProfile", "-Command", script], capture_output=True,
+                                        text=True, env=env, timeout=120)
+                if tamper:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("does not match this installer", result.stdout + result.stderr)
+                    self.assertFalse(out.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(out.read_bytes(), (ROOT / "onionmind.py").read_bytes())
 
 
 if __name__ == "__main__":

@@ -24,7 +24,8 @@ of things you must not get wrong here, and the checks that prove you didn't.
 1. **Single-source the payloads.** `onionmind.py`, `onionmind.ico`, and the logo
    are embedded (copied) into every installer (`install-onionmind.*`,
    `onionmind-setup.cmd`, …). **Never hand-edit an installer's embedded copy.**
-   Edit the source, then run `python build.py`, and commit both. `python build.py
+   Edit the source, then run `python build.py`, and commit both (it also
+   regenerates the `*-web` installers, which pin each file's SHA-256). `python build.py
    --check` is the gate; if you skip it, `tests/test_installer_contracts.py` fails.
 
 2. **Never weaken the Tor egress boundary.** The invariant: *the agent's and
