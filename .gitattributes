@@ -2,6 +2,8 @@
 *.py text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
+# the web installers pin the SHA-256 of logo.svg as the release serves it (LF)
+*.svg text eol=lf
 # ...except the universal installer: it is also a sh script, and a CR breaks sh
 onionmind-install.cmd text eol=lf
 
