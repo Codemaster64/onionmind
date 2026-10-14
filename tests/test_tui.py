@@ -91,6 +91,9 @@ async def chat_round_trip(data: Path) -> None:
         await pilot.pause(0.2)
         assert core.calls[1:] == ["start_tor", ("turn", "inferno", True)], core.calls
         assert not app.search_armed, "search must disarm after one turn"
+        # The model did not search, so nothing verified Tor: the pill must not
+        # stay on "checking" (found in a live run against a real model).
+        assert app._tor_pill == "off", app._tor_pill
 
         # /model switches the raw name the core sees; a label never does.
         await pilot.press(*"/model blaze", "enter")

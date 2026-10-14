@@ -522,6 +522,7 @@ class OnionmindTUI(App):
             states = {"off": ("○ Tor off", ""), "checking": ("◌ Tor checking…", "checking"),
                       "ready": ("● Tor ready", "ready"), "bad": ("✗ Tor unverified", "bad")}
             label, cls = states[tor]
+            self._tor_pill = tor
             pill.update(label)
             pill.set_classes(f"pill {cls}".strip())
         search = self.query_one("#search-pill", Label)
@@ -820,6 +821,10 @@ class OnionmindTUI(App):
             self.session.model = self.core.MODEL
             self.store.save(self.session)
         tor = "ready" if getattr(self.core, "_port", None) else None
+        if tor is None and getattr(self, "_tor_pill", None) == "checking":
+            # Tor is verified only when the model actually searches; a turn that
+            # did not must not leave the pill stuck on "checking".
+            tor = "bad" if error else "off"
         self._paint_status(tor)
         self._refresh_sessions()
 
