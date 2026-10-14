@@ -298,12 +298,17 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
-$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' 'd066ff968a3d09d05b4cf7996ccd53ac02d54b7e0a47239ddd6d7249cf009a90'
+$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' 'b8859ca2c6b8f46db91b2a5b71b4ed67e12ef2d282eee41559f02e0e020c0423'
 $desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '9ab787bf8325487462dcdcc672f278c3750ab2475252cc335e13f2bf1efc6053'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
 $desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' '54b13eafd4317b87948ed12f6f92cd51a5e5e74e7394131d7e34e98b88ceeb90'
 $desktopDialogs = Get-OnionmindSource 'onionmind_desktop_dialogs.py' '15da860a59d8c41e5e2325225c0e5786778edc3689d2a76088bf34b99d262125'
+$desktopVault = Get-OnionmindSource 'onionmind_desktop_vault.py' 'b00d99ac9d206d832b841b0a595e72a00a1911bc08d5b7d9e71278364f39ad98'
+$desktopNetlog = Get-OnionmindSource 'onionmind_desktop_netlog.py' '2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398'
+$desktopUpdate = Get-OnionmindSource 'onionmind_desktop_update.py' '486b577eae59acb39659e970139410f1c4c0ba554b2d0bea9026ddaf633097c3'
+$desktopHardware = Get-OnionmindSource 'onionmind_desktop_hardware.py' 'bce1eef7004b2943860fd86405e6811ee4fa03774e7c023fba63cc71bbc9168b'
+$desktopRemote = Get-OnionmindSource 'onionmind_desktop_remote.py' '8bb754e965c2f32526594e637477cbce10cd9efe6a9b3f290b6c11a74c1e4f4b'
 $desktopCorePath = Join-Path $Dir 'onionmind_desktop_core.py'
 $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText($desktopCorePath, $desktopCore, $Utf8NoBom)
@@ -312,6 +317,11 @@ $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_widgets.py'), $desktopWidgets, $Utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_panes.py'), $desktopPanes, $Utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_dialogs.py'), $desktopDialogs, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_vault.py'), $desktopVault, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_netlog.py'), $desktopNetlog, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_update.py'), $desktopUpdate, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_hardware.py'), $desktopHardware, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_remote.py'), $desktopRemote, $Utf8NoBom)
 
 $desktopEnv = Join-Path $Dir 'desktop-env'
 $desktopMarker = Join-Path $desktopEnv '.onionmind-desktop-ready'
