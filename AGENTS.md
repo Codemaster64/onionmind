@@ -52,8 +52,9 @@ of things you must not get wrong here, and the checks that prove you didn't.
    a backend or external tool — the **raw** Ollama/llama.cpp model name is what
    crosses those seams. Don't pass a label to a backend.
 
-5. **Respect the seams.** Logic goes in `onionmind_desktop_core.py` (no Qt import,
-   unit-tested); Qt-only code in `onionmind_desktop.py` and its parts
+5. **Respect the seams.** Logic goes in `onionmind_desktop_core.py` and its parts
+   (`onionmind_desktop_vault/netlog/update/hardware/remote.py`; no Qt import,
+   unit-tested, and no part imports the core); Qt-only code in `onionmind_desktop.py` and its parts
    (`onionmind_desktop_theme/widgets/panes/dialogs.py`, which import only
    leftwards in that order); inference stays in
    `onionmind.py`. Don't import Qt into the core, and don't reimplement inference

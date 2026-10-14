@@ -26,7 +26,12 @@ python build.py --check   # CI-style check: are the copies in sync? (no writes)
 Onionmind
 ├── Core inference + CLI + agent      onionmind.py            (no Qt, no Android)
 ├── Desktop workbench (PySide6)
-│   ├── logic, no Qt import           onionmind_desktop_core.py   (unit-tested)
+│   ├── logic, no Qt import           onionmind_desktop_core.py   (unit-tested; re-exports its parts)
+│   │   ├── atomic writes, vault, export  onionmind_desktop_vault.py
+│   │   ├── network log, agent scratch    onionmind_desktop_netlog.py
+│   │   ├── Tor-routed self-update        onionmind_desktop_update.py
+│   │   ├── RAM/VRAM probes, server start onionmind_desktop_hardware.py
+│   │   └── remote compute over SSH       onionmind_desktop_remote.py
 │   └── Qt widget tree + workers      onionmind_desktop.py  (the window; re-exports the parts)
 │       ├── palette, style, helpers   onionmind_desktop_theme.py
 │       ├── reusable widgets          onionmind_desktop_widgets.py
@@ -135,6 +140,13 @@ Three deliberately narrow seams so the logic is testable without a GUI:
   settings) ← `onionmind_desktop.py` (`OnionmindWindow`, `run`). The window module
   re-exports every name from the other four, so `onionmind_desktop.X` keeps
   working. In tests, patch a name in the module that calls it.
+
+  The core is split the same way. `onionmind_desktop_vault.py` (path types,
+  atomic writes, shredding, encryption at rest, export) is the base; the
+  network log, self-update, hardware and remote parts import only from it;
+  `onionmind_desktop_core.py` keeps sessions, settings, the workspace, Harness
+  and the v2 helpers, and re-exports every name from the parts, so
+  `onionmind_desktop_core.X` keeps working. No part imports the core module.
 
 - **`onionmind.py`** — inference stays here. The desktop calls `turn_stream` etc.;
   it does not reimplement inference or Tor.

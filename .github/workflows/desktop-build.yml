@@ -86,9 +86,12 @@ jobs:
           printf 'q\n' | sh onionmind-install.cmd --dry-run
 
       - name: The updater installs into a fresh folder, audits clean, then finds it current
-        # A real run, not a text check: it resolves main, downloads the
-        # sources, builds the desktop runtime and writes the launchers.
+        # A real run, not a text check: it downloads the sources of this
+        # commit (main's would lack files a pull request adds), builds the
+        # desktop runtime and writes the launchers.
         shell: bash
+        env:
+          ONIONMIND_UPDATE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           dir="$RUNNER_TEMP/onionmind-update"
           bash update-onionmind.sh --install-dir "$dir" --allow-network --yes
@@ -158,6 +161,8 @@ jobs:
 
       - name: The updater installs into a fresh folder and audits clean
         shell: powershell
+        env:
+          ONIONMIND_UPDATE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'onionmind-update'
           .\update-onionmind.ps1 -InstallDir $dir -AllowDirectNetwork -Yes

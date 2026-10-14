@@ -56,4 +56,5 @@ include-package-data = false
 py-modules = [
     "onionmind", "onionmind_desktop", "onionmind_desktop_core", "onionmind_desktop_theme",
     "onionmind_desktop_widgets", "onionmind_desktop_panes", "onionmind_desktop_dialogs", "onionmind_tui",
+    "onionmind_desktop_vault", "onionmind_desktop_netlog", "onionmind_desktop_update", "onionmind_desktop_hardware", "onionmind_desktop_remote",
 ]

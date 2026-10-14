@@ -958,6 +958,11 @@ signed in. The repos in the installer are ungated. If you swap in a gated one yo
 | `onionmind_desktop_panes.py` | Bridges to the core module, left rail, terminal drawer, inspector. |
 | `onionmind_desktop_dialogs.py` | Model manager, feature toggles, settings dialog. |
 | `onionmind_desktop_core.py` | Qt-free session/settings storage, workspace/Git inspection, model labels, and Harness command spec. |
+| `onionmind_desktop_vault.py` | Atomic writes, shredding, encryption at rest and export (the core's base part). |
+| `onionmind_desktop_netlog.py` | Network log and the agent's private scratch folder. |
+| `onionmind_desktop_update.py` | Tor-routed self-update of the Windows bundle. |
+| `onionmind_desktop_hardware.py` | RAM and per-vendor VRAM probes, model fit, model-server start plan, Node check. |
+| `onionmind_desktop_remote.py` | Remote compute: SSH target parsing and the `ssh -L` tunnel. |
 | `install-onionmind.sh` | Linux installer. Detects Arch vs Ubuntu/Debian; systemd either way. |
 | `install-onionmind-android.sh` | Android installer, runs inside Termux. Builds llama.cpp, installs tor + model by RAM. |
 | `android/` | The standalone APK: Kotlin app + pure-Kotlin port of the search agent (`:core`), Docker build from source. |

@@ -24,6 +24,11 @@ $PythonSources = @(
     "onionmind_desktop_widgets.py",
     "onionmind_desktop_panes.py",
     "onionmind_desktop_dialogs.py",
+    "onionmind_desktop_vault.py",
+    "onionmind_desktop_netlog.py",
+    "onionmind_desktop_update.py",
+    "onionmind_desktop_hardware.py",
+    "onionmind_desktop_remote.py",
     "onionmind_desktop_core.py"
 )
 $RuntimeAssets = @(
@@ -274,6 +279,11 @@ $NuitkaArguments = @(
     "--include-module=onionmind_desktop_widgets",
     "--include-module=onionmind_desktop_panes",
     "--include-module=onionmind_desktop_dialogs",
+    "--include-module=onionmind_desktop_vault",
+    "--include-module=onionmind_desktop_netlog",
+    "--include-module=onionmind_desktop_update",
+    "--include-module=onionmind_desktop_hardware",
+    "--include-module=onionmind_desktop_remote",
     "--include-module=cryptography.hazmat.primitives.ciphers.aead",
     "--include-module=cryptography.exceptions",
     "--include-data-files=$(Join-Path $RepoRoot 'dsh-onionmind-tor-search.js')=dsh-onionmind-tor-search.js",
