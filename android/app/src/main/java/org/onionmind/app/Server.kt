@@ -15,6 +15,7 @@ import org.onionmind.core.ContextWindow
 import org.onionmind.core.ConversationStore
 import org.onionmind.core.EgressLog
 import org.onionmind.core.ErrorKind
+import org.onionmind.core.ExportFile
 import org.onionmind.core.Features
 import org.onionmind.core.ModelCatalog
 import org.onionmind.core.ModelFit
@@ -85,6 +86,8 @@ object Server {
                         session.uri == "/api/netlog" -> netlog(session)
                         session.uri == "/api/share" -> share(session)
                         session.uri == "/api/conversation" -> conversation(session)
+                        session.uri == "/api/export" -> export(session)
+                        session.uri == "/api/import" -> import(session)
                         session.uri == "/api/stop" -> stopChat()
                         session.uri == "/api/install" -> install(session)
                         session.uri == "/api/select" -> select(session)
@@ -291,6 +294,44 @@ object Server {
         }
         ConversationStore.save(ctx.filesDir, messages, vault)
         return json(JsonArray(messages).toString())
+    }
+
+    // --- export and import ---------------------------------------------------
+    // The desktop's .onionmind file (core ExportFile): its own password, so
+    // it opens on another phone or computer without this phone's key.
+
+    /** Seal the conversation into an export; the activity asks where to save it. */
+    private fun export(session: IHTTPSession): Response {
+        val password = field(session, "password").orEmpty()
+        if (password.length < 8) return error(Response.Status.BAD_REQUEST, "Use at least 8 characters.")
+        val messages = ConversationStore.load(ctx.filesDir, Workbench.vault)
+        val payload = ExportFile.fromConversation(messages)
+        val count = payload["sessions"]!!.jsonArray.size
+        if (count == 0) return error(Response.Status.BAD_REQUEST, "There is no conversation to export.")
+        val save = Workbench.onExport ?: return error(Response.Status.CONFLICT, "Open Onionmind to export.")
+        save(ExportFile.write(password, payload))
+        return json(buildJsonObject { put("ok", true); put("sessions", count) }.toString())
+    }
+
+    /** Replace the conversation with the newest one in an export (the page confirms first). */
+    private fun import(session: IHTTPSession): Response {
+        val files = HashMap<String, String>(); session.parseBody(files)
+        val body = files["postData"] ?: files["content"]
+        val password = session.parms["password"] ?: formValue(body, "password").orEmpty()
+        val data = session.parms["data"] ?: formValue(body, "data")
+        val blob = try { Base64.getDecoder().decode(data.orEmpty()) } catch (_: IllegalArgumentException) {
+            return error(Response.Status.BAD_REQUEST, "That file could not be read.")
+        }
+        val payload = try { ExportFile.read(blob, password) } catch (e: Vault.WrongPassword) {
+            return error(Response.Status.FORBIDDEN, e.message ?: "That password does not open this export.")
+        } catch (e: ExportFile.Invalid) {
+            return error(Response.Status.BAD_REQUEST, e.message ?: "This is not an Onionmind export file.")
+        }
+        val (messages, total) = ExportFile.newestConversation(payload)
+            ?: return error(Response.Status.BAD_REQUEST, "The export has no conversation in it.")
+        stopFlag?.set(true)
+        ConversationStore.save(ctx.filesDir, messages, Workbench.vault)
+        return json(buildJsonObject { put("messages", messages.size); put("sessions", total) }.toString())
     }
 
     // --- encryption at rest -------------------------------------------------
@@ -546,7 +587,7 @@ object Server {
     private val API_PATHS = setOf(
         "/api/status", "/api/preferences", "/api/conversation", "/api/stop",
         "/api/install", "/api/select", "/api/remove", "/api/chat",
-        "/api/features", "/api/netlog", "/api/share",
+        "/api/features", "/api/netlog", "/api/share", "/api/export", "/api/import",
         "/api/vault", "/api/vault/unlock", "/api/vault/password", "/api/vault/remove", "/api/vault/erase"
     )
 

@@ -315,6 +315,21 @@ secret: the key store's name, or the password-wrapped key. Where the key lives:
   already in the folder in place (the plaintext bytes are overwritten first,
   with `shred_file`'s limits on SSDs and copy-on-write filesystems). A lock
   passphrase from an older version is offered as the new password.
+- **Export and import (Settings → Privacy → Encryption):** one file
+  (`*.onionmind`) with every session, archived ones too, and the settings (an
+  old lock-passphrase hash is left out). It is encrypted with its own
+  password - PBKDF2-HMAC-SHA256, 600,000 rounds, then AES-256-GCM - so it does
+  not need the data key and opens on any machine. PBKDF2 rather than scrypt
+  because the phone has it in `javax.crypto`; `android/core/.../ExportFile.kt`
+  reads and writes the same layout (`OMEXPORT1`, a one-line JSON header, nonce,
+  ciphertext; the header is authenticated, so its rounds cannot be lowered).
+  Import adds the file's sessions with their ids and dates and never replaces
+  one already here; the file's settings are taken only when ticked, and only
+  from a desktop export. Verified: `ExportTests` and
+  `test_export_from_settings_then_import_into_a_fresh_machine` in
+  `tests/test_vault.py`; `tests/export-sample.onionmind`, written by the
+  desktop, is read by `ExportFileTest` on the JVM, and a file the JVM wrote was
+  opened by `read_export` by hand. The phone's side is under Android below.
 - **Fail closed:** encrypted data is never read or overwritten as plaintext.
   Without `cryptography` the app refuses to open an encrypted folder and only
   runs unencrypted (with a visible notice) when nothing was encrypted yet; a
@@ -606,6 +621,16 @@ A standalone app, built in Docker from `android/Dockerfile`, ~14 MB:
   top of the per-launch API token that already keeps other apps out. A forgotten password cannot be recovered: the
   unlock screen erases the conversation, log and settings (models stay) after
   a confirmation. An older install's plaintext is encrypted on first start.
+- **Export and import** (Settings → Conversation): the desktop's `.onionmind`
+  file (`ExportFile`). Export seals the conversation as one desktop session
+  (user and assistant turns only; the id is a hash of the turns, so the
+  desktop adds the same export once) and Android's save picker
+  (`ACTION_CREATE_DOCUMENT`) asks where it goes. Import reads a picked file and,
+  after a confirmation, replaces the phone's one conversation with the newest
+  live session in the file. Verified: `ExportFileTest` on the JVM (both
+  mappings, the desktop's sample), and a JVM-made export imported into a
+  desktop `SessionStore` by hand (once, then "existing"). The pickers and
+  routes were compiled by CI but not run on a phone or emulator.
   Outside the vault: model files, Tor's state and llama-server's own log
   (truncated each start; load and request lines, no prompts without `-v`).
   Verified by `VaultTest` (14 JVM tests) and on an Android 14 emulator:
