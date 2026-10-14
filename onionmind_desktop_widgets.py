@@ -1753,7 +1753,6 @@ class SetupOverlay(_Overlay):
         else:
             self.body.setText("No model is installed yet. Name one to download; the download goes directly to "
                               "its registry, not over Tor, and starts only after you confirm.")
-        row = QHBoxLayout()
         self.model_name = QLineEdit()
         self.model_name.setPlaceholderText("BLAZE, llama3.2:3b, or a huggingface.co link")
         self.model_name.setAccessibleName("Model to download")

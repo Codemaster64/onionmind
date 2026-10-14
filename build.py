@@ -19,7 +19,7 @@ Line endings are enforced per target: the .ps1 is CRLF, the .sh is LF. A CRLF
 shell script dies on Linux with `bad interpreter: /usr/bin/env bash^M`, which has
 also already happened here once.
 """
-import ast, base64, pathlib, re, sys
+import ast, base64, pathlib, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "onionmind.py"
