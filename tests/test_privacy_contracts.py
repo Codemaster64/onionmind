@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -145,6 +146,17 @@ class BackgroundTorTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertIsNone(onionmind._managed_tor_process)
 
+    @staticmethod
+    def _tor_that_bootstraps(process):
+        """A Popen stand-in that, like tor, logs "Bootstrapped 100%" to the
+        notice file its torrc names."""
+        def start(argv, **kwargs):
+            torrc = Path(argv[2]).read_text(encoding="utf-8")
+            notices = re.search(r"^Log notice file (.+)$", torrc, re.M).group(1)
+            Path(notices).write_text("[notice] Bootstrapped 100% (done): Done\n", encoding="utf-8")
+            return process
+        return start
+
     def test_darwin_launches_brew_tor_under_an_owned_torrc(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
@@ -154,7 +166,7 @@ class BackgroundTorTests(unittest.TestCase):
                  mock.patch.object(onionmind.os.path, "expanduser", return_value=temporary), \
                  mock.patch.object(onionmind, "_darwin_tor_binary", return_value="/opt/homebrew/bin/tor"), \
                  mock.patch.object(onionmind, "tor_proxy_port", side_effect=[None, 9050]), \
-                 mock.patch.object(onionmind.subprocess, "Popen", return_value=process) as popen:
+                 mock.patch.object(onionmind.subprocess, "Popen", side_effect=self._tor_that_bootstraps(process)) as popen:
                 self.assertEqual(onionmind.start_tor_hidden(timeout=2), 9050)
 
             argv = popen.call_args.args[0]
@@ -189,7 +201,7 @@ class BackgroundTorTests(unittest.TestCase):
                  mock.patch.object(onionmind.os.path, "expanduser", return_value=temporary), \
                  mock.patch.object(onionmind, "_linux_tor_binary", return_value="/usr/bin/tor"), \
                  mock.patch.object(onionmind, "tor_proxy_port", side_effect=[None, 9050]), \
-                 mock.patch.object(onionmind.subprocess, "Popen", return_value=process) as popen:
+                 mock.patch.object(onionmind.subprocess, "Popen", side_effect=self._tor_that_bootstraps(process)) as popen:
                 self.assertEqual(onionmind.start_tor_hidden(timeout=2), 9050)
             argv = popen.call_args.args[0]
             self.assertEqual(argv[0], "/usr/bin/tor")
@@ -198,6 +210,26 @@ class BackgroundTorTests(unittest.TestCase):
             self.assertIn("CookieAuthentication 0", torrc)
         self.assertIs(onionmind._managed_tor_process, process)
         onionmind._managed_tor_process = None
+
+    def test_an_owned_tor_is_ready_only_once_it_has_bootstrapped(self) -> None:
+        # The SOCKS port opens at once; a cold tor needs minutes for a circuit.
+        # Reporting the port early made tor_check() fail every first start.
+        with tempfile.TemporaryDirectory() as temporary:
+            notices = Path(temporary) / "notices.log"
+            calls = []
+
+            def port():
+                calls.append(1)
+                if len(calls) == 3:
+                    notices.write_text("[notice] Bootstrapped 45% (requesting_descriptors)\n")
+                if len(calls) == 6:
+                    notices.write_text("[notice] Bootstrapped 100% (done): Done\n")
+                return 9050
+
+            with mock.patch.object(onionmind, "tor_proxy_port", side_effect=port), \
+                 mock.patch.object(onionmind.time, "sleep"):
+                self.assertEqual(onionmind._await_tor_ready(30, notices=str(notices)), 9050)
+            self.assertEqual(len(calls), 6)
 
     def test_linux_without_tor_fails_closed_with_an_install_hint(self) -> None:
         with mock.patch.object(onionmind.os, "name", "posix"), \
