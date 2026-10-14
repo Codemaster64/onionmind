@@ -155,6 +155,15 @@ __all__ = [
     "is_encrypted",
     "read_data_file",
     "write_data_file",
+    "EXPORT_SUFFIX",
+    "ExportError",
+    "export_bytes",
+    "read_export_bytes",
+    "export_payload",
+    "write_export",
+    "read_export",
+    "import_sessions",
+    "imported_settings",
     "absorb_agent_net_log",
 ]
 
@@ -1259,6 +1268,19 @@ class SessionStore:
                 continue
             deleted = True
         return deleted
+
+    def adopt(self, value: Mapping[str, Any]) -> bool:
+        """Store a session from an export as it is - id, timestamps, archive
+        state. A session already here under that id, live or archived, is
+        never overwritten: returns False and leaves it alone. Raises
+        ValueError for a session that does not validate."""
+        session_id = value.get("id") if isinstance(value, Mapping) else None
+        session = self._session_from_dict(value, expected_id=self._validate_id(session_id))
+        if any(self._path(session.id, archived=archived).exists() for archived in (False, True)):
+            return False
+        target = self._path(session.id, archived=session.archived_at is not None)
+        _atomic_write_json(target, session.to_dict(), self.vault)
+        return True
 
 
 @dataclass(frozen=True)
@@ -3574,6 +3596,126 @@ def read_data_file(path: PathInput, vault: Optional[Vault]) -> bytes:
 def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> None:
     """Write a file into the data folder, encrypted when a vault is open."""
     _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
+
+
+# export: one password-protected file with the sessions and settings, to move
+# them to another machine or keep a backup. It does not depend on the data
+# key, so it opens anywhere with the password alone. PBKDF2-HMAC-SHA256
+# rather than the vault's scrypt because the phone (javax.crypto) has it too,
+# and the same file imports on either side. Layout:
+#   OMEXPORT1\n  <header JSON, one line>\n  <12-byte nonce><AES-256-GCM ciphertext>
+# The magic and header line are the associated data, so changing the KDF
+# parameters breaks the tag instead of weakening the key.
+
+EXPORT_MAGIC = b"OMEXPORT1\n"
+EXPORT_SUFFIX = ".onionmind"
+EXPORT_PBKDF2_ITERATIONS = 600_000
+
+
+class ExportError(VaultError):
+    """An export file that is not one, is damaged, or needs another password."""
+
+
+def _export_key(password: str, salt: bytes, iterations: int) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+
+
+def export_bytes(password: str, payload: Mapping[str, Any]) -> bytes:
+    import base64
+
+    if not password:
+        raise ExportError("The export password cannot be empty.")
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    header = json.dumps({"format": "onionmind-export", "version": 1, "kdf": "PBKDF2WithHmacSHA256",
+                         "iterations": EXPORT_PBKDF2_ITERATIONS,
+                         "salt": base64.b64encode(salt).decode("ascii")}, separators=(",", ":"))
+    preamble = EXPORT_MAGIC + header.encode("ascii") + b"\n"
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    key = _export_key(password, salt, EXPORT_PBKDF2_ITERATIONS)
+    return preamble + nonce + _aesgcm(key).encrypt(nonce, body, preamble)
+
+
+def read_export_bytes(blob: bytes, password: str) -> dict[str, Any]:
+    import base64
+    from cryptography.exceptions import InvalidTag
+
+    if not blob.startswith(EXPORT_MAGIC):
+        raise ExportError("This is not an Onionmind export file.")
+    end = blob.find(b"\n", len(EXPORT_MAGIC))
+    try:
+        header = json.loads(blob[len(EXPORT_MAGIC):end].decode("ascii"))
+        salt = base64.b64decode(header["salt"], validate=True)
+        iterations = int(header["iterations"])
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise ExportError("The export file is damaged.") from exc
+    if end < 0 or header.get("format") != "onionmind-export" or header.get("version") != 1:
+        raise ExportError("This export was made by a newer Onionmind; update to import it.")
+    if header.get("kdf") != "PBKDF2WithHmacSHA256" or not 100_000 <= iterations <= 10_000_000:
+        raise ExportError("The export file names a key derivation this version does not accept.")
+    preamble, rest = blob[:end + 1], blob[end + 1:]
+    if len(rest) < _NONCE_BYTES + 16:
+        raise ExportError("The export file is damaged.")
+    key = _export_key(password, salt, iterations)
+    try:
+        body = _aesgcm(key).decrypt(rest[:_NONCE_BYTES], rest[_NONCE_BYTES:], preamble)
+    except InvalidTag:
+        raise WrongPassword("That password does not open this export, or the file was changed.") from None
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ExportError("The export file is damaged.")
+    return payload
+
+
+def export_payload(sessions: Iterable[Any], settings: Optional[Mapping[str, Any]] = None,
+                   source: str = "desktop") -> dict[str, Any]:
+    """What an export carries: every session (archived ones too) and the
+    settings, minus anything that only means something on this machine."""
+    rows = [session.to_dict() if hasattr(session, "to_dict") else dict(session) for session in sessions]
+    clean = copy.deepcopy(dict(settings or {}))
+    lock = clean.get("lock")
+    if isinstance(lock, dict):
+        lock.pop("passphrase", None)                # an old hash; never travels
+    return {"version": 1, "from": source, "exported_at": _utc_now(), "sessions": rows, "settings": clean}
+
+
+def write_export(path: PathInput, password: str, store: SessionStore,
+                 settings: Optional[Mapping[str, Any]] = None) -> int:
+    """Write every session in `store` and `settings` to an export file. Returns the session count."""
+    sessions = store.list() + store.list(archived=True)
+    payload = export_payload(sessions, settings)
+    _atomic_write_bytes(Path(path).expanduser(), export_bytes(password, payload))
+    return len(sessions)
+
+
+def read_export(path: PathInput, password: str) -> dict[str, Any]:
+    try:
+        blob = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        raise ExportError(f"The export file could not be read: {exc.strerror or exc}") from exc
+    return read_export_bytes(blob, password)
+
+
+def import_sessions(store: SessionStore, payload: Mapping[str, Any]) -> dict[str, int]:
+    """Add the export's sessions to `store`. Ones already here are kept as they
+    are; ones that do not validate are skipped. Counts: added, existing, invalid."""
+    counts = {"added": 0, "existing": 0, "invalid": 0}
+    rows = payload.get("sessions")
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            counts["added" if store.adopt(row) else "existing"] += 1
+        except (TypeError, ValueError):
+            counts["invalid"] += 1
+    return counts
+
+
+def imported_settings(current: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    """`current` with the export's settings laid over it, for a desktop export only:
+    the phone's settings are different knobs."""
+    merged = copy.deepcopy(dict(current))
+    settings = payload.get("settings")
+    if payload.get("from") == "desktop" and isinstance(settings, dict):
+        merged.update(copy.deepcopy(settings))
+    return merged
 
 
 # netlog: what left this machine, written by the desktop when it happens.

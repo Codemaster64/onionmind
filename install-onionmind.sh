@@ -2987,6 +2987,15 @@ __all__ = [
     "is_encrypted",
     "read_data_file",
     "write_data_file",
+    "EXPORT_SUFFIX",
+    "ExportError",
+    "export_bytes",
+    "read_export_bytes",
+    "export_payload",
+    "write_export",
+    "read_export",
+    "import_sessions",
+    "imported_settings",
     "absorb_agent_net_log",
 ]
 
@@ -4091,6 +4100,19 @@ class SessionStore:
                 continue
             deleted = True
         return deleted
+
+    def adopt(self, value: Mapping[str, Any]) -> bool:
+        """Store a session from an export as it is - id, timestamps, archive
+        state. A session already here under that id, live or archived, is
+        never overwritten: returns False and leaves it alone. Raises
+        ValueError for a session that does not validate."""
+        session_id = value.get("id") if isinstance(value, Mapping) else None
+        session = self._session_from_dict(value, expected_id=self._validate_id(session_id))
+        if any(self._path(session.id, archived=archived).exists() for archived in (False, True)):
+            return False
+        target = self._path(session.id, archived=session.archived_at is not None)
+        _atomic_write_json(target, session.to_dict(), self.vault)
+        return True
 
 
 @dataclass(frozen=True)
@@ -6408,6 +6430,126 @@ def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> Non
     _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
 
 
+# export: one password-protected file with the sessions and settings, to move
+# them to another machine or keep a backup. It does not depend on the data
+# key, so it opens anywhere with the password alone. PBKDF2-HMAC-SHA256
+# rather than the vault's scrypt because the phone (javax.crypto) has it too,
+# and the same file imports on either side. Layout:
+#   OMEXPORT1\n  <header JSON, one line>\n  <12-byte nonce><AES-256-GCM ciphertext>
+# The magic and header line are the associated data, so changing the KDF
+# parameters breaks the tag instead of weakening the key.
+
+EXPORT_MAGIC = b"OMEXPORT1\n"
+EXPORT_SUFFIX = ".onionmind"
+EXPORT_PBKDF2_ITERATIONS = 600_000
+
+
+class ExportError(VaultError):
+    """An export file that is not one, is damaged, or needs another password."""
+
+
+def _export_key(password: str, salt: bytes, iterations: int) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+
+
+def export_bytes(password: str, payload: Mapping[str, Any]) -> bytes:
+    import base64
+
+    if not password:
+        raise ExportError("The export password cannot be empty.")
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    header = json.dumps({"format": "onionmind-export", "version": 1, "kdf": "PBKDF2WithHmacSHA256",
+                         "iterations": EXPORT_PBKDF2_ITERATIONS,
+                         "salt": base64.b64encode(salt).decode("ascii")}, separators=(",", ":"))
+    preamble = EXPORT_MAGIC + header.encode("ascii") + b"\n"
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    key = _export_key(password, salt, EXPORT_PBKDF2_ITERATIONS)
+    return preamble + nonce + _aesgcm(key).encrypt(nonce, body, preamble)
+
+
+def read_export_bytes(blob: bytes, password: str) -> dict[str, Any]:
+    import base64
+    from cryptography.exceptions import InvalidTag
+
+    if not blob.startswith(EXPORT_MAGIC):
+        raise ExportError("This is not an Onionmind export file.")
+    end = blob.find(b"\n", len(EXPORT_MAGIC))
+    try:
+        header = json.loads(blob[len(EXPORT_MAGIC):end].decode("ascii"))
+        salt = base64.b64decode(header["salt"], validate=True)
+        iterations = int(header["iterations"])
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise ExportError("The export file is damaged.") from exc
+    if end < 0 or header.get("format") != "onionmind-export" or header.get("version") != 1:
+        raise ExportError("This export was made by a newer Onionmind; update to import it.")
+    if header.get("kdf") != "PBKDF2WithHmacSHA256" or not 100_000 <= iterations <= 10_000_000:
+        raise ExportError("The export file names a key derivation this version does not accept.")
+    preamble, rest = blob[:end + 1], blob[end + 1:]
+    if len(rest) < _NONCE_BYTES + 16:
+        raise ExportError("The export file is damaged.")
+    key = _export_key(password, salt, iterations)
+    try:
+        body = _aesgcm(key).decrypt(rest[:_NONCE_BYTES], rest[_NONCE_BYTES:], preamble)
+    except InvalidTag:
+        raise WrongPassword("That password does not open this export, or the file was changed.") from None
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ExportError("The export file is damaged.")
+    return payload
+
+
+def export_payload(sessions: Iterable[Any], settings: Optional[Mapping[str, Any]] = None,
+                   source: str = "desktop") -> dict[str, Any]:
+    """What an export carries: every session (archived ones too) and the
+    settings, minus anything that only means something on this machine."""
+    rows = [session.to_dict() if hasattr(session, "to_dict") else dict(session) for session in sessions]
+    clean = copy.deepcopy(dict(settings or {}))
+    lock = clean.get("lock")
+    if isinstance(lock, dict):
+        lock.pop("passphrase", None)                # an old hash; never travels
+    return {"version": 1, "from": source, "exported_at": _utc_now(), "sessions": rows, "settings": clean}
+
+
+def write_export(path: PathInput, password: str, store: SessionStore,
+                 settings: Optional[Mapping[str, Any]] = None) -> int:
+    """Write every session in `store` and `settings` to an export file. Returns the session count."""
+    sessions = store.list() + store.list(archived=True)
+    payload = export_payload(sessions, settings)
+    _atomic_write_bytes(Path(path).expanduser(), export_bytes(password, payload))
+    return len(sessions)
+
+
+def read_export(path: PathInput, password: str) -> dict[str, Any]:
+    try:
+        blob = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        raise ExportError(f"The export file could not be read: {exc.strerror or exc}") from exc
+    return read_export_bytes(blob, password)
+
+
+def import_sessions(store: SessionStore, payload: Mapping[str, Any]) -> dict[str, int]:
+    """Add the export's sessions to `store`. Ones already here are kept as they
+    are; ones that do not validate are skipped. Counts: added, existing, invalid."""
+    counts = {"added": 0, "existing": 0, "invalid": 0}
+    rows = payload.get("sessions")
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            counts["added" if store.adopt(row) else "existing"] += 1
+        except (TypeError, ValueError):
+            counts["invalid"] += 1
+    return counts
+
+
+def imported_settings(current: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    """`current` with the export's settings laid over it, for a desktop export only:
+    the phone's settings are different knobs."""
+    merged = copy.deepcopy(dict(current))
+    settings = payload.get("settings")
+    if payload.get("from") == "desktop" and isinstance(settings, dict):
+        merged.update(copy.deepcopy(settings))
+    return merged
+
+
 # netlog: what left this machine, written by the desktop when it happens.
 # Times and destinations only - a prompt or a search query is never stored.
 
@@ -7394,6 +7536,7 @@ from onionmind_desktop_dialogs import (  # noqa: F401
     FeatureToggles,
     ModelManagerDialog,
     SettingsDialog,
+    TransferDialog,
     UnlockDialog,
 )
 _SCREENSHOT_PATH: Optional[str] = None
@@ -12364,6 +12507,30 @@ class OnionmindWindow(QMainWindow):
         self.disconnect_remote(message=message)
 
     # --- v2: auto-delete and app lock ----------------------------------------
+
+    def export_data(self, path: str, password: str) -> int:
+        """Every session and the settings into one password-protected file."""
+        store = self.session_bridge.store
+        if store is None:
+            raise RuntimeError("There are no stored conversations to export.")
+        count = self.desktop_core.write_export(path, password, store, self.settings_data)
+        self.set_status(f"Exported {count} conversation(s)")
+        return count
+
+    def import_data(self, path: str, password: str, *, settings: bool = False) -> dict[str, int]:
+        """Add an export's sessions beside the ones here; optionally take its settings."""
+        store = self.session_bridge.store
+        if store is None:
+            raise RuntimeError("Conversations cannot be stored here, so nothing can be imported.")
+        payload = self.desktop_core.read_export(path, password)
+        counts = dict(self.desktop_core.import_sessions(store, payload))
+        if settings and payload.get("from") == "desktop":
+            self.settings_data = self.desktop_core.imported_settings(self.settings_data, payload)
+            self.settings_bridge.save(self.settings_data)
+            counts["settings"] = 1
+        self._refresh_session_rows()
+        self.set_status(f"Imported {counts.get('added', 0)} conversation(s)")
+        return counts
 
     def _lock_settings(self) -> dict[str, Any]:
         stored = self.settings_data.get("lock")
@@ -17383,6 +17550,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -17947,6 +18115,26 @@ class SettingsDialog(QDialog):
         self.password_feedback.setObjectName("meta")
         self.password_feedback.setWordWrap(True)
         layout.addWidget(self.password_feedback)
+        transfer = QHBoxLayout()
+        self.export_button = QPushButton("Export…")
+        self.export_button.setToolTip("Save every conversation and your settings to one password-protected file")
+        self.import_button = QPushButton("Import…")
+        self.import_button.setToolTip("Add the conversations from an Onionmind export file")
+        self.export_button.clicked.connect(self._export_data)
+        self.import_button.clicked.connect(self._import_data)
+        transfer.addWidget(self.export_button)
+        transfer.addWidget(self.import_button)
+        transfer.addStretch(1)
+        layout.addLayout(transfer)
+        self.transfer_feedback = QLabel(
+            "Move your conversations to another computer or phone, or keep a backup. The file is "
+            "encrypted with a password you choose for it; it opens anywhere with that password.")
+        self.transfer_feedback.setObjectName("meta")
+        self.transfer_feedback.setWordWrap(True)
+        layout.addWidget(self.transfer_feedback)
+        if window is None or getattr(getattr(window, "session_bridge", None), "store", None) is None:
+            self.export_button.setEnabled(False)
+            self.import_button.setEnabled(False)
         if vault is None:
             for widget in (self.password_current, self.password_new, self.password_repeat,
                            self.password_set_button, self.password_remove_button, self.password_feedback):
@@ -18009,6 +18197,61 @@ class SettingsDialog(QDialog):
                                        "the key is back in this machine's key store.")
         self._describe_encryption()
         window.passwordChanged.emit()
+
+    def _export_data(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Onionmind data", str(Path.home() / "onionmind-export.onionmind"),
+                                              "Onionmind export (*.onionmind)")
+        if not path:
+            return
+        if not path.endswith(".onionmind"):
+            path += ".onionmind"
+        sent: list[int] = []
+
+        def attempt(password: str, _settings: bool) -> Optional[str]:
+            try:
+                sent.append(window.export_data(path, password))
+            except Exception as exc:
+                return _as_text(exc) or "The export could not be written."
+            return None
+
+        dialog = TransferDialog("export", attempt, parent=self)
+        dialog.exec()
+        if sent:
+            self.transfer_feedback.setText(f"Exported {sent[0]} conversation(s) and your settings to {path}. "
+                                           "Anyone with the file and its password can read them.")
+
+    def _import_data(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import Onionmind data", str(Path.home()),
+                                              "Onionmind export (*.onionmind);;All files (*)")
+        if not path:
+            return
+        result: list[dict[str, int]] = []
+
+        def attempt(password: str, settings: bool) -> Optional[str]:
+            try:
+                result.append(window.import_data(path, password, settings=settings))
+            except Exception as exc:
+                return _as_text(exc) or "The file could not be imported."
+            return None
+
+        dialog = TransferDialog("import", attempt, parent=self)
+        dialog.exec()
+        if result:
+            counts = result[0]
+            text = f"Imported {counts.get('added', 0)} conversation(s)."
+            if counts.get("existing"):
+                text += f" {counts['existing']} were already here and were left as they are."
+            if counts.get("invalid"):
+                text += f" {counts['invalid']} could not be read and were skipped."
+            if counts.get("settings"):
+                text += " Settings replaced; some take effect after a restart."
+            self.transfer_feedback.setText(text)
 
     def _lock_section(self) -> QWidget:
         section = QWidget()
@@ -19229,6 +19472,93 @@ class UnlockDialog(QDialog):
     def reject(self) -> None:
         self.outcome = "quit"                       # Esc or the close box
         super().reject()
+
+
+class TransferDialog(QDialog):
+    """The password for an export file: chosen twice to export, typed once to
+    import (with the choice to take the file's settings too).
+    `attempt(password, include_settings)` returns an error to show, or None."""
+
+    def __init__(self, kind: str, attempt: Callable[[str, bool], Optional[str]],
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.attempt = attempt
+        self.outcome = "cancel"
+        self.setWindowTitle("Onionmind")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        title = QLabel("Export your data" if kind == "export" else "Import an export")
+        title.setObjectName("brand")
+        body = QLabel(
+            "Choose a password for this file. It is not your Onionmind password, and without it the "
+            "file cannot be opened - not by you, not by anyone." if kind == "export" else
+            "Enter the password the file was exported with. Conversations already here are kept; "
+            "the file's conversations are added beside them.")
+        body.setObjectName("meta")
+        body.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        self.password = QLineEdit()
+        self.repeat = QLineEdit()
+        for field, text in ((self.password, "Export password" if kind == "export" else "Password"),
+                            (self.repeat, "Repeat the password")):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText(text)
+            field.setAccessibleName(text)
+            field.returnPressed.connect(self._submit)
+        layout.addWidget(self.password)
+        if kind == "export":
+            layout.addWidget(self.repeat)
+        self.settings = QCheckBox("Also replace my settings with the ones in the file")
+        if kind == "import":
+            layout.addWidget(self.settings)
+        self.error = QLabel("")
+        self.error.setObjectName("danger")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.primary = QPushButton("Export" if kind == "export" else "Import")
+        self.primary.setObjectName("primaryButton")
+        self.primary.setDefault(True)
+        self.primary.clicked.connect(self._submit)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.primary)
+        layout.addLayout(buttons)
+        self.password.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _submit(self) -> None:
+        text = self.password.text()
+        if self.kind == "export":
+            if len(text) < 8:
+                return self._show_error("Use at least 8 characters; a few words are easier to remember.")
+            if text != self.repeat.text():
+                return self._show_error("The two passwords do not match.")
+        elif not text:
+            return self._show_error("Enter the file's password.")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            problem = self.attempt(text, self.settings.isChecked())
+        finally:
+            QApplication.restoreOverrideCursor()
+        if problem:
+            self.password.selectAll()
+            return self._show_error(problem)
+        self.password.clear()
+        self.repeat.clear()
+        self.outcome = "done"
+        self.accept()
+
+    def _show_error(self, text: str) -> None:
+        self.error.setText(text)
+        self.error.show()
 DESKTOPDIALOGSEOF
 chmod 644 "$DIR/onionmind_desktop_core.py" "$DIR/onionmind_desktop.py" \
   "$DIR/onionmind_desktop_theme.py" "$DIR/onionmind_desktop_widgets.py" "$DIR/onionmind_desktop_panes.py" "$DIR/onionmind_desktop_dialogs.py"

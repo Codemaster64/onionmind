@@ -256,7 +256,9 @@ integration, verifies Tor before spawning it, and routes proxy-aware child
 traffic through a fail-closed Tor bridge.
 
 Or just double-click the icon. The desktop app keeps sessions locally and can
-export a conversation; the classic CLI still supports `/save notes.txt`.
+export a conversation, or everything to one password-protected file that
+imports on another machine (Settings → Privacy → Encryption); the classic CLI
+still supports `/save notes.txt`.
 
 ### The native workbench
 

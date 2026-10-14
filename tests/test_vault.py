@@ -249,6 +249,89 @@ class VaultTests(unittest.TestCase):
 
 
 @unittest.skipUnless(core.encryption_available(), "the cryptography package is not installed")
+class ExportTests(unittest.TestCase):
+    PASSWORD = "correct horse battery"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name)
+        self.vault = core.open_vault(base / "a", keystore=MemoryKeystore())
+        self.store = core.SessionStore(base / "a" / "sessions", self.vault)
+        self.other = core.SessionStore(base / "b" / "sessions", core.open_vault(base / "b", keystore=MemoryKeystore()))
+        self.file = base / "out.onionmind"
+
+    def test_round_trip_keeps_ids_timestamps_and_archive_state(self) -> None:
+        kept = self.store.create(title="Plans", model="m", messages=[{"role": "user", "content": SECRET}])
+        gone = self.store.create(title="Old", model="m", messages=[{"role": "user", "content": "x"}])
+        self.store.archive(gone.id)
+        settings = {"theme": "dark", "lock": {"idle_minutes": 5, "passphrase": {"hash": "old"}}}
+        self.assertEqual(core.write_export(self.file, self.PASSWORD, self.store, settings), 2)
+        self.assertNotIn(SECRET.encode(), self.file.read_bytes())
+        self.assertNotIn(b"Plans", self.file.read_bytes())
+        payload = core.read_export(self.file, self.PASSWORD)
+        self.assertEqual(payload["settings"], {"theme": "dark", "lock": {"idle_minutes": 5}})
+        self.assertEqual(core.import_sessions(self.other, payload), {"added": 2, "existing": 0, "invalid": 0})
+        here = self.other.load(kept.id)
+        self.assertEqual((here.messages[0]["content"], here.created_at, here.updated_at),
+                         (SECRET, kept.created_at, self.store.load(kept.id).updated_at))
+        self.assertIsNone(self.other.load(gone.id))
+        self.assertIsNotNone(self.other.load(gone.id, archived=True))
+        # The second store is encrypted too: the import wrote no plaintext.
+        for path in self.other.root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(SECRET.encode(), path.read_bytes())
+
+    def test_importing_again_or_over_a_newer_copy_never_overwrites(self) -> None:
+        session = self.store.create(title="Plans", model="m", messages=[{"role": "user", "content": "one"}])
+        core.write_export(self.file, self.PASSWORD, self.store)
+        payload = core.read_export(self.file, self.PASSWORD)
+        core.import_sessions(self.other, payload)
+        local = self.other.load(session.id)
+        local.messages.append({"role": "assistant", "content": "kept"})
+        self.other.save(local)
+        self.assertEqual(core.import_sessions(self.other, payload), {"added": 0, "existing": 1, "invalid": 0})
+        self.assertEqual(self.other.load(session.id).messages[-1]["content"], "kept")
+
+    def test_bad_rows_are_skipped_not_fatal(self) -> None:
+        payload = {"sessions": [{"id": "../escape", "title": "x"}, {"id": "ok1", "title": ""}, "junk",
+                                {"version": 1, "id": "ok2", "title": "Fine", "model": "", "workspace": None,
+                                 "messages": [], "created_at": "t", "updated_at": "t", "archived_at": None}]}
+        self.assertEqual(core.import_sessions(self.other, payload), {"added": 1, "existing": 0, "invalid": 3})
+        self.assertFalse((self.other.root.parent / "escape.json").exists())
+
+    def test_wrong_password_tampering_and_strangers_are_refused(self) -> None:
+        blob = core.export_bytes(self.PASSWORD, {"sessions": []})
+        with self.assertRaises(core.WrongPassword):
+            core.read_export_bytes(blob, "not it")
+        weaker = blob.replace(b'"iterations":600000', b'"iterations":200000')
+        with self.assertRaises(core.WrongPassword):          # the header is authenticated
+            core.read_export_bytes(weaker, self.PASSWORD)
+        flipped = blob[:-1] + bytes([blob[-1] ^ 1])
+        with self.assertRaises(core.WrongPassword):
+            core.read_export_bytes(flipped, self.PASSWORD)
+        with self.assertRaises(core.ExportError):
+            core.read_export_bytes(b"OMENC1\n" + blob, self.PASSWORD)
+        with self.assertRaises(core.ExportError):
+            core.read_export_bytes(blob.replace(b'"iterations":600000', b'"iterations":1'), self.PASSWORD)
+        with self.assertRaises(core.ExportError):
+            core.export_bytes("", {})
+
+    def test_the_shared_sample_opens(self) -> None:
+        # The phone's ExportTest reads the same file: one format on both sides.
+        payload = core.read_export(Path(__file__).with_name("export-sample.onionmind"), self.PASSWORD)
+        self.assertEqual(payload["from"], "desktop")
+        self.assertEqual(payload["sessions"][0]["messages"][0]["content"], "What is the tor port? æøå")
+        self.assertEqual(core.import_sessions(self.other, payload)["added"], 1)
+
+    def test_only_a_desktop_export_brings_settings(self) -> None:
+        current = {"theme": "light", "keep": 1}
+        self.assertEqual(core.imported_settings(current, {"from": "desktop", "settings": {"theme": "dark"}}),
+                         {"theme": "dark", "keep": 1})
+        self.assertEqual(core.imported_settings(current, {"from": "android", "settings": {"theme": "dark"}}), current)
+
+
+@unittest.skipUnless(core.encryption_available(), "the cryptography package is not installed")
 class KeystoreTests(unittest.TestCase):
     """Each real key store round-trips a key on the platform that has it."""
 
@@ -379,6 +462,59 @@ class VaultDesktopTests(unittest.TestCase):
                 self.assertNotIn(SECRET.encode(), path.read_bytes(), path)
         self.assertEqual(window.session_bridge.list()[0].messages[0]["content"], SECRET)
         self.assertEqual(session.title, "Plans")
+
+    def test_export_from_settings_then_import_into_a_fresh_machine(self) -> None:
+        vault, _notice = ui._open_vault_for_startup(core, self.root)
+        window = self.window(vault)
+        window.session_bridge.create("Plans", "m", None, [{"role": "user", "content": SECRET}])
+        window.settings_data["theme_note"] = "from the first machine"
+        target = Path(self.temp.name) / "moved.onionmind"
+        dialog = ui.SettingsDialog(window.data_root, "limitation", None, window)
+        self.addCleanup(dialog.close)
+
+        def answer(password, repeat=None, settings=False):
+            def run(transfer):
+                transfer.password.setText(password)
+                transfer.repeat.setText(repeat if repeat is not None else password)
+                transfer.settings.setChecked(settings)
+                transfer._submit()
+                answer.errors.append(transfer.error.text() if transfer.outcome != "done" else "")
+                return 0
+            return run
+        answer.errors = []
+
+        save = mock.patch.object(ui.QFileDialog, "getSaveFileName", return_value=(str(target)[:-10], ""))
+        with save, mock.patch.object(ui.TransferDialog, "exec", answer("short")):
+            dialog._export_data()
+        self.assertIn("8 characters", answer.errors[-1])
+        self.assertFalse(target.exists())
+        with save, mock.patch.object(ui.TransferDialog, "exec", answer("long enough pw")):
+            dialog._export_data()
+        self.assertEqual(answer.errors[-1], "")
+        self.assertIn("Exported 1 conversation", dialog.transfer_feedback.text())
+        self.assertNotIn(SECRET.encode(), target.read_bytes())
+
+        # A second machine: its own data folder and key.
+        other_root = Path(self.temp.name) / "machine-b"
+        other_store = MemoryKeystore()
+        with mock.patch.object(core, "keystore_for", return_value=other_store), \
+                mock.patch.object(ui, "desktop_data_root", return_value=other_root):
+            other = self.window(core.open_vault(other_root, keystore=other_store))
+            other_dialog = ui.SettingsDialog(other.data_root, "limitation", None, other)
+            self.addCleanup(other_dialog.close)
+            pick = mock.patch.object(ui.QFileDialog, "getOpenFileName", return_value=(str(target), ""))
+            with pick, mock.patch.object(ui.TransferDialog, "exec", answer("wrong password")):
+                other_dialog._import_data()
+            self.assertIn("password does not open", answer.errors[-1])
+            with pick, mock.patch.object(ui.TransferDialog, "exec", answer("long enough pw", settings=True)):
+                other_dialog._import_data()
+            self.assertIn("Imported 1 conversation", other_dialog.transfer_feedback.text())
+            self.assertEqual(other.session_bridge.list()[0].messages[0]["content"], SECRET)
+            self.assertEqual(other.settings_data["theme_note"], "from the first machine")
+            self.assertEqual(other.settings_bridge.load()["theme_note"], "from the first machine")
+            for path in other_root.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(SECRET.encode(), path.read_bytes(), path)
 
     def test_password_from_settings_then_unlock_at_next_start(self) -> None:
         vault, _notice = ui._open_vault_for_startup(core, self.root)

@@ -315,6 +315,22 @@ secret: the key store's name, or the password-wrapped key. Where the key lives:
   already in the folder in place (the plaintext bytes are overwritten first,
   with `shred_file`'s limits on SSDs and copy-on-write filesystems). A lock
   passphrase from an older version is offered as the new password.
+- **Export and import (Settings → Privacy → Encryption):** one file
+  (`*.onionmind`) with every session, archived ones too, and the settings (an
+  old lock-passphrase hash is left out). It is encrypted with its own
+  password - PBKDF2-HMAC-SHA256, 600,000 rounds, then AES-256-GCM - so it does
+  not need the data key and opens on any machine. PBKDF2 rather than scrypt
+  because the phone has it in `javax.crypto`; `android/core/.../ExportFile.kt`
+  reads and writes the same layout (`OMEXPORT1`, a one-line JSON header, nonce,
+  ciphertext; the header is authenticated, so its rounds cannot be lowered).
+  Import adds the file's sessions with their ids and dates and never replaces
+  one already here; the file's settings are taken only when ticked, and only
+  from a desktop export. Verified: `ExportTests` and
+  `test_export_from_settings_then_import_into_a_fresh_machine` in
+  `tests/test_vault.py`; `tests/export-sample.onionmind`, written by the
+  desktop, is read by `ExportFileTest` on the JVM, and a file the JVM wrote was
+  opened by `read_export` by hand. The phone has the format but no
+  Export/Import buttons yet.
 - **Fail closed:** encrypted data is never read or overwritten as plaintext.
   Without `cryptography` the app refuses to open an encrypted folder and only
   runs unencrypted (with a visible notice) when nothing was encrypted yet; a

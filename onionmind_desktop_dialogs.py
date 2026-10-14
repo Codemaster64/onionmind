@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -582,6 +583,26 @@ class SettingsDialog(QDialog):
         self.password_feedback.setObjectName("meta")
         self.password_feedback.setWordWrap(True)
         layout.addWidget(self.password_feedback)
+        transfer = QHBoxLayout()
+        self.export_button = QPushButton("Export…")
+        self.export_button.setToolTip("Save every conversation and your settings to one password-protected file")
+        self.import_button = QPushButton("Import…")
+        self.import_button.setToolTip("Add the conversations from an Onionmind export file")
+        self.export_button.clicked.connect(self._export_data)
+        self.import_button.clicked.connect(self._import_data)
+        transfer.addWidget(self.export_button)
+        transfer.addWidget(self.import_button)
+        transfer.addStretch(1)
+        layout.addLayout(transfer)
+        self.transfer_feedback = QLabel(
+            "Move your conversations to another computer or phone, or keep a backup. The file is "
+            "encrypted with a password you choose for it; it opens anywhere with that password.")
+        self.transfer_feedback.setObjectName("meta")
+        self.transfer_feedback.setWordWrap(True)
+        layout.addWidget(self.transfer_feedback)
+        if window is None or getattr(getattr(window, "session_bridge", None), "store", None) is None:
+            self.export_button.setEnabled(False)
+            self.import_button.setEnabled(False)
         if vault is None:
             for widget in (self.password_current, self.password_new, self.password_repeat,
                            self.password_set_button, self.password_remove_button, self.password_feedback):
@@ -644,6 +665,61 @@ class SettingsDialog(QDialog):
                                        "the key is back in this machine's key store.")
         self._describe_encryption()
         window.passwordChanged.emit()
+
+    def _export_data(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Onionmind data", str(Path.home() / "onionmind-export.onionmind"),
+                                              "Onionmind export (*.onionmind)")
+        if not path:
+            return
+        if not path.endswith(".onionmind"):
+            path += ".onionmind"
+        sent: list[int] = []
+
+        def attempt(password: str, _settings: bool) -> Optional[str]:
+            try:
+                sent.append(window.export_data(path, password))
+            except Exception as exc:
+                return _as_text(exc) or "The export could not be written."
+            return None
+
+        dialog = TransferDialog("export", attempt, parent=self)
+        dialog.exec()
+        if sent:
+            self.transfer_feedback.setText(f"Exported {sent[0]} conversation(s) and your settings to {path}. "
+                                           "Anyone with the file and its password can read them.")
+
+    def _import_data(self) -> None:
+        window = self._window()
+        if window is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import Onionmind data", str(Path.home()),
+                                              "Onionmind export (*.onionmind);;All files (*)")
+        if not path:
+            return
+        result: list[dict[str, int]] = []
+
+        def attempt(password: str, settings: bool) -> Optional[str]:
+            try:
+                result.append(window.import_data(path, password, settings=settings))
+            except Exception as exc:
+                return _as_text(exc) or "The file could not be imported."
+            return None
+
+        dialog = TransferDialog("import", attempt, parent=self)
+        dialog.exec()
+        if result:
+            counts = result[0]
+            text = f"Imported {counts.get('added', 0)} conversation(s)."
+            if counts.get("existing"):
+                text += f" {counts['existing']} were already here and were left as they are."
+            if counts.get("invalid"):
+                text += f" {counts['invalid']} could not be read and were skipped."
+            if counts.get("settings"):
+                text += " Settings replaced; some take effect after a restart."
+            self.transfer_feedback.setText(text)
 
     def _lock_section(self) -> QWidget:
         section = QWidget()
@@ -1864,3 +1940,90 @@ class UnlockDialog(QDialog):
     def reject(self) -> None:
         self.outcome = "quit"                       # Esc or the close box
         super().reject()
+
+
+class TransferDialog(QDialog):
+    """The password for an export file: chosen twice to export, typed once to
+    import (with the choice to take the file's settings too).
+    `attempt(password, include_settings)` returns an error to show, or None."""
+
+    def __init__(self, kind: str, attempt: Callable[[str, bool], Optional[str]],
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.attempt = attempt
+        self.outcome = "cancel"
+        self.setWindowTitle("Onionmind")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        title = QLabel("Export your data" if kind == "export" else "Import an export")
+        title.setObjectName("brand")
+        body = QLabel(
+            "Choose a password for this file. It is not your Onionmind password, and without it the "
+            "file cannot be opened - not by you, not by anyone." if kind == "export" else
+            "Enter the password the file was exported with. Conversations already here are kept; "
+            "the file's conversations are added beside them.")
+        body.setObjectName("meta")
+        body.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        self.password = QLineEdit()
+        self.repeat = QLineEdit()
+        for field, text in ((self.password, "Export password" if kind == "export" else "Password"),
+                            (self.repeat, "Repeat the password")):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText(text)
+            field.setAccessibleName(text)
+            field.returnPressed.connect(self._submit)
+        layout.addWidget(self.password)
+        if kind == "export":
+            layout.addWidget(self.repeat)
+        self.settings = QCheckBox("Also replace my settings with the ones in the file")
+        if kind == "import":
+            layout.addWidget(self.settings)
+        self.error = QLabel("")
+        self.error.setObjectName("danger")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self.primary = QPushButton("Export" if kind == "export" else "Import")
+        self.primary.setObjectName("primaryButton")
+        self.primary.setDefault(True)
+        self.primary.clicked.connect(self._submit)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.primary)
+        layout.addLayout(buttons)
+        self.password.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _submit(self) -> None:
+        text = self.password.text()
+        if self.kind == "export":
+            if len(text) < 8:
+                return self._show_error("Use at least 8 characters; a few words are easier to remember.")
+            if text != self.repeat.text():
+                return self._show_error("The two passwords do not match.")
+        elif not text:
+            return self._show_error("Enter the file's password.")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            problem = self.attempt(text, self.settings.isChecked())
+        finally:
+            QApplication.restoreOverrideCursor()
+        if problem:
+            self.password.selectAll()
+            return self._show_error(problem)
+        self.password.clear()
+        self.repeat.clear()
+        self.outcome = "done"
+        self.accept()
+
+    def _show_error(self, text: str) -> None:
+        self.error.setText(text)
+        self.error.show()

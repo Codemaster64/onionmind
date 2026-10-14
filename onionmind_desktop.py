@@ -196,6 +196,7 @@ from onionmind_desktop_dialogs import (  # noqa: F401
     FeatureToggles,
     ModelManagerDialog,
     SettingsDialog,
+    TransferDialog,
     UnlockDialog,
 )
 _SCREENSHOT_PATH: Optional[str] = None
@@ -5166,6 +5167,30 @@ class OnionmindWindow(QMainWindow):
         self.disconnect_remote(message=message)
 
     # --- v2: auto-delete and app lock ----------------------------------------
+
+    def export_data(self, path: str, password: str) -> int:
+        """Every session and the settings into one password-protected file."""
+        store = self.session_bridge.store
+        if store is None:
+            raise RuntimeError("There are no stored conversations to export.")
+        count = self.desktop_core.write_export(path, password, store, self.settings_data)
+        self.set_status(f"Exported {count} conversation(s)")
+        return count
+
+    def import_data(self, path: str, password: str, *, settings: bool = False) -> dict[str, int]:
+        """Add an export's sessions beside the ones here; optionally take its settings."""
+        store = self.session_bridge.store
+        if store is None:
+            raise RuntimeError("Conversations cannot be stored here, so nothing can be imported.")
+        payload = self.desktop_core.read_export(path, password)
+        counts = dict(self.desktop_core.import_sessions(store, payload))
+        if settings and payload.get("from") == "desktop":
+            self.settings_data = self.desktop_core.imported_settings(self.settings_data, payload)
+            self.settings_bridge.save(self.settings_data)
+            counts["settings"] = 1
+        self._refresh_session_rows()
+        self.set_status(f"Imported {counts.get('added', 0)} conversation(s)")
+        return counts
 
     def _lock_settings(self) -> dict[str, Any]:
         stored = self.settings_data.get("lock")
