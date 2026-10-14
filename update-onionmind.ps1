@@ -18,6 +18,11 @@ $files = @(
   'onionmind_desktop_widgets.py',
   'onionmind_desktop_panes.py',
   'onionmind_desktop_dialogs.py',
+  'onionmind_desktop_vault.py',
+  'onionmind_desktop_netlog.py',
+  'onionmind_desktop_update.py',
+  'onionmind_desktop_hardware.py',
+  'onionmind_desktop_remote.py',
   'dsh-onionmind-tor-search.js',
   'dsh-onionmind-tor.patch.yml'
 )
@@ -212,7 +217,12 @@ try {
       (Join-Path $stage 'onionmind_desktop_theme.py') `
       (Join-Path $stage 'onionmind_desktop_widgets.py') `
       (Join-Path $stage 'onionmind_desktop_panes.py') `
-      (Join-Path $stage 'onionmind_desktop_dialogs.py')
+      (Join-Path $stage 'onionmind_desktop_dialogs.py') `
+      (Join-Path $stage 'onionmind_desktop_vault.py') `
+      (Join-Path $stage 'onionmind_desktop_netlog.py') `
+      (Join-Path $stage 'onionmind_desktop_update.py') `
+      (Join-Path $stage 'onionmind_desktop_hardware.py') `
+      (Join-Path $stage 'onionmind_desktop_remote.py')
     if ($LASTEXITCODE -ne 0) { throw 'Downloaded native desktop sources failed syntax validation.' }
   } else {
     Write-Warning 'Python 3.10+ is required for the native workbench; the classic UI will remain active.'

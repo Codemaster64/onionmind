@@ -22,6 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import onionmind_desktop_core as core
+import onionmind_desktop_hardware as hardware
 
 
 class ModelDisplayTests(unittest.TestCase):
@@ -1061,7 +1062,7 @@ class GpuMemoryProbeTests(unittest.TestCase):
     """Each vendor probe against canned tool output or a fake sysfs tree."""
 
     def probe(self, outputs: dict[str, str]):
-        return mock.patch.object(core, "_run_probe",
+        return mock.patch.object(hardware, "_run_probe",
                                  side_effect=lambda argv: outputs.get(" ".join(argv[:2])))
 
     def test_nvidia_is_parsed_with_its_name(self) -> None:
@@ -1081,7 +1082,7 @@ class GpuMemoryProbeTests(unittest.TestCase):
                 (device / "mem_info_vram_total").write_text(str(total * 1024 * 1024))
                 (device / "mem_info_vram_used").write_text(str(used * 1024 * 1024))
             (root / "card1" / "device" / "product_name").write_text("Radeon RX 7800 XT\n")
-            with mock.patch.object(core, "_DRM_ROOT", root):
+            with mock.patch.object(hardware, "_DRM_ROOT", root):
                 self.assertEqual(core._amd_memory(), (2_048, 16_368, "Radeon RX 7800 XT"))
 
     def test_intel_reads_xpu_smi_json(self) -> None:
@@ -1136,14 +1137,14 @@ class GpuMemoryProbeTests(unittest.TestCase):
 
     def test_first_vendor_found_wins_and_absence_is_none(self) -> None:
         # Intel is probed on every platform (AMD and Apple only off Windows).
-        with mock.patch.object(core, "_nvidia_memory", return_value=None), \
-             mock.patch.object(core, "_amd_memory", return_value=None), \
-             mock.patch.object(core, "_intel_memory", return_value=(1, 8_192, "Intel GPU")), \
-             mock.patch.object(core, "_apple_memory", return_value=None):
+        with mock.patch.object(hardware, "_nvidia_memory", return_value=None), \
+             mock.patch.object(hardware, "_amd_memory", return_value=None), \
+             mock.patch.object(hardware, "_intel_memory", return_value=(1, 8_192, "Intel GPU")), \
+             mock.patch.object(hardware, "_apple_memory", return_value=None):
             self.assertEqual(core.gpu_memory_mb(), (1, 8_192))
             self.assertEqual(core.gpu_vram_mb(), 8_192)
             self.assertEqual(core.gpu_name(), "Intel GPU")
-        with mock.patch.object(core, "_gpu_memory", return_value=None):
+        with mock.patch.object(hardware, "_gpu_memory", return_value=None):
             self.assertEqual(core.gpu_memory_mb(), (None, None))
             self.assertIsNone(core.gpu_name())
 

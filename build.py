@@ -38,6 +38,16 @@ AUXILIARY_SOURCES = [
     ("onionmind_desktop_panes.py",   "install-onionmind.sh", "<<'DESKTOPPANESEOF'\n",   "\nDESKTOPPANESEOF\n",   "\n"),
     ("onionmind_desktop_dialogs.py", "onionmind-setup.cmd",  "$desktopDialogs = @'\n",  "\n'@\n",                "\r\n"),
     ("onionmind_desktop_dialogs.py", "install-onionmind.sh", "<<'DESKTOPDIALOGSEOF'\n", "\nDESKTOPDIALOGSEOF\n", "\n"),
+    ("onionmind_desktop_vault.py",        "onionmind-setup.cmd",  "$desktopVault = @'\n",      "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_vault.py",        "install-onionmind.sh", "<<'DESKTOPVAULTEOF'\n",    "\nDESKTOPVAULTEOF\n",    "\n"),
+    ("onionmind_desktop_netlog.py",       "onionmind-setup.cmd",  "$desktopNetlog = @'\n",     "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_netlog.py",       "install-onionmind.sh", "<<'DESKTOPNETLOGEOF'\n",   "\nDESKTOPNETLOGEOF\n",   "\n"),
+    ("onionmind_desktop_update.py",       "onionmind-setup.cmd",  "$desktopUpdate = @'\n",     "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_update.py",       "install-onionmind.sh", "<<'DESKTOPUPDATEEOF'\n",   "\nDESKTOPUPDATEEOF\n",   "\n"),
+    ("onionmind_desktop_hardware.py",     "onionmind-setup.cmd",  "$desktopHardware = @'\n",   "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_hardware.py",     "install-onionmind.sh", "<<'DESKTOPHARDWAREEOF'\n", "\nDESKTOPHARDWAREEOF\n", "\n"),
+    ("onionmind_desktop_remote.py",       "onionmind-setup.cmd",  "$desktopRemote = @'\n",     "\n'@\n",                "\r\n"),
+    ("onionmind_desktop_remote.py",       "install-onionmind.sh", "<<'DESKTOPREMOTEEOF'\n",   "\nDESKTOPREMOTEEOF\n",   "\n"),
 ]
 
 # The only intentional per-platform differences. Everything else is identical by

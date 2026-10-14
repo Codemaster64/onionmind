@@ -2604,14 +2604,135 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-import stat
 import subprocess
-import sys
-import tempfile
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
-import zipfile
+
+from onionmind_desktop_vault import (  # noqa: F401
+    PathInput,
+    _NO_WINDOW,
+    _utc_now,
+    _atomic_write_json,
+    _quarantine_corrupt,
+    _read_json_object,
+    _as_text_core,
+    shred_file,
+    shred_tree,
+    VAULT_FILE,
+    _ENC_MAGIC,
+    _ENC_LINE,
+    _ENC_AAD,
+    _NONCE_BYTES,
+    _SCRYPT,
+    VaultError,
+    WrongPassword,
+    KeystoreUnavailable,
+    VaultLocked,
+    encryption_available,
+    _aesgcm,
+    _key_tag,
+    FileKeystore,
+    SecretServiceKeystore,
+    MacKeychain,
+    DpapiKeystore,
+    keystore_for,
+    _wrap_key,
+    _unwrap_key,
+    Vault,
+    is_encrypted,
+    _write_header,
+    vault_header,
+    vault_needs_password,
+    open_vault,
+    _VAULT_OWN_FILES,
+    encrypt_data_folder,
+    erase_data_folder,
+    _atomic_write_bytes,
+    read_data_file,
+    write_data_file,
+    EXPORT_MAGIC,
+    EXPORT_SUFFIX,
+    EXPORT_PBKDF2_ITERATIONS,
+    ExportError,
+    _export_key,
+    export_bytes,
+    read_export_bytes,
+    export_payload,
+    write_export,
+    read_export,
+    import_sessions,
+    imported_settings,
+)
+from onionmind_desktop_netlog import (  # noqa: F401
+    EgressLog,
+    _AGENT_NET_LINE,
+    agent_net_entries,
+    absorb_agent_net_log,
+    AGENT_ARCHIVE_DIR,
+    AGENT_SCRATCH_PREFIX,
+    AGENT_NET_LOG_NAME,
+    _AGENT_SESSION_ID,
+    agent_scratch_base,
+    _agent_archive,
+    open_agent_scratch,
+    seal_agent_scratch,
+    sweep_agent_scratch,
+    network_log_csv,
+    network_log_json,
+)
+from onionmind_desktop_update import (  # noqa: F401
+    UPDATE_REPO,
+    UPDATE_FEED_TAG,
+    UPDATE_MANIFEST_ASSET,
+    UPDATE_REVISION_FILENAME,
+    UPDATE_FEED_URL,
+    _UPDATE_ASSET_HOSTS,
+    BundleUpdateError,
+    UpdateManifest,
+    short_revision,
+    parse_update_manifest,
+    installed_revision,
+    update_state,
+    _APPLY_SCRIPT_TEMPLATE,
+    BundleUpdater,
+    pending_staging_dir,
+    prune_update_workdir,
+)
+from onionmind_desktop_hardware import (  # noqa: F401
+    _run_probe,
+    _nvidia_memory,
+    _DRM_ROOT,
+    _amd_memory,
+    _intel_memory,
+    _apple_memory,
+    _dxgi_adapters,
+    _pick_dxgi_adapter,
+    _DXGI_VENDORS,
+    _DXGI_MICROSOFT,
+    _windows_memory,
+    _gpu_memory,
+    gpu_memory_mb,
+    gpu_name,
+    model_fit,
+    format_gb,
+    ServerStart,
+    model_server_start_plan,
+    node_version,
+    node_supports_agent,
+)
+from onionmind_desktop_remote import (  # noqa: F401
+    REMOTE_OLLAMA_PORT,
+    _SSH_TARGET,
+    SshTarget,
+    parse_ssh_target,
+    ssh_tunnel_argv,
+    describe_ssh_failure,
+    load_remote_settings,
+    _free_loopback_port,
+    _ollama_version,
+    SshTunnel,
+)
 
 
 __all__ = [
@@ -2758,15 +2879,6 @@ __all__ = [
 ]
 
 
-PathInput = str | os.PathLike[str]
-
-
-# The desktop app runs under pythonw.exe, which has no console; without this
-# flag Windows gives every helper process (git, node, the engine) its own
-# flashing cmd window.
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-
-
 ONIONMIND_TIERS: tuple[str, ...] = (
     "SPARK",
     "EMBER",
@@ -2901,116 +3013,6 @@ def model_displays(raw_ids: Iterable[str]) -> tuple[ModelDisplay, ...]:
         seen.add(raw_id)
         choices.append(describe_model(raw_id))
     return tuple(choices)
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def _atomic_write_json(path: Path, value: Mapping[str, Any], vault: Any = None) -> None:
-    """Write a JSON object next to its destination, then atomically replace it.
-
-    With a vault the file is written encrypted. Without one, an encrypted file
-    is never overwritten with plaintext: that would be a silent downgrade."""
-
-    if vault is not None:
-        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        _atomic_write_bytes(path, vault.encrypt(text.encode("utf-8")))
-        return
-    try:
-        with path.open("rb") as existing:
-            if is_encrypted(existing.read(len(_ENC_MAGIC))):
-                raise VaultError(f"{path.name} is encrypted; it can only be written through the open vault")
-    except OSError:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    handle = None
-    try:
-        handle = tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        )
-        temporary = Path(handle.name)
-        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        handle.close()
-        handle = None
-        os.replace(temporary, path)
-        temporary = None
-        # fsync the containing directory as well on POSIX so the rename itself
-        # survives a sudden power loss. Windows does not expose directory
-        # handles through os.open, so the file flush above is the strongest
-        # portable guarantee available there.
-        if os.name != "nt":
-            directory_fd: int | None = None
-            try:
-                directory_fd = os.open(
-                    path.parent,
-                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                )
-                os.fsync(directory_fd)
-            except OSError:
-                # Some filesystems do not support directory fsync. The atomic
-                # replacement has still completed successfully in that case.
-                pass
-            finally:
-                if directory_fd is not None:
-                    os.close(directory_fd)
-    finally:
-        if handle is not None:
-            handle.close()
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-
-
-def _quarantine_corrupt(path: Path) -> Path | None:
-    """Move unreadable local state aside so callers can recover immediately."""
-
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    destination = path.with_name(f"{path.name}.corrupt-{stamp}-{uuid4().hex[:8]}")
-    try:
-        os.replace(path, destination)
-    except OSError:
-        return None
-    return destination
-
-
-def _read_json_object(path: Path, vault: Any = None) -> dict[str, Any] | None:
-    try:
-        raw = path.read_bytes()
-    except (FileNotFoundError, IsADirectoryError):
-        return None
-    if is_encrypted(raw):
-        # Without the right key the file is unreadable, not corrupt: leave it.
-        if vault is None:
-            return None
-        try:
-            raw = vault.decrypt(raw)
-        except VaultError:
-            return None
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
-        _quarantine_corrupt(path)
-        return None
-
-    if not isinstance(value, dict):
-        _quarantine_corrupt(path)
-        return None
-    return value
 
 
 class SettingsStore:
@@ -3206,10 +3208,6 @@ def uncensored_marker(*texts: Any) -> Optional[str]:
             if marker in _as_text_core(text).casefold():
                 return marker
     return None
-
-
-def _as_text_core(value: Any) -> str:
-    return "" if value is None else str(value)
 
 
 def quant_from_filename(filename: str) -> Optional[str]:
@@ -3422,81 +3420,6 @@ def catalog_fit(id_or_name: str, vram_mb: Optional[int], ram_mb: Optional[int]) 
     if fits:
         return 0, f"~{shown}GB at Q4, fits this machine's {kind}"
     return 2, f"~{shown}GB at Q4, beyond this machine's {kind}"
-
-
-def shred_file(path: PathInput) -> bool:
-    """Overwrite a file's bytes, then remove it. True when it is gone.
-
-    A symlink is unlinked, never written through - the file it points at is
-    not this program's to destroy.
-
-    ponytail: overwrite-then-unlink is as far as user space reaches. On an SSD,
-    a copy-on-write filesystem, or any volume with snapshots, the original
-    blocks can survive untouched; full-disk encryption, or Matchstick's
-    RAM-only image, is the real guarantee. TECHNICAL.md states the same limit.
-    """
-    target = Path(path)
-    if target.is_symlink():
-        try:
-            target.unlink()
-            return True
-        except OSError:
-            return False
-    try:
-        size = target.stat().st_size
-        with open(target, "r+b", buffering=0) as handle:
-            written = 0
-            while written < size:
-                chunk = min(1 << 20, size - written)
-                handle.write(os.urandom(chunk))
-                written += chunk
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError:
-        pass                      # unwritable is not a reason to keep the file
-    for attempt in (0, 1):
-        try:
-            target.unlink()
-            return True
-        except FileNotFoundError:
-            return True
-        except PermissionError:
-            if attempt:
-                return False
-            try:
-                os.chmod(target, stat.S_IWRITE)    # Windows read-only flag
-            except OSError:
-                return False
-        except OSError:
-            return False
-    return False
-
-
-def shred_tree(root: PathInput) -> int:
-    """Shred every file under root and remove the directories. Returns the
-    number of files removed; a directory that will not go is left behind
-    rather than failing the whole wipe."""
-    base = Path(root)
-    if not base.exists() and not base.is_symlink():
-        return 0
-    if base.is_symlink() or base.is_file():
-        return 1 if shred_file(base) else 0
-    removed = 0
-    for parent, directories, files in os.walk(base, topdown=False):
-        for name in files:
-            if shred_file(Path(parent) / name):
-                removed += 1
-        for name in directories:
-            entry = Path(parent) / name
-            try:
-                entry.unlink() if entry.is_symlink() else entry.rmdir()
-            except OSError:
-                pass
-    try:
-        base.rmdir()
-    except OSError:
-        pass
-    return removed
 
 
 @dataclass
@@ -4541,483 +4464,6 @@ def parse_terminal_command(
     return arguments
 
 
-# --- Tor-routed self-update -------------------------------------------------
-#
-# The installed workbench is a Nuitka standalone bundle: its code is compiled
-# into Onionmind.exe, so an update means a whole new bundle directory. The
-# feed is a plain GitHub release-asset URL (no api.github.com call, which is
-# aggressively rate-limited for shared Tor exit addresses) whose small JSON
-# manifest carries the source revision plus the size and SHA-256 of the zip.
-# Every request - manifest and bundle alike - goes through the local Tor SOCKS
-# port with fresh credentials, so each fetch rides its own circuit. A failed
-# Tor check fails closed; there is no direct-network fallback anywhere in this path.
-
-UPDATE_REPO = "Codemaster64/onionmind"
-UPDATE_FEED_TAG = "desktop-latest"
-UPDATE_MANIFEST_ASSET = "onionmind-update.json"
-UPDATE_REVISION_FILENAME = ".onionmind-source-revision"
-UPDATE_FEED_URL = (
-    f"https://github.com/{UPDATE_REPO}/releases/download/"
-    f"{UPDATE_FEED_TAG}/{UPDATE_MANIFEST_ASSET}"
-)
-_UPDATE_ASSET_HOSTS = ("github.com", "githubusercontent.com", "github.io")
-
-
-class BundleUpdateError(RuntimeError):
-    """A user-facing update failure. Never retried outside Tor."""
-
-
-@dataclass(frozen=True)
-class UpdateManifest:
-    revision: str
-    version: str
-    asset_name: str
-    asset_url: str
-    size: int
-    sha256: str
-
-
-def short_revision(revision: Optional[str]) -> str:
-    """Seven hex characters for display; honest fallbacks for odd values."""
-
-    if not revision:
-        return "unknown"
-    text = revision.strip()
-    return text[:7] if re.fullmatch(r"[0-9a-fA-F]{7,40}", text) else text[:12]
-
-
-def parse_update_manifest(text: str) -> UpdateManifest:
-    """Validate the release manifest strictly - it decides what gets executed.
-
-    A sloppily parsed manifest is the one file an attacker controlling the feed
-    could use to point the updater at an arbitrary URL, so asset names must be
-    plain filenames, URLs must be GitHub hosts over HTTPS, and the digest must
-    be a full lowercase SHA-256.
-    """
-
-    try:
-        payload = json.loads(text)
-    except ValueError as exc:
-        raise BundleUpdateError(f"update manifest is not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise BundleUpdateError("update manifest must be a JSON object")
-
-    revision = payload.get("revision")
-    version = payload.get("version")
-    asset_name = payload.get("asset")
-    asset_url = payload.get("asset_url")
-    size = payload.get("size")
-    sha256 = payload.get("sha256")
-
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{7,40}", revision):
-        raise BundleUpdateError("update manifest has no valid revision")
-    if not isinstance(version, str) or not version.strip() or not version.isprintable():
-        raise BundleUpdateError("update manifest has no valid version")
-    if not isinstance(asset_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset_name):
-        raise BundleUpdateError("update manifest has no valid asset name")
-    if (
-        not isinstance(asset_url, str)
-        or not asset_url.startswith("https://")
-        or not any(
-            asset_url[len("https://") :].split("/", 1)[0].endswith(host)
-            for host in _UPDATE_ASSET_HOSTS
-        )
-    ):
-        raise BundleUpdateError("update manifest asset URL is not a GitHub HTTPS URL")
-    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
-        raise BundleUpdateError("update manifest has no valid asset size")
-    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
-        raise BundleUpdateError("update manifest has no valid SHA-256 digest")
-
-    return UpdateManifest(
-        revision=revision,
-        version=version,
-        asset_name=asset_name,
-        asset_url=asset_url,
-        size=size,
-        sha256=sha256,
-    )
-
-
-def installed_revision(install_dir: PathInput) -> Optional[str]:
-    """The revision marker written into the bundle at build time, if present."""
-
-    marker = Path(install_dir) / UPDATE_REVISION_FILENAME
-    try:
-        text = marker.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
-
-
-def update_state(installed: Optional[str], manifest: Optional[UpdateManifest]) -> str:
-    """'current', 'available', or 'development' - the honest tri-state.
-
-    Without git metadata the app cannot order revisions, so any difference
-    between the local marker and the feed is reported as an available update;
-    the dialog always shows both revisions and the user decides.
-    """
-
-    if manifest is None:
-        return "unavailable"
-    if installed is None:
-        return "development"
-    if installed == manifest.revision:
-        return "current"
-    return "available"
-
-
-# The swap itself runs outside the app: a running Windows executable cannot be
-# replaced in place, so this script waits for the app to exit, renames the old
-# bundle to a dated backup beside itself (the naming the installer already
-# uses), moves the verified staging directory into place, and relaunches. Any
-# failure rolls the backup back before giving up, so a half-applied update
-# cannot leave the machine without a working Onionmind.
-_APPLY_SCRIPT_TEMPLATE = r"""
-param(
-  [Parameter(Mandatory=$true)][int]$ParentPid,
-  [Parameter(Mandatory=$true)][string]$InstallDir,
-  [Parameter(Mandatory=$true)][string]$StagingDir,
-  [Parameter(Mandatory=$true)][string]$LogFile
-)
-
-$ErrorActionPreference = 'Stop'
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-
-function Write-ApplyLog([string]$Message) {
-  try {
-    [IO.File]::AppendAllText($LogFile, ("{0} {1}`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message), $Utf8NoBom)
-  } catch { }
-}
-
-function Get-MarkerRevision([string]$Directory) {
-  $Marker = Join-Path $Directory '@MARKER@'
-  try { return [string](Get-Content -LiteralPath $Marker -ErrorAction Stop | Select-Object -First 1) }
-  catch { return '' }
-}
-
-try {
-  if (-not (Test-Path -LiteralPath (Join-Path $StagingDir '@EXE_NAME@') -PathType Leaf)) {
-    throw "Staging directory has no @EXE_NAME@; refusing to swap."
-  }
-
-  # 1. The caller exits right after spawning this script; give it time to die
-  #    so the old executable stops being locked.
-  $Deadline = (Get-Date).AddSeconds(120)
-  while ($true) {
-    if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
-    if ((Get-Date) -gt $Deadline) { throw "Onionmind (pid $ParentPid) did not exit within 120s." }
-    Start-Sleep -Milliseconds 500
-  }
-  Start-Sleep -Milliseconds 800
-
-  $Parent = Split-Path -Parent $InstallDir
-  $Leaf = Split-Path -Leaf $InstallDir
-  $OldRevision = Get-MarkerRevision $InstallDir
-  $OldShort = if ($OldRevision) { $OldRevision.Substring(0, [Math]::Min(7, $OldRevision.Length)) } else { 'unknown' }
-  $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-  $Backup = Join-Path $Parent ("{0}.backup-before-{1}-{2}" -f $Leaf, $OldShort, $Stamp)
-
-  # 2. Swap. Rename first so the move lands at the exact original path.
-  Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $Backup)
-  Write-ApplyLog "renamed old bundle to $(Split-Path -Leaf $Backup)"
-  try {
-    Move-Item -LiteralPath $StagingDir -Destination $InstallDir
-    Write-ApplyLog "moved staged bundle into place"
-  } catch {
-    Rename-Item -LiteralPath $Backup -NewName $Leaf
-    Write-ApplyLog "move failed; restored the previous bundle"
-    throw
-  }
-
-  # 3. Keep the two newest backups only; older swaps otherwise pile up forever.
-  Get-ChildItem -LiteralPath $Parent -Directory -Filter ($Leaf + '.backup-before-*') -ErrorAction SilentlyContinue |
-    Sort-Object CreationTime -Descending |
-    Select-Object -Skip 2 |
-    ForEach-Object {
-      try { Remove-Item -LiteralPath $_.FullName -Recurse -Force; Write-ApplyLog "pruned old backup $($_.Name)" }
-      catch { Write-ApplyLog "could not prune old backup $($_.Name): $($_.Exception.Message)" }
-    }
-
-  # 4. Relaunch the freshly installed workbench. By this point the update is
-  #    applied regardless, so a relaunch problem is logged, not fatal.
-  try {
-    Start-Process -FilePath (Join-Path $InstallDir '@EXE_NAME@') -WorkingDirectory $InstallDir
-    Write-ApplyLog "relaunched the new workbench"
-  } catch {
-    Write-ApplyLog ("could not relaunch automatically; start Onionmind by hand: " + $_.Exception.Message)
-  }
-  Write-ApplyLog ("update applied; now running revision " + (Get-MarkerRevision $InstallDir))
-  exit 0
-} catch {
-  Write-ApplyLog ("FAILED: " + $_.Exception.Message)
-  exit 1
-}
-"""
-
-
-class BundleUpdater:
-    """Tor-only download and staging for the installed standalone bundle.
-
-    ``proxies_factory`` mirrors ``onionmind._proxies``: it receives the SOCKS
-    port and returns a requests proxy mapping, and it is called once per
-    request so every fetch gets a fresh isolated circuit.
-    """
-
-    def __init__(
-        self,
-        install_dir: PathInput,
-        work_dir: PathInput,
-        proxies_factory: Callable[[int], dict[str, str]],
-        user_agent: str,
-        session: Optional[Any] = None,
-    ) -> None:
-        self.install_dir = Path(install_dir)
-        self.work_dir = Path(work_dir)
-        self.proxies_factory = proxies_factory
-        self.user_agent = user_agent
-        self._session = session
-
-    def _request(self, method: str, url: str, port: int, **kwargs: Any) -> Any:
-        import requests  # deferred: the pure module stays importable without it
-
-        proxies = self.proxies_factory(port)
-        if not proxies:
-            raise BundleUpdateError("No verified Tor proxy is pinned for this update.")
-        request = self._session or requests
-        kwargs.setdefault("timeout", 90)
-        kwargs.setdefault(
-            "headers", {"User-Agent": self.user_agent, "Accept": "application/octet-stream"}
-        )
-        kwargs["proxies"] = proxies
-        try:
-            return request.request(method, url, **kwargs)
-        except BundleUpdateError:
-            raise
-        except Exception as exc:
-            raise BundleUpdateError(
-                f"Could not reach the update feed over Tor: {exc}"
-            ) from exc
-
-    def fetch_manifest(self, port: int) -> UpdateManifest:
-        response = self._request("GET", UPDATE_FEED_URL, port)
-        self._raise_for_status(response)
-        try:
-            body = response.content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise BundleUpdateError("Update manifest is not UTF-8 text.") from exc
-        return parse_update_manifest(body)
-
-    @staticmethod
-    def _raise_for_status(response: Any) -> None:
-        status = getattr(response, "status_code", 0)
-        if status == 200:
-            return
-        detail = ""
-        text = getattr(response, "text", "")
-        if text:
-            detail = ": " + text[:160].strip()
-        raise BundleUpdateError(f"Update feed returned HTTP {status}{detail}")
-
-    def download(
-        self,
-        port: int,
-        manifest: UpdateManifest,
-        progress: Optional[Callable[[Optional[float], str], None]] = None,
-        stop_event: Optional[Any] = None,
-    ) -> Path:
-        """Stream the bundle zip through Tor into the work directory.
-
-        The archive lands under a ``.part`` name and is verified against the
-        manifest size and SHA-256 before it is allowed to keep the final name,
-        so a truncated or tampered download can never be staged.
-        """
-
-        downloads = self.work_dir / "downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        final_path = downloads / f"{manifest.asset_name}"
-        part_path = downloads / (manifest.asset_name + ".part")
-
-        response = self._request(
-            "GET",
-            manifest.asset_url,
-            port,
-            stream=True,
-            timeout=(60, 300),
-        )
-        self._raise_for_status(response)
-        total = manifest.size
-        digest = hashlib.sha256()
-        done = 0
-        last_note = -1.0
-        try:
-            with part_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=262144):
-                    if stop_event is not None and stop_event.is_set():
-                        raise BundleUpdateError("Update download was stopped.")
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    done += len(chunk)
-                    if done > total:
-                        raise BundleUpdateError(
-                            "Downloaded bundle is larger than the manifest announced."
-                        )
-                    if progress is not None and (done - last_note >= 1048576 or done == total):
-                        last_note = float(done)
-                        note = f"{done // 1048576} MB of {total // 1048576} MB over Tor"
-                        progress(done / total if total else None, note)
-        except BundleUpdateError:
-            part_path.unlink(missing_ok=True)
-            raise
-        except OSError as exc:
-            part_path.unlink(missing_ok=True)
-            raise BundleUpdateError(f"Could not write the update download: {exc}") from exc
-
-        if done != total:
-            part_path.unlink(missing_ok=True)
-            raise BundleUpdateError(
-                f"Download stopped early at {done} of {total} bytes; nothing was installed."
-            )
-        if digest.hexdigest() != manifest.sha256:
-            part_path.unlink(missing_ok=True)
-            raise BundleUpdateError(
-                "Downloaded bundle failed the SHA-256 check; nothing was installed."
-            )
-        part_path.replace(final_path)
-        return final_path
-
-    def stage(self, manifest: UpdateManifest, archive_path: PathInput) -> Path:
-        """Unpack a verified archive into a staging directory beside the install.
-
-        Extraction is guarded against zip-slip (every member must stay inside
-        the staging root) and the result must contain both the executable and a
-        revision marker matching the manifest, so what gets swapped in is
-        exactly what the feed described.
-        """
-
-        staging = self.work_dir / f"staging-{manifest.revision[:12]}"
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
-
-        root = staging.resolve()
-        try:
-            with zipfile.ZipFile(archive_path) as archive:
-                for member in archive.namelist():
-                    resolved = (root / member).resolve()
-                    if resolved != root and root not in resolved.parents:
-                        raise BundleUpdateError(
-                            f"Update archive entry escapes the staging directory: {member}"
-                        )
-                archive.extractall(root)
-        except BundleUpdateError:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        except (OSError, zipfile.BadZipFile) as exc:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise BundleUpdateError(f"Update archive could not be unpacked: {exc}") from exc
-
-        if not (staging / "Onionmind.exe").is_file():
-            shutil.rmtree(staging, ignore_errors=True)
-            raise BundleUpdateError("Update archive has no Onionmind.exe; nothing was installed.")
-        staged_revision = installed_revision(staging)
-        if staged_revision != manifest.revision:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise BundleUpdateError(
-                "Update archive revision marker does not match the manifest; nothing was installed."
-            )
-        return staging
-
-    def write_apply_script(self) -> Path:
-        """Materialise the post-exit swap script and return its path."""
-
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        script_path = self.work_dir / "apply-onionmind-update.ps1"
-        text = _APPLY_SCRIPT_TEMPLATE
-        for token, value in (
-            ("@MARKER@", UPDATE_REVISION_FILENAME),
-            ("@EXE_NAME@", "Onionmind.exe"),
-        ):
-            text = text.replace(token, value)
-        # BOM so Windows PowerShell 5.1 reads the script as UTF-8 regardless
-        # of the system code page.
-        script_path.write_text(text, encoding="utf-8-sig")
-        return script_path
-
-    def apply_command(self, staging_dir: PathInput) -> list[str]:
-        """The detached command that finishes the update after the app exits."""
-
-        script = self.write_apply_script()
-        return [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-            "-ParentPid",
-            str(os.getpid()),
-            "-InstallDir",
-            str(self.install_dir),
-            "-StagingDir",
-            str(Path(staging_dir)),
-            "-LogFile",
-            str(self.work_dir / "apply.log"),
-        ]
-
-
-def pending_staging_dir(work_dir: PathInput) -> Optional[Path]:
-    """A previously staged, still-verified bundle waiting to be applied."""
-
-    work = Path(work_dir)
-    if not work.is_dir():
-        return None
-    candidates = sorted(
-        (entry for entry in work.iterdir() if entry.is_dir() and entry.name.startswith("staging-")),
-        key=lambda entry: entry.stat().st_mtime,
-        reverse=True,
-    )
-    for candidate in candidates:
-        if (candidate / "Onionmind.exe").is_file() and installed_revision(candidate):
-            return candidate
-    return None
-
-
-def prune_update_workdir(
-    work_dir: PathInput,
-    running_revision: Optional[str] = None,
-    max_age_days: int = 14,
-) -> None:
-    """Drop long-lived downloads and stale staging directories.
-
-    Staging directories whose revision matches the running bundle are stale by
-    definition - the update they hold is already installed - so they go first.
-    """
-
-    work = Path(work_dir)
-    if not work.is_dir():
-        return
-    cutoff = datetime.now().timestamp() - max_age_days * 86400
-    downloads = work / "downloads"
-    if downloads.is_dir():
-        for entry in downloads.iterdir():
-            try:
-                if entry.is_file() and entry.stat().st_mtime < cutoff:
-                    entry.unlink(missing_ok=True)
-            except OSError:
-                continue
-    for entry in work.iterdir():
-        if not entry.is_dir() or not entry.name.startswith("staging-"):
-            continue
-        try:
-            if installed_revision(entry) == running_revision or entry.stat().st_mtime < cutoff:
-                shutil.rmtree(entry, ignore_errors=True)
-        except OSError:
-            continue
-
-
 # --- Workbench v2 ------------------------------------------------------
 #
 # The v2 workbench adds 24 features behind one flag dict. Everything below is
@@ -5619,923 +5065,6 @@ def verify_passphrase(passphrase: str, record: Mapping[str, Any]) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
-# --- Encryption at rest --------------------------------------------------
-#
-# Everything under the desktop data folder (settings, sessions, the network
-# log, revert backups) is AES-256-GCM encrypted with one random data key.
-# vault.json beside it is the only plaintext file and holds no secret: which
-# key store keeps the data key, or - once the person sets a password - the
-# data key wrapped with a key derived from that password (scrypt). A password
-# is optional; without one the operating system's key store releases the key
-# to this user account, so a copied disk or another account reads nothing,
-# but programs running as this same user could ask for it. With a password the
-# key is nowhere on disk in usable form, and a forgotten password means the
-# data is gone: there is no recovery, by design.
-
-VAULT_FILE = "vault.json"
-_ENC_MAGIC = b"OMENC1\n"
-_ENC_LINE = "enc1:"
-_ENC_AAD = b"onionmind/v1"
-_NONCE_BYTES = 12
-_SCRYPT = {"n": 2 ** 15, "r": 8, "p": 1}
-
-
-class VaultError(RuntimeError):
-    """The data folder's encryption could not be opened or changed."""
-
-
-class WrongPassword(VaultError):
-    pass
-
-
-class KeystoreUnavailable(VaultError):
-    pass
-
-
-class VaultLocked(VaultError):
-    """The vault was locked: its key is out of memory until the password is typed."""
-
-
-def encryption_available() -> bool:
-    """True when the `cryptography` package (AES-GCM) can be imported."""
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-def _aesgcm(key: bytes) -> Any:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    return AESGCM(key)
-
-
-def _key_tag(root: Path) -> str:
-    """A stable, non-identifying name for one data folder's key."""
-    return hashlib.sha256(str(Path(root).expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
-
-
-class FileKeystore:
-    """Fallback: a key file only this user can read, kept outside the data folder.
-
-    It stops another account and a copied data folder, not a program running as
-    this user - the settings say so and recommend a password."""
-
-    name = "file"
-    label = "a key file only your user account can read"
-    strong = False
-
-    def __init__(self, tag: str, directory: Optional[Path] = None) -> None:
-        base = directory or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "onionmind" / "keys"
-        self.path = base / f"{tag}.key"
-
-    def get(self) -> Optional[bytes]:
-        try:
-            value = bytes.fromhex(self.path.read_text(encoding="ascii").strip())
-        except (OSError, ValueError):
-            return None
-        return value if len(value) == 32 else None
-
-    def put(self, key: bytes) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.path.parent, 0o700)
-        except OSError:
-            pass
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(self.path, flags, 0o600)
-        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-            handle.write(key.hex())
-        os.chmod(self.path, 0o600)
-
-    def delete(self) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-
-
-class SecretServiceKeystore:
-    """Linux desktops: GNOME Keyring / KWallet through `secret-tool` (libsecret).
-    The key goes in on stdin, never on a command line."""
-
-    name = "secret-service"
-    label = "your desktop keyring (Secret Service)"
-    strong = True
-
-    def __init__(self, tag: str) -> None:
-        self.attributes = ["service", "onionmind", "key", tag]
-
-    def _run(self, *args: str, data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(["secret-tool", *args, *self.attributes], input=data, capture_output=True,
-                                  text=True, timeout=20)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise KeystoreUnavailable(f"secret-tool failed: {exc}") from exc
-
-    def get(self) -> Optional[bytes]:
-        result = self._run("lookup")
-        try:
-            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
-        except ValueError:
-            return None
-        return value if len(value) == 32 else None
-
-    def put(self, key: bytes) -> None:
-        result = self._run("store", "--label=Onionmind data key", data=key.hex())
-        if result.returncode != 0 or self.get() != key:
-            raise KeystoreUnavailable(result.stderr.strip() or "the keyring did not keep the key")
-
-    def delete(self) -> None:
-        self._run("clear")
-
-
-class MacKeychain:
-    """macOS: the login keychain through `security`. Commands go in on stdin
-    (`security -i`), so the key never appears in a process listing."""
-
-    name = "keychain"
-    label = "the macOS Keychain"
-    strong = True
-
-    def __init__(self, tag: str) -> None:
-        self.service, self.account = "Onionmind", f"data-key-{tag}"
-
-    def _run(self, args: list[str], data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(["security", *args], input=data, capture_output=True, text=True, timeout=20)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise KeystoreUnavailable(f"security failed: {exc}") from exc
-
-    def get(self) -> Optional[bytes]:
-        result = self._run(["find-generic-password", "-s", self.service, "-a", self.account, "-w"])
-        try:
-            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
-        except ValueError:
-            return None
-        return value if len(value) == 32 else None
-
-    def put(self, key: bytes) -> None:
-        command = (f"add-generic-password -U -s {self.service} -a {self.account} "
-                   f"-l \"Onionmind data key\" -w {key.hex()}\n")
-        result = self._run(["-i"], data=command)
-        if result.returncode != 0 or self.get() != key:
-            raise KeystoreUnavailable(result.stderr.strip() or "the Keychain did not keep the key")
-
-    def delete(self) -> None:
-        self._run(["delete-generic-password", "-s", self.service, "-a", self.account])
-
-
-class DpapiKeystore:
-    """Windows: the key sealed with DPAPI (CryptProtectData) for this user
-    account, stored beside vault.json. The sealed blob is useless to another
-    account or on another machine."""
-
-    name = "dpapi"
-    label = "Windows Data Protection (DPAPI) for your account"
-    strong = True
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    @staticmethod
-    def _call(function_name: str, data: bytes) -> bytes:
-        import ctypes
-        from ctypes import wintypes
-
-        class Blob(ctypes.Structure):
-            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        function = getattr(crypt32, function_name)
-        function.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                             ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
-        function.restype = wintypes.BOOL
-        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-        buffer = ctypes.create_string_buffer(data, len(data))
-        source = Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
-        result = Blob()
-        # 0x1 = CRYPTPROTECT_UI_FORBIDDEN: never show a prompt.
-        if not function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result)):
-            raise KeystoreUnavailable(f"{function_name} failed ({ctypes.get_last_error()})")
-        try:
-            return ctypes.string_at(result.pbData, result.cbData)
-        finally:
-            kernel32.LocalFree(result.pbData)
-
-    def get(self) -> Optional[bytes]:
-        try:
-            value = self._call("CryptUnprotectData", self.path.read_bytes())
-        except (OSError, KeystoreUnavailable):
-            return None
-        return value if len(value) == 32 else None
-
-    def put(self, key: bytes) -> None:
-        sealed = self._call("CryptProtectData", key)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_bytes(sealed)
-        os.replace(temporary, self.path)
-        if self.get() != key:
-            raise KeystoreUnavailable("DPAPI did not return the key it sealed")
-
-    def delete(self) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def keystore_for(root: PathInput, name: Optional[str] = None) -> Any:
-    """The key store a vault uses: `name` from its header, else this platform's best."""
-    root = Path(root).expanduser()
-    tag = _key_tag(root)
-    choice = name or ("dpapi" if os.name == "nt" else
-                      "keychain" if sys.platform == "darwin" else
-                      "secret-service" if shutil.which("secret-tool") else "file")
-    if choice == "dpapi":
-        return DpapiKeystore(root / "device-key.dpapi")
-    if choice == "keychain":
-        return MacKeychain(tag)
-    if choice == "secret-service":
-        return SecretServiceKeystore(tag)
-    return FileKeystore(tag)
-
-
-def _wrap_key(key: bytes, password: str) -> dict[str, Any]:
-    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
-    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=128 * 1024 * 1024, **_SCRYPT)
-    wrapped = _aesgcm(kek).encrypt(nonce, key, b"onionmind/key")
-    return {"kdf": "scrypt", **_SCRYPT, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped": wrapped.hex()}
-
-
-def _unwrap_key(record: Mapping[str, Any], password: str) -> bytes:
-    from cryptography.exceptions import InvalidTag
-
-    try:
-        salt, nonce = bytes.fromhex(record["salt"]), bytes.fromhex(record["nonce"])
-        wrapped = bytes.fromhex(record["wrapped"])
-        params = {key: int(record[key]) for key in ("n", "r", "p")}
-    except (KeyError, TypeError, ValueError) as exc:
-        raise VaultError("vault.json is damaged") from exc
-    if record.get("kdf") != "scrypt":
-        raise VaultError("vault.json names an unknown key derivation")
-    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=256 * 1024 * 1024, **params)
-    try:
-        return _aesgcm(kek).decrypt(nonce, wrapped, b"onionmind/key")
-    except InvalidTag:
-        raise WrongPassword("That password is not right.") from None
-
-
-class Vault:
-    """An open vault: the data key in memory, and the header describing it."""
-
-    def __init__(self, root: PathInput, key: bytes, header: Mapping[str, Any], keystore: Any = None) -> None:
-        self.root = Path(root).expanduser()
-        self._key: Optional[bytes] = key
-        self._cipher: Any = _aesgcm(key)
-        self.header = dict(header)
-        self.keystore = keystore
-
-    # lock
-
-    @property
-    def locked(self) -> bool:
-        return self._key is None
-
-    def lock(self) -> bool:
-        """Drop the data key from memory; only the password brings it back.
-
-        Only with a password: without one the key store would hand the key
-        straight back, so there is nothing to lock. Python cannot overwrite the
-        old bytes, so this drops every reference and leaves them to the
-        allocator. Returns True when the key was dropped."""
-        if not self.has_password:
-            return False
-        self._key = None
-        self._cipher = None
-        return True
-
-    def unlock(self, password: str) -> None:
-        """Bring the key back from the password. Raises WrongPassword."""
-        if not self.locked:
-            return
-        key = _unwrap_key(self.header["password"], password)
-        self._key, self._cipher = key, _aesgcm(key)
-
-    def _require_key(self) -> tuple[bytes, Any]:
-        if self._key is None:
-            raise VaultLocked("Onionmind is locked; unlock it to read or write its data.")
-        return self._key, self._cipher
-
-    # data
-
-    def encrypt(self, data: bytes) -> bytes:
-        _, cipher = self._require_key()
-        nonce = os.urandom(_NONCE_BYTES)
-        return _ENC_MAGIC + nonce + cipher.encrypt(nonce, data, _ENC_AAD)
-
-    def decrypt(self, blob: bytes) -> bytes:
-        from cryptography.exceptions import InvalidTag
-
-        if not is_encrypted(blob):
-            raise VaultError("not an Onionmind encrypted file")
-        _, cipher = self._require_key()
-        start = len(_ENC_MAGIC)
-        try:
-            return cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
-        except InvalidTag:
-            raise VaultError("the file was not encrypted with this data key, or it was changed") from None
-
-    def encrypt_line(self, text: str) -> str:
-        import base64
-
-        return _ENC_LINE + base64.b64encode(self.encrypt(text.encode("utf-8"))).decode("ascii")
-
-    def decrypt_line(self, line: str) -> str:
-        import base64
-
-        if not line.startswith(_ENC_LINE):
-            return line
-        return self.decrypt(base64.b64decode(line[len(_ENC_LINE):])).decode("utf-8")
-
-    # password
-
-    @property
-    def mode(self) -> str:
-        return "password" if isinstance(self.header.get("password"), dict) else "device"
-
-    @property
-    def has_password(self) -> bool:
-        return self.mode == "password"
-
-    def describe(self) -> str:
-        if self.has_password:
-            return "Encrypted (AES-256-GCM). The key is unlocked by your password, which is never stored."
-        store = self.keystore or keystore_for(self.root, self.header.get("keystore"))
-        text = f"Encrypted (AES-256-GCM). The key is kept in {store.label}."
-        if not store.strong:
-            text += " Set a password for full protection: without one, programs running as you could read that file."
-        return text
-
-    def check_password(self, password: str) -> bool:
-        record = self.header.get("password")
-        if not isinstance(record, dict):
-            return False
-        try:
-            key = _unwrap_key(record, password)
-        except VaultError:
-            return False
-        return self._key is None or key == self._key
-
-    def set_password(self, password: str, current: Optional[str] = None) -> None:
-        """Set or change the password. Changing needs the current one."""
-        if not password:
-            raise VaultError("The password cannot be empty.")
-        if self.has_password and not self.check_password(current or ""):
-            raise WrongPassword("The current password is not right.")
-        key, _ = self._require_key()
-        header = {**self.header, "mode": "password", "password": _wrap_key(key, password)}
-        header.pop("keystore", None)
-        _write_header(self.root, header)            # the wrapped key first...
-        old = self.header.get("keystore")
-        self.header = header
-        if old:                                     # ...then the unwrapped copy goes
-            try:
-                keystore_for(self.root, old).delete()
-            except KeystoreUnavailable:
-                pass
-        self.keystore = None
-
-    def remove_password(self, current: str) -> None:
-        """Back to the key store: the data stays encrypted, no login needed."""
-        if not self.check_password(current):
-            raise WrongPassword("That password is not right.")
-        key, _ = self._require_key()
-        store = keystore_for(self.root)
-        store.put(key)                        # the key store first...
-        header = {key: value for key, value in self.header.items() if key != "password"}
-        header.update(mode="device", keystore=store.name)
-        _write_header(self.root, header)            # ...then the header stops asking
-        self.header, self.keystore = header, store
-
-
-def is_encrypted(blob: bytes) -> bool:
-    return blob[:len(_ENC_MAGIC)] == _ENC_MAGIC
-
-
-def _write_header(root: Path, header: Mapping[str, Any]) -> None:
-    _atomic_write_json(Path(root) / VAULT_FILE, header)
-
-
-def vault_header(root: PathInput) -> Optional[dict[str, Any]]:
-    """The plaintext header, or None when this data folder was never encrypted."""
-    path = Path(root).expanduser() / VAULT_FILE
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        raise VaultError(f"{path} is unreadable") from exc
-    if not isinstance(value, dict) or value.get("version") != 1:
-        raise VaultError(f"{path} is not a vault header this version understands")
-    return value
-
-
-def vault_needs_password(root: PathInput) -> bool:
-    header = vault_header(root)
-    return bool(header and isinstance(header.get("password"), dict))
-
-
-def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = None) -> Vault:
-    """Open (or, the first time, create) the vault of a data folder.
-
-    First run: a new random data key goes into the platform key store and every
-    plaintext file already in the folder is encrypted in place. Afterwards the
-    key comes from the key store, or from `password` once one is set. Raises
-    WrongPassword, KeystoreUnavailable or VaultError - never falls back to
-    plaintext on its own."""
-    if not encryption_available():
-        raise VaultError("The cryptography package is missing; run the updater to install it.")
-    root = Path(root).expanduser()
-    header = vault_header(root)
-    if header is None:
-        key = os.urandom(32)
-        store = keystore or keystore_for(root)
-        try:
-            store.put(key)
-        except KeystoreUnavailable:
-            if store.name == "file":
-                raise
-            store = FileKeystore(_key_tag(root))
-            store.put(key)
-        header = {"version": 1, "cipher": "AES-256-GCM", "mode": "device", "keystore": store.name,
-                  "created_at": _utc_now()}
-        _write_header(root, header)
-        vault = Vault(root, key, header, store)
-        encrypt_data_folder(root, vault)
-        return vault
-    if isinstance(header.get("password"), dict):
-        if password is None:
-            raise WrongPassword("A password is needed to open Onionmind's data.")
-        return Vault(root, _unwrap_key(header["password"], password), header)
-    store = keystore or keystore_for(root, header.get("keystore"))
-    key = store.get()
-    if key is None:
-        raise KeystoreUnavailable(
-            f"The data key is missing from {store.label}. Without it the encrypted data cannot be read.")
-    vault = Vault(root, key, header, store)
-    encrypt_data_folder(root, vault)                # anything an older version left in plaintext
-    return vault
-
-
-_VAULT_OWN_FILES = {VAULT_FILE, "device-key.dpapi"}
-
-
-def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
-    """Encrypt in place every plaintext file under the data folder. Returns the count."""
-    root = Path(root).expanduser()
-    done = 0
-    if not root.is_dir():
-        return done
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink() or path.name in _VAULT_OWN_FILES and path.parent == root:
-            continue
-        if path.name.endswith(".tmp"):
-            continue
-        try:
-            with path.open("rb") as handle:
-                if is_encrypted(handle.read(len(_ENC_MAGIC))) and path.suffix != ".jsonl":
-                    continue
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if path.suffix == ".jsonl":
-            lines = raw.decode("utf-8", "replace").splitlines()
-            if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
-                continue
-            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
-            _atomic_write_bytes(path, body.encode("ascii"))
-        elif is_encrypted(raw):
-            continue
-        else:
-            _atomic_write_bytes(path.with_name(f".{path.name}.migrating.tmp"), vault.encrypt(raw))
-            # Overwrite the plaintext bytes before the encrypted copy takes the
-            # name, so they do not simply linger in freed blocks (same limits as
-            # shred_file: SSDs and copy-on-write filesystems may keep a copy).
-            try:
-                with open(path, "r+b", buffering=0) as handle:
-                    handle.write(os.urandom(len(raw)))
-                    os.fsync(handle.fileno())
-            except OSError:
-                pass
-            os.replace(path.with_name(f".{path.name}.migrating.tmp"), path)
-        done += 1
-    return done
-
-
-def erase_data_folder(root: PathInput) -> None:
-    """Forgotten password: delete the encrypted data, its header and the key."""
-    root = Path(root).expanduser()
-    if not (root / VAULT_FILE).is_file():
-        raise VaultError(f"{root} is not an Onionmind data folder")
-    try:
-        header = vault_header(root) or {}
-    except VaultError:
-        header = {}
-    if header.get("keystore"):
-        try:
-            keystore_for(root, header["keystore"]).delete()
-        except KeystoreUnavailable:
-            pass
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True, exist_ok=True)
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
-    temporary = Path(handle.name)
-    try:
-        with handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def read_data_file(path: PathInput, vault: Optional[Vault]) -> bytes:
-    """A file from the data folder, decrypted when it is encrypted."""
-    raw = Path(path).read_bytes()
-    if is_encrypted(raw):
-        if vault is None:
-            raise VaultError("this file is encrypted and the vault is not open")
-        return vault.decrypt(raw)
-    return raw
-
-
-def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> None:
-    """Write a file into the data folder, encrypted when a vault is open."""
-    _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
-
-
-# export: one password-protected file with the sessions and settings, to move
-# them to another machine or keep a backup. It does not depend on the data
-# key, so it opens anywhere with the password alone. PBKDF2-HMAC-SHA256
-# rather than the vault's scrypt because the phone (javax.crypto) has it too,
-# and the same file imports on either side. Layout:
-#   OMEXPORT1\n  <header JSON, one line>\n  <12-byte nonce><AES-256-GCM ciphertext>
-# The magic and header line are the associated data, so changing the KDF
-# parameters breaks the tag instead of weakening the key.
-
-EXPORT_MAGIC = b"OMEXPORT1\n"
-EXPORT_SUFFIX = ".onionmind"
-EXPORT_PBKDF2_ITERATIONS = 600_000
-
-
-class ExportError(VaultError):
-    """An export file that is not one, is damaged, or needs another password."""
-
-
-def _export_key(password: str, salt: bytes, iterations: int) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
-
-
-def export_bytes(password: str, payload: Mapping[str, Any]) -> bytes:
-    import base64
-
-    if not password:
-        raise ExportError("The export password cannot be empty.")
-    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
-    header = json.dumps({"format": "onionmind-export", "version": 1, "kdf": "PBKDF2WithHmacSHA256",
-                         "iterations": EXPORT_PBKDF2_ITERATIONS,
-                         "salt": base64.b64encode(salt).decode("ascii")}, separators=(",", ":"))
-    preamble = EXPORT_MAGIC + header.encode("ascii") + b"\n"
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    key = _export_key(password, salt, EXPORT_PBKDF2_ITERATIONS)
-    return preamble + nonce + _aesgcm(key).encrypt(nonce, body, preamble)
-
-
-def read_export_bytes(blob: bytes, password: str) -> dict[str, Any]:
-    import base64
-    from cryptography.exceptions import InvalidTag
-
-    if not blob.startswith(EXPORT_MAGIC):
-        raise ExportError("This is not an Onionmind export file.")
-    end = blob.find(b"\n", len(EXPORT_MAGIC))
-    try:
-        header = json.loads(blob[len(EXPORT_MAGIC):end].decode("ascii"))
-        salt = base64.b64decode(header["salt"], validate=True)
-        iterations = int(header["iterations"])
-    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
-        raise ExportError("The export file is damaged.") from exc
-    if end < 0 or header.get("format") != "onionmind-export" or header.get("version") != 1:
-        raise ExportError("This export was made by a newer Onionmind; update to import it.")
-    if header.get("kdf") != "PBKDF2WithHmacSHA256" or not 100_000 <= iterations <= 10_000_000:
-        raise ExportError("The export file names a key derivation this version does not accept.")
-    preamble, rest = blob[:end + 1], blob[end + 1:]
-    if len(rest) < _NONCE_BYTES + 16:
-        raise ExportError("The export file is damaged.")
-    key = _export_key(password, salt, iterations)
-    try:
-        body = _aesgcm(key).decrypt(rest[:_NONCE_BYTES], rest[_NONCE_BYTES:], preamble)
-    except InvalidTag:
-        raise WrongPassword("That password does not open this export, or the file was changed.") from None
-    payload = json.loads(body.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ExportError("The export file is damaged.")
-    return payload
-
-
-def export_payload(sessions: Iterable[Any], settings: Optional[Mapping[str, Any]] = None,
-                   source: str = "desktop") -> dict[str, Any]:
-    """What an export carries: every session (archived ones too) and the
-    settings, minus anything that only means something on this machine."""
-    rows = [session.to_dict() if hasattr(session, "to_dict") else dict(session) for session in sessions]
-    clean = copy.deepcopy(dict(settings or {}))
-    lock = clean.get("lock")
-    if isinstance(lock, dict):
-        lock.pop("passphrase", None)                # an old hash; never travels
-    return {"version": 1, "from": source, "exported_at": _utc_now(), "sessions": rows, "settings": clean}
-
-
-def write_export(path: PathInput, password: str, store: SessionStore,
-                 settings: Optional[Mapping[str, Any]] = None) -> int:
-    """Write every session in `store` and `settings` to an export file. Returns the session count."""
-    sessions = store.list() + store.list(archived=True)
-    payload = export_payload(sessions, settings)
-    _atomic_write_bytes(Path(path).expanduser(), export_bytes(password, payload))
-    return len(sessions)
-
-
-def read_export(path: PathInput, password: str) -> dict[str, Any]:
-    try:
-        blob = Path(path).expanduser().read_bytes()
-    except OSError as exc:
-        raise ExportError(f"The export file could not be read: {exc.strerror or exc}") from exc
-    return read_export_bytes(blob, password)
-
-
-def import_sessions(store: SessionStore, payload: Mapping[str, Any]) -> dict[str, int]:
-    """Add the export's sessions to `store`. Ones already here are kept as they
-    are; ones that do not validate are skipped. Counts: added, existing, invalid."""
-    counts = {"added": 0, "existing": 0, "invalid": 0}
-    rows = payload.get("sessions")
-    for row in rows if isinstance(rows, list) else []:
-        try:
-            counts["added" if store.adopt(row) else "existing"] += 1
-        except (TypeError, ValueError):
-            counts["invalid"] += 1
-    return counts
-
-
-def imported_settings(current: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
-    """`current` with the export's settings laid over it, for a desktop export only:
-    the phone's settings are different knobs."""
-    merged = copy.deepcopy(dict(current))
-    settings = payload.get("settings")
-    if payload.get("from") == "desktop" and isinstance(settings, dict):
-        merged.update(copy.deepcopy(settings))
-    return merged
-
-
-# netlog: what left this machine, written by the desktop when it happens.
-# Times and destinations only - a prompt or a search query is never stored.
-
-class EgressLog:
-    ROUTES = ("Tor", "Direct", "Refused")
-
-    def __init__(self, path: PathInput, vault: Any = None) -> None:
-        self.path = Path(path).expanduser()
-        self.vault = vault
-
-    def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
-        """Record one connection. Never raises: logging must not break the action."""
-        entry = {
-            "time": (when or datetime.now().astimezone()).isoformat(timespec="seconds"),
-            "route": route if route in self.ROUTES else "Tor",
-            "what": _as_text_core(what)[:200],
-        }
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(entry, ensure_ascii=False)
-            if self.vault is not None:
-                line = self.vault.encrypt_line(line)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-        except OSError:
-            pass
-
-    def entries(self, day: Optional[str] = None) -> list[dict[str, str]]:
-        """Entries for one local day (YYYY-MM-DD), oldest first; all when day is None."""
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        rows = []
-        for line in lines:
-            try:
-                if line.startswith(_ENC_LINE):
-                    if self.vault is None:
-                        continue
-                    line = self.vault.decrypt_line(line)
-                entry = json.loads(line)
-            except (ValueError, VaultError):
-                continue
-            if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
-                continue
-            if day and not entry["time"].startswith(day):
-                continue
-            rows.append({"time": entry["time"], "route": _as_text_core(entry.get("route")),
-                         "what": _as_text_core(entry.get("what"))})
-        return rows
-
-    def counts(self, day: Optional[str] = None) -> dict[str, int]:
-        rows = self.entries(day)
-        return {
-            "search": sum(1 for row in rows if row["route"] == "Tor" and row["what"].startswith("Chat search")),
-            "tor": sum(1 for row in rows if row["route"] == "Tor"),
-            "direct": sum(1 for row in rows if row["route"] == "Direct"),
-        }
-
-
-_AGENT_NET_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
-
-
-def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[str, str]]:
-    """The agent bridge's own log (onionmind.py _net_log) as netlog rows.
-
-    Its lines name the destination and whether it went over Tor or was
-    refused; they never carry request bodies.
-    """
-    try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    rows = []
-    for line in lines:
-        match = _AGENT_NET_LINE.match(line.strip())
-        if not match or (day and match.group(1) != day):
-            continue
-        detail = match.group(3).strip()
-        lowered = detail.casefold()
-        route = "Refused" if "refused" in lowered else ("Tor" if lowered.startswith("tor") else "Local")
-        if route == "Local":
-            continue                              # loopback traffic never left the machine
-        rows.append({"time": f"{match.group(1)}T{match.group(2)}", "route": route,
-                     "what": f"Agent network · {detail}"[:200]})
-    return rows
-
-
-def absorb_agent_net_log(path: PathInput, egress: Optional["EgressLog"]) -> int:
-    """Move the agent's plaintext network log into the encrypted one, then shred it.
-
-    The agent runs in its own process without the data key, so it can only
-    write plaintext; the desktop takes the lines over after each run. With
-    logging off (`egress` None) the lines are dropped - no log unless asked.
-    Returns the rows moved."""
-    target = Path(path)
-    if not target.is_file():
-        return 0
-    rows = agent_net_entries(target)
-    if egress is not None:
-        for row in rows:
-            try:
-                when = datetime.fromisoformat(row["time"])
-            except ValueError:
-                when = None
-            egress.append(row["route"], row["what"], when)
-    shred_file(target)
-    return len(rows) if egress is not None else 0
-
-
-# qwen-code keeps its chats, tool output and todos under QWEN_RUNTIME_DIR, and
-# reads them back to resume a run, so it needs them in plaintext while it runs.
-# With a vault each run gets a private scratch folder - RAM-backed under
-# XDG_RUNTIME_DIR where there is one - and afterwards its contents go into the
-# vault as one encrypted archive per qwen session, and the plaintext is shredded.
-
-AGENT_ARCHIVE_DIR = "agent-runtime"
-AGENT_SCRATCH_PREFIX = "onionmind-agent-"
-AGENT_NET_LOG_NAME = "agent-net.log"
-_AGENT_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-
-
-def agent_scratch_base() -> Path:
-    """Where run scratch folders go: the per-user runtime dir (tmpfs on most
-    Linux systems, cleared at logout) when there is one, else the temp dir."""
-    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
-    if runtime and os.path.isdir(runtime) and os.access(runtime, os.W_OK):
-        return Path(runtime)
-    return Path(tempfile.gettempdir())
-
-
-def _agent_archive(root: PathInput, session_id: str) -> Optional[Path]:
-    if not _AGENT_SESSION_ID.fullmatch(session_id or ""):
-        return None
-    return Path(root).expanduser() / AGENT_ARCHIVE_DIR / f"{session_id}.tar"
-
-
-def open_agent_scratch(root: PathInput, vault: Vault, resume: str = "") -> Path:
-    """A new private (0700) scratch folder for one agent run. When resuming a
-    qwen session, its sealed archive is decrypted back into it first."""
-    scratch = Path(tempfile.mkdtemp(prefix=AGENT_SCRATCH_PREFIX, dir=agent_scratch_base()))
-    archive = _agent_archive(root, resume) if resume else None
-    if archive is not None and archive.is_file():
-        import io
-        import tarfile
-
-        data = vault.decrypt(archive.read_bytes())
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r") as bundle:
-            members = []
-            for member in bundle.getmembers():
-                name = Path(member.name)
-                # Our own authenticated archive, but extract defensively anyway.
-                if name.is_absolute() or ".." in name.parts or not (member.isfile() or member.isdir()):
-                    continue
-                members.append(member)
-            if hasattr(tarfile, "data_filter"):
-                bundle.extractall(scratch, members=members, filter="data")
-            else:
-                bundle.extractall(scratch, members=members)
-    return scratch
-
-
-def seal_agent_scratch(root: PathInput, vault: Vault, scratch: PathInput, session_id: str = "") -> bool:
-    """Encrypt what qwen wrote during the run into the vault (replacing that
-    session's earlier archive), then shred the scratch folder. The network log
-    and the socket shims are not kept: the log was absorbed already. Returns
-    True when an archive was written."""
-    import io
-    import tarfile
-
-    folder = Path(scratch)
-    archive = _agent_archive(root, session_id)
-    sealed = False
-    if archive is not None and folder.is_dir():
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as bundle:
-            for path in sorted(folder.rglob("*")):
-                rel = path.relative_to(folder)
-                if path.is_symlink() or rel.parts[0] in (AGENT_NET_LOG_NAME, "shims"):
-                    continue
-                if path.is_file() or path.is_dir():
-                    bundle.add(path, arcname=rel.as_posix(), recursive=False)
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(archive, vault.encrypt(buffer.getvalue()))
-        sealed = True
-    shred_tree(folder)
-    return sealed
-
-
-def sweep_agent_scratch(egress: Optional["EgressLog"] = None) -> int:
-    """Scratch folders a crashed or killed run left behind: take their network
-    log in (or drop it), then shred them. Returns the folders removed."""
-    base = agent_scratch_base()
-    removed = 0
-    try:
-        leftovers = [p for p in base.iterdir() if p.name.startswith(AGENT_SCRATCH_PREFIX) and p.is_dir()]
-    except OSError:
-        return 0
-    for folder in leftovers:
-        try:
-            if folder.stat().st_uid != os.getuid():
-                continue
-        except (OSError, AttributeError):
-            pass
-        absorb_agent_net_log(folder / AGENT_NET_LOG_NAME, egress)
-        shred_tree(folder)
-        removed += 0 if folder.exists() else 1
-    return removed
-
-
-def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
-    import csv
-    import io
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(["time", "route", "what"])
-    for row in rows:
-        writer.writerow([row.get("time", ""), row.get("route", ""), row.get("what", "")])
-    return buffer.getvalue()
-
-
-def network_log_json(rows: Iterable[Mapping[str, Any]]) -> str:
-    clean = [{"time": row.get("time", ""), "route": row.get("route", ""), "what": row.get("what", "")}
-             for row in rows]
-    return json.dumps(clean, indent=2, ensure_ascii=False) + "\n"
-
-
 # undo: revert files to their last commit with a recoverable backup, so Undo
 # puts back exactly what was on disk - including files git never tracked.
 
@@ -6732,597 +5261,6 @@ def change_stats(selected: PathInput) -> dict[str, tuple[int, int]]:
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
             stats[parts[2]] = (int(parts[0]), int(parts[1]))
     return stats
-
-
-# ladder / modelPlus: real hardware numbers, or None when the platform won't say.
-
-def _run_probe(argv: list[str]) -> Optional[str]:
-    """stdout of a hardware probe, or None when it is missing or fails."""
-    try:
-        output = subprocess.run(argv, capture_output=True, text=True, timeout=10,
-                                creationflags=_NO_WINDOW)
-    except Exception:
-        return None
-    return output.stdout if output.returncode == 0 and output.stdout.strip() else None
-
-
-def _nvidia_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    out = _run_probe(["nvidia-smi", "--query-gpu=memory.used,memory.total,name",
-                      "--format=csv,noheader,nounits"])
-    if out is None:
-        return None
-    try:
-        used, total, name = [part.strip() for part in out.strip().splitlines()[0].split(",", 2)]
-        return int(used), int(total), name or None
-    except ValueError:
-        return None
-
-
-_DRM_ROOT = Path("/sys/class/drm")
-
-
-def _amd_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """amdgpu's own sysfs counters (Linux): no rocm-smi needed. The card with the
-    most VRAM wins; an APU's small carve-out (under 1 GB) does not count."""
-    best: Optional[tuple[Optional[int], int, Optional[str]]] = None
-    try:
-        cards = sorted(_DRM_ROOT.glob("card[0-9]*/device"))
-    except OSError:
-        return None
-    for device in cards:
-        try:
-            if (device / "vendor").read_text().strip().lower() != "0x1002":
-                continue
-            total = int((device / "mem_info_vram_total").read_text()) // (1024 * 1024)
-            used = int((device / "mem_info_vram_used").read_text()) // (1024 * 1024)
-        except (OSError, ValueError):
-            continue
-        if total < 1024 or (best and best[1] >= total):
-            continue
-        try:
-            name = (device / "product_name").read_text().strip() or None
-        except OSError:
-            name = None
-        best = (used, total, name or "AMD GPU")
-    return best
-
-
-def _intel_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """Intel discrete GPUs through xpu-smi (Arc, Data Center GPU)."""
-    out = _run_probe(["xpu-smi", "discovery", "-d", "0", "-j"])
-    if out is None:
-        return None
-    try:
-        found = json.loads(out)
-        total = int(found["memory_physical_size_byte"]) // (1024 * 1024)
-    except (ValueError, KeyError, TypeError):
-        return None
-    if total <= 0:
-        return None
-    used: Optional[int] = None
-    stats = _run_probe(["xpu-smi", "stats", "-d", "0", "-j"])
-    try:
-        for metric in json.loads(stats or "{}").get("device_level") or []:
-            if metric.get("metrics_type") == "XPUM_STATS_MEMORY_USED":
-                used = int(float(metric["value"]))
-    except (ValueError, KeyError, TypeError, AttributeError):
-        used = None
-    return used, total, _as_text_core(found.get("device_name")) or "Intel GPU"
-
-
-def _apple_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """Apple Silicon shares RAM with the GPU. Metal lets the GPU wire about 2/3
-    of it (3/4 above 36 GB) unless iogpu.wired_limit_mb raises the cap, so that is
-    the total. "Used" is left None: the caller takes Ollama's size_vram instead,
-    since system-wide memory use is not GPU use."""
-    if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
-        return None
-    out = _run_probe(["sysctl", "-n", "hw.memsize"])
-    try:
-        ram = int((out or "").strip()) // (1024 * 1024)
-    except ValueError:
-        return None
-    if ram <= 0:
-        return None
-    try:
-        wired = int((_run_probe(["sysctl", "-n", "iogpu.wired_limit_mb"]) or "0").strip())
-    except ValueError:
-        wired = 0
-    total = wired if 0 < wired <= ram else (ram * 3 // 4 if ram > 36 * 1024 else ram * 2 // 3)
-    return None, total, "Apple GPU (unified memory)"
-
-
-def _dxgi_adapters() -> list[dict[str, Any]]:
-    """Every display adapter Windows knows, through DXGI (no vendor tool).
-
-    Each: name, vendor id, dedicated and shared memory (MB), software flag, and
-    the current local-memory use and budget (MB) where IDXGIAdapter3 exists
-    (Windows 10+). Empty off Windows or when DXGI cannot be loaded."""
-    if os.name != "nt":
-        return []
-    import ctypes
-    from ctypes import wintypes
-
-    class GUID(ctypes.Structure):
-        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
-                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
-
-    def guid(text: str) -> GUID:
-        import uuid as _uuid
-
-        raw = _uuid.UUID(text).bytes_le
-        return GUID.from_buffer_copy(raw)
-
-    class DESC1(ctypes.Structure):
-        _fields_ = [("Description", ctypes.c_wchar * 128), ("VendorId", ctypes.c_uint),
-                    ("DeviceId", ctypes.c_uint), ("SubSysId", ctypes.c_uint), ("Revision", ctypes.c_uint),
-                    ("DedicatedVideoMemory", ctypes.c_size_t), ("DedicatedSystemMemory", ctypes.c_size_t),
-                    ("SharedSystemMemory", ctypes.c_size_t), ("LuidLow", wintypes.DWORD),
-                    ("LuidHigh", wintypes.LONG), ("Flags", ctypes.c_uint)]
-
-    class MEMINFO(ctypes.Structure):
-        _fields_ = [("Budget", ctypes.c_uint64), ("CurrentUsage", ctypes.c_uint64),
-                    ("AvailableForReservation", ctypes.c_uint64), ("CurrentReservation", ctypes.c_uint64)]
-
-    HRESULT = ctypes.c_long
-
-    def method(obj: ctypes.c_void_p, index: int, *argtypes: Any) -> Callable[..., int]:
-        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-        return ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])
-
-    def release(obj: ctypes.c_void_p) -> None:
-        if obj:
-            vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-            ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(obj)
-
-    try:
-        dxgi = ctypes.WinDLL("dxgi")
-    except OSError:
-        return []
-    factory = ctypes.c_void_p()
-    create = dxgi.CreateDXGIFactory1
-    create.restype = HRESULT
-    create.argtypes = [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
-    if create(ctypes.byref(guid("770aae78-f26f-4dba-a829-253c83d1b387")), ctypes.byref(factory)) != 0:
-        return []
-    found: list[dict[str, Any]] = []
-    mb = 1024 * 1024
-    try:
-        enum_adapters1 = method(factory, 12, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))
-        for index in range(16):
-            adapter = ctypes.c_void_p()
-            if enum_adapters1(factory, index, ctypes.byref(adapter)) != 0:
-                break                            # DXGI_ERROR_NOT_FOUND: no more adapters
-            try:
-                desc = DESC1()
-                if method(adapter, 10, ctypes.POINTER(DESC1))(adapter, ctypes.byref(desc)) != 0:
-                    continue
-                row: dict[str, Any] = {
-                    "name": desc.Description.strip() or None,
-                    "vendor": desc.VendorId,
-                    "dedicated_mb": desc.DedicatedVideoMemory // mb,
-                    "shared_mb": desc.SharedSystemMemory // mb,
-                    "software": bool(desc.Flags & 2),     # DXGI_ADAPTER_FLAG_SOFTWARE
-                    "used_mb": None,
-                    "budget_mb": None,
-                }
-                adapter3 = ctypes.c_void_p()
-                query = method(adapter, 0, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p))
-                if query(adapter, ctypes.byref(guid("645967a4-1392-4310-a798-8053ce3e93fd")),
-                         ctypes.byref(adapter3)) == 0:
-                    try:
-                        info = MEMINFO()
-                        memory = method(adapter3, 14, ctypes.c_uint, ctypes.c_int, ctypes.POINTER(MEMINFO))
-                        if memory(adapter3, 0, 0, ctypes.byref(info)) == 0:   # node 0, local segment
-                            row["used_mb"] = int(info.CurrentUsage // mb)
-                            row["budget_mb"] = int(info.Budget // mb)
-                    finally:
-                        release(adapter3)
-                found.append(row)
-            finally:
-                release(adapter)
-    finally:
-        release(factory)
-    return found
-
-
-def _pick_dxgi_adapter(adapters: Iterable[Mapping[str, Any]]) -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """The adapter models would run on, from _dxgi_adapters(): the hardware one
-    with the most dedicated memory. A discrete card (1 GB or more of its own)
-    reports its real use; an integrated GPU, which borrows system RAM, reports
-    the shared size with used=None, as Apple unified memory does."""
-    # Microsoft's Basic Render Driver (vendor 0x1414) is the CPU rasterizer of a
-    # VM or a machine without a GPU driver; on a Windows CI runner it does NOT
-    # carry the software flag, and would otherwise pass for 8 GB of shared VRAM.
-    hardware = [a for a in adapters
-                if not a.get("software") and int(a.get("vendor") or 0) != _DXGI_MICROSOFT
-                and (a.get("dedicated_mb") or a.get("shared_mb"))]
-    if not hardware:
-        return None
-    best = max(hardware, key=lambda a: (int(a.get("dedicated_mb") or 0), int(a.get("shared_mb") or 0)))
-    dedicated = int(best.get("dedicated_mb") or 0)
-    vendor = _DXGI_VENDORS.get(int(best.get("vendor") or 0), "GPU")
-    name = _as_text_core(best.get("name")) or vendor
-    if dedicated >= 1024:
-        used = best.get("used_mb")
-        return (int(used) if used is not None else None), dedicated, name
-    shared = int(best.get("shared_mb") or 0) + dedicated
-    if shared < 1024:
-        return None
-    return None, shared, f"{name} (shared memory)"
-
-
-_DXGI_VENDORS = {0x10DE: "NVIDIA GPU", 0x1002: "AMD GPU", 0x1022: "AMD GPU", 0x8086: "Intel GPU"}
-_DXGI_MICROSOFT = 0x1414
-
-
-def _windows_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """Any vendor on Windows through DXGI; nvidia-smi still goes first."""
-    return _pick_dxgi_adapter(_dxgi_adapters())
-
-
-def _gpu_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
-    """(used MB or None, total MB, name) of the GPU models would run on."""
-    probes = [_nvidia_memory]
-    if os.name != "nt":
-        probes += [_amd_memory, _intel_memory, _apple_memory]
-    else:
-        probes += [_intel_memory, _windows_memory]
-    for probe in probes:
-        try:
-            found = probe()
-        except Exception:
-            found = None
-        if found is not None:
-            return found
-    return None
-
-
-def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
-    """(used, total) MB of the GPU, or (None, None) without one we can read.
-
-    NVIDIA (nvidia-smi), AMD (amdgpu sysfs, Linux), Intel (xpu-smi), any
-    vendor on Windows through DXGI, and Apple unified memory. Apple and
-    integrated GPUs on Windows report used=None: there the caller shows the
-    size Ollama itself has in GPU memory.
-    """
-    found = _gpu_memory()
-    return (found[0], found[1]) if found else (None, None)
-
-
-def gpu_name() -> Optional[str]:
-    found = _gpu_memory()
-    return found[2] if found else None
-
-
-def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optional[int]) -> str:
-    """'Fits' / 'Tight' / 'Too big' / '' for an installed model's real file size.
-
-    Compares the on-disk size (what Ollama loads) with headroom for the KV
-    cache against VRAM, else RAM. '' means there is nothing honest to say.
-    """
-    if not size_bytes:
-        return ""
-    need_mb = size_bytes / (1024 * 1024) * 1.2
-    budget = vram_mb or (int(ram_mb * 0.85) if ram_mb else 0)
-    if not budget:
-        return ""
-    if need_mb <= budget:
-        return "Fits"
-    if need_mb <= budget * 1.35:
-        return "Tight"
-    return "Too big"
-
-
-def format_gb(mb: Optional[float]) -> str:
-    if mb is None:
-        return "?"
-    return f"{mb / 1024:.1f}"
-
-
-@dataclass(frozen=True)
-class ServerStart:
-    label: str                 # "the ollama system service", shown to the person
-    argv: tuple[str, ...]
-    waits: bool                # True: the command returns when done; False: it is the server
-    manual: str = ""           # what to run by hand when this way fails
-
-
-def model_server_start_plan(
-    platform: str = "",
-    which: Callable[[str], Optional[str]] = shutil.which,
-    exists: Callable[[str], bool] = os.path.exists,
-    unit_exists: Optional[Callable[[tuple[str, ...]], bool]] = None,
-) -> list[ServerStart]:
-    """How to start the local Ollama this machine already has, best first.
-
-    The installers set Ollama up as a service (Linux: the system ollama.service
-    with its own model store) or as the desktop app (macOS, Windows). Starting
-    `ollama serve` as the user instead would come up with an empty model list,
-    so when a service exists that is the only way offered.
-    """
-    platform = platform or sys.platform
-    if unit_exists is None:
-        def unit_exists(scope: tuple[str, ...]) -> bool:
-            try:
-                return subprocess.run(["systemctl", *scope, "cat", "ollama.service"],
-                                      capture_output=True, timeout=10).returncode == 0
-            except Exception:
-                return False
-    plan: list[ServerStart] = []
-    if platform.startswith("linux") and which("systemctl"):
-        if unit_exists(("--user",)):
-            return [ServerStart("your ollama user service",
-                                ("systemctl", "--user", "start", "ollama.service"), True,
-                                "systemctl --user start ollama")]
-        if unit_exists(()):
-            # Root-owned: polkit asks for a password where a desktop agent runs.
-            return [ServerStart("the ollama system service",
-                                ("systemctl", "start", "ollama.service"), True,
-                                "sudo systemctl start ollama")]
-    elif platform == "darwin":
-        for app in ("/Applications/Ollama.app", os.path.expanduser("~/Applications/Ollama.app")):
-            if exists(app):
-                plan.append(ServerStart("the Ollama app", ("open", "-g", "-a", app), True))
-                break
-    elif platform == "win32":
-        tray = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama app.exe")
-        if os.environ.get("LOCALAPPDATA") and exists(tray):
-            plan.append(ServerStart("the Ollama app", (tray,), False))
-    program = which("ollama")
-    if program:
-        plan.append(ServerStart("ollama serve", (program, "serve"), False, "ollama serve"))
-    return plan
-
-
-def node_version() -> Optional[str]:
-    """`node --version` without a console window, or None when Node is missing."""
-    executable = shutil.which("node")
-    if not executable:
-        return None
-    try:
-        output = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                timeout=10, creationflags=_NO_WINDOW)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    version = output.stdout.strip()
-    return version or None
-
-
-def node_supports_agent(version: Optional[str]) -> bool:
-    """Qwen Code needs Node 22.19+ (or 24+)."""
-    match = re.match(r"v?(\d+)\.(\d+)", _as_text_core(version))
-    if not match:
-        return False
-    major, minor = int(match.group(1)), int(match.group(2))
-    return major >= 24 or (major == 22 and minor >= 19) or major == 23
-
-
-# --- Remote compute over SSH -------------------------------------------
-#
-# The model runs on another machine the user can SSH into; everything else -
-# files, agent, terminal, Tor - stays here. An `ssh -L` tunnel lands that
-# machine's Ollama on a free loopback port, so the core still only ever talks
-# to 127.0.0.1 and the agent's loopback-only socket shims need no exception.
-# The SSH connection itself is direct, not Tor: it is the user's own server,
-# opened only when they press Connect (or opted into connecting at launch).
-
-REMOTE_OLLAMA_PORT = 11434
-
-_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+(?::(\d{1,5}))?")
-
-
-@dataclass(frozen=True)
-class SshTarget:
-    destination: str              # user@host or a ~/.ssh/config alias
-    port: Optional[int] = None
-
-    @property
-    def label(self) -> str:
-        return self.destination if self.port is None else f"{self.destination}:{self.port}"
-
-
-def parse_ssh_target(value: Any) -> Optional[SshTarget]:
-    """`user@host`, `host`, an ssh-config alias, optionally `:port`; else None.
-
-    Deliberately narrow: no spaces, no leading dash (it would be read as an
-    ssh option), nothing a shell or ssh would interpret.
-    """
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if not text or text.startswith("-"):
-        return None
-    match = _SSH_TARGET.fullmatch(text)
-    if match is None:
-        return None
-    if match.group(1) is None:
-        return SshTarget(text)
-    port = int(match.group(1))
-    if not 0 < port < 65536:
-        return None
-    return SshTarget(text.rsplit(":", 1)[0], port)
-
-
-def ssh_tunnel_argv(target: SshTarget, local_port: int,
-                    remote_port: int = REMOTE_OLLAMA_PORT,
-                    executable: str = "ssh") -> list[str]:
-    """The exact `ssh` command: a forward only, no shell, no prompts."""
-    argv = [
-        executable, "-N", "-T",
-        # A GUI has nowhere to type a password or accept a host key, so ssh
-        # must fail fast instead of waiting on a prompt nobody sees.
-        "-o", "BatchMode=yes",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ConnectTimeout=15",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        "-L", f"127.0.0.1:{int(local_port)}:127.0.0.1:{int(remote_port)}",
-    ]
-    if target.port is not None:
-        argv += ["-p", str(target.port)]
-    return argv + ["--", target.destination]
-
-
-def describe_ssh_failure(stderr: str, target_label: str = "the server") -> str:
-    """ssh's last words, turned into the step that fixes them."""
-    text = _as_text_core(stderr)
-    lowered = text.lower()
-    if "permission denied" in lowered:
-        return (f"{target_label} refused the login. Onionmind cannot type a password: "
-                f"set up key login once with `ssh-copy-id {target_label}` "
-                "(or load your key into ssh-agent), then connect again.")
-    if "host key verification failed" in lowered or "no matching host key" in lowered:
-        return (f"{target_label}'s host key is not trusted yet. Run `ssh {target_label}` "
-                "once in a terminal to check and accept it, then connect again.")
-    if "could not resolve hostname" in lowered:
-        return f"Could not find {target_label}. Check the name, or your VPN/Tailscale."
-    if "connection refused" in lowered and "channel" not in lowered:
-        return f"{target_label} refused the SSH connection. Is sshd running there?"
-    if "timed out" in lowered:
-        return f"{target_label} did not answer in time."
-    if "forwarding" in lowered and ("failed" in lowered or "denied" in lowered):
-        return f"{target_label} does not allow port forwarding (AllowTcpForwarding)."
-    last = [line.strip() for line in text.splitlines() if line.strip()]
-    return last[-1] if last else f"ssh to {target_label} exited without saying why."
-
-
-def load_remote_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
-    """The `remote_compute` block of settings.json, validated; junk is dropped."""
-    stored = settings.get("remote_compute") if isinstance(settings, Mapping) else None
-    stored = stored if isinstance(stored, Mapping) else {}
-    target = parse_ssh_target(stored.get("host"))
-    return {
-        "host": target.label if target else "",
-        "autoconnect": bool(stored.get("autoconnect")) and target is not None,
-    }
-
-
-def _free_loopback_port() -> int:
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def _ollama_version(port: int, timeout: float = 5.0) -> Optional[str]:
-    """The Ollama version answering on 127.0.0.1:<port>, or None."""
-    import urllib.request
-    # No proxy handler: this is loopback, and an HTTP(S)_PROXY in the
-    # environment must not carry it anywhere else.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(f"http://127.0.0.1:{int(port)}/api/version", timeout=timeout) as reply:
-            data = json.loads(reply.read().decode("utf-8", errors="replace") or "{}")
-    except Exception:
-        return None
-    version = data.get("version") if isinstance(data, dict) else None
-    return str(version) if version else None
-
-
-class SshTunnel:
-    """One `ssh -L` child forwarding a remote Ollama to a local loopback port.
-
-    `start()` blocks until Ollama answers through the tunnel (or raises with
-    an actionable message), so callers run it off the UI thread.
-    """
-
-    def __init__(self, target: SshTarget, *, remote_port: int = REMOTE_OLLAMA_PORT,
-                 executable: str = "ssh", ready_timeout: float = 25.0,
-                 popen: Callable[..., Any] = subprocess.Popen,
-                 which: Callable[[str], Optional[str]] = shutil.which) -> None:
-        self.target = target
-        self.remote_port = remote_port
-        self.executable = executable
-        self.ready_timeout = ready_timeout
-        self._popen = popen
-        self._which = which
-        self.process: Any = None
-        self.local_port: Optional[int] = None
-        self.version: Optional[str] = None
-        self.cancelled = False
-        self._stderr_tail: list[str] = []
-
-    @property
-    def alive(self) -> bool:
-        return self.process is not None and self.process.poll() is None
-
-    def _drain(self, stream: Any) -> None:
-        # ssh keeps a pipe it may write to for hours; reading it forever means
-        # a chatty server can never fill the pipe and stall the tunnel.
-        for raw in iter(stream.readline, b""):
-            line = raw.decode("utf-8", errors="replace").strip()
-            if line:
-                self._stderr_tail = (self._stderr_tail + [line])[-20:]
-
-    def last_error(self) -> str:
-        return describe_ssh_failure("\n".join(self._stderr_tail), self.target.label)
-
-    def start(self) -> int:
-        import threading
-        import time
-
-        executable = self._which(self.executable)
-        if executable is None:
-            raise RuntimeError(
-                "No `ssh` command found. Install the OpenSSH client "
-                "(Windows: Settings > Optional features > OpenSSH Client)."
-            )
-        self.stop()
-        port = _free_loopback_port()
-        process = self._popen(
-            ssh_tunnel_argv(self.target, port, self.remote_port, executable),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=_NO_WINDOW,
-        )
-        self.process = process
-        self._stderr_tail = []
-        if getattr(process, "stderr", None) is not None:
-            threading.Thread(target=self._drain, args=(process.stderr,), daemon=True).start()
-        deadline = time.monotonic() + self.ready_timeout
-        while time.monotonic() < deadline:
-            if self.cancelled:
-                self.process = process
-                self.stop()
-                raise RuntimeError("Cancelled.")
-            if process.poll() is not None:
-                time.sleep(0.1)          # let the drain thread catch ssh's last line
-                self.process = None
-                raise RuntimeError(self.last_error())
-            version = _ollama_version(port, timeout=2.0)
-            if version:
-                self.local_port, self.version = port, version
-                return port
-            # ssh logs "channel N: open failed: connect failed" when the login
-            # worked but nothing listens on the far side - no need to wait out
-            # the whole timeout to say so.
-            if any("open failed" in line for line in self._stderr_tail):
-                break
-            time.sleep(0.4)
-        connected = self.alive
-        self.stop()
-        if connected:
-            raise RuntimeError(
-                f"Connected to {self.target.label}, but no Ollama answered on its "
-                f"127.0.0.1:{self.remote_port}. Start it there (`systemctl status ollama`)."
-            )
-        raise RuntimeError(self.last_error())
-
-    def cancel(self) -> None:
-        """Stop from another thread, including mid-`start()` - nothing is left running."""
-        self.cancelled = True
-        self.stop()
-
-    def stop(self) -> None:
-        process, self.process = self.process, None
-        self.local_port = self.version = None
-        if process is None or process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except Exception:
-            process.kill()
 '@
 $desktopUi = @'
 """THESIS: Onionmind is one calm local-work loop, not a chat page ringed by dashboards.
@@ -19613,6 +17551,2311 @@ class TransferDialog(QDialog):
         self.error.setText(text)
         self.error.show()
 '@
+$desktopVault = @'
+"""Encrypted storage for the desktop data folder: atomic writes, shredding,
+the vault (AES-256-GCM under one data key) and the password-protected export.
+
+Part of onionmind_desktop_core, which re-exports every name defined here.
+No Qt, and nothing from the other parts: they all build on this one.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from typing import Any, Iterable, Mapping, Optional
+from uuid import uuid4
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from onionmind_desktop_core import SessionStore
+
+
+PathInput = str | os.PathLike[str]
+
+
+# The desktop app runs under pythonw.exe, which has no console; without this
+# flag Windows gives every helper process (git, node, the engine) its own
+# flashing cmd window.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _atomic_write_json(path: Path, value: Mapping[str, Any], vault: Any = None) -> None:
+    """Write a JSON object next to its destination, then atomically replace it.
+
+    With a vault the file is written encrypted. Without one, an encrypted file
+    is never overwritten with plaintext: that would be a silent downgrade."""
+
+    if vault is not None:
+        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        _atomic_write_bytes(path, vault.encrypt(text.encode("utf-8")))
+        return
+    try:
+        with path.open("rb") as existing:
+            if is_encrypted(existing.read(len(_ENC_MAGIC))):
+                raise VaultError(f"{path.name} is encrypted; it can only be written through the open vault")
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    handle = None
+    try:
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        )
+        temporary = Path(handle.name)
+        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        handle = None
+        os.replace(temporary, path)
+        temporary = None
+        # fsync the containing directory as well on POSIX so the rename itself
+        # survives a sudden power loss. Windows does not expose directory
+        # handles through os.open, so the file flush above is the strongest
+        # portable guarantee available there.
+        if os.name != "nt":
+            directory_fd: int | None = None
+            try:
+                directory_fd = os.open(
+                    path.parent,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                os.fsync(directory_fd)
+            except OSError:
+                # Some filesystems do not support directory fsync. The atomic
+                # replacement has still completed successfully in that case.
+                pass
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
+    finally:
+        if handle is not None:
+            handle.close()
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _quarantine_corrupt(path: Path) -> Path | None:
+    """Move unreadable local state aside so callers can recover immediately."""
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination = path.with_name(f"{path.name}.corrupt-{stamp}-{uuid4().hex[:8]}")
+    try:
+        os.replace(path, destination)
+    except OSError:
+        return None
+    return destination
+
+
+def _read_json_object(path: Path, vault: Any = None) -> dict[str, Any] | None:
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError):
+        return None
+    if is_encrypted(raw):
+        # Without the right key the file is unreadable, not corrupt: leave it.
+        if vault is None:
+            return None
+        try:
+            raw = vault.decrypt(raw)
+        except VaultError:
+            return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        _quarantine_corrupt(path)
+        return None
+
+    if not isinstance(value, dict):
+        _quarantine_corrupt(path)
+        return None
+    return value
+
+
+def _as_text_core(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def shred_file(path: PathInput) -> bool:
+    """Overwrite a file's bytes, then remove it. True when it is gone.
+
+    A symlink is unlinked, never written through - the file it points at is
+    not this program's to destroy.
+
+    ponytail: overwrite-then-unlink is as far as user space reaches. On an SSD,
+    a copy-on-write filesystem, or any volume with snapshots, the original
+    blocks can survive untouched; full-disk encryption, or Matchstick's
+    RAM-only image, is the real guarantee. TECHNICAL.md states the same limit.
+    """
+    target = Path(path)
+    if target.is_symlink():
+        try:
+            target.unlink()
+            return True
+        except OSError:
+            return False
+    try:
+        size = target.stat().st_size
+        with open(target, "r+b", buffering=0) as handle:
+            written = 0
+            while written < size:
+                chunk = min(1 << 20, size - written)
+                handle.write(os.urandom(chunk))
+                written += chunk
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass                      # unwritable is not a reason to keep the file
+    for attempt in (0, 1):
+        try:
+            target.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            if attempt:
+                return False
+            try:
+                os.chmod(target, stat.S_IWRITE)    # Windows read-only flag
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+def shred_tree(root: PathInput) -> int:
+    """Shred every file under root and remove the directories. Returns the
+    number of files removed; a directory that will not go is left behind
+    rather than failing the whole wipe."""
+    base = Path(root)
+    if not base.exists() and not base.is_symlink():
+        return 0
+    if base.is_symlink() or base.is_file():
+        return 1 if shred_file(base) else 0
+    removed = 0
+    for parent, directories, files in os.walk(base, topdown=False):
+        for name in files:
+            if shred_file(Path(parent) / name):
+                removed += 1
+        for name in directories:
+            entry = Path(parent) / name
+            try:
+                entry.unlink() if entry.is_symlink() else entry.rmdir()
+            except OSError:
+                pass
+    try:
+        base.rmdir()
+    except OSError:
+        pass
+    return removed
+
+
+# --- Encryption at rest --------------------------------------------------
+#
+# Everything under the desktop data folder (settings, sessions, the network
+# log, revert backups) is AES-256-GCM encrypted with one random data key.
+# vault.json beside it is the only plaintext file and holds no secret: which
+# key store keeps the data key, or - once the person sets a password - the
+# data key wrapped with a key derived from that password (scrypt). A password
+# is optional; without one the operating system's key store releases the key
+# to this user account, so a copied disk or another account reads nothing,
+# but programs running as this same user could ask for it. With a password the
+# key is nowhere on disk in usable form, and a forgotten password means the
+# data is gone: there is no recovery, by design.
+
+VAULT_FILE = "vault.json"
+_ENC_MAGIC = b"OMENC1\n"
+_ENC_LINE = "enc1:"
+_ENC_AAD = b"onionmind/v1"
+_NONCE_BYTES = 12
+_SCRYPT = {"n": 2 ** 15, "r": 8, "p": 1}
+
+
+class VaultError(RuntimeError):
+    """The data folder's encryption could not be opened or changed."""
+
+
+class WrongPassword(VaultError):
+    pass
+
+
+class KeystoreUnavailable(VaultError):
+    pass
+
+
+class VaultLocked(VaultError):
+    """The vault was locked: its key is out of memory until the password is typed."""
+
+
+def encryption_available() -> bool:
+    """True when the `cryptography` package (AES-GCM) can be imported."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _aesgcm(key: bytes) -> Any:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    return AESGCM(key)
+
+
+def _key_tag(root: Path) -> str:
+    """A stable, non-identifying name for one data folder's key."""
+    return hashlib.sha256(str(Path(root).expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+class FileKeystore:
+    """Fallback: a key file only this user can read, kept outside the data folder.
+
+    It stops another account and a copied data folder, not a program running as
+    this user - the settings say so and recommend a password."""
+
+    name = "file"
+    label = "a key file only your user account can read"
+    strong = False
+
+    def __init__(self, tag: str, directory: Optional[Path] = None) -> None:
+        base = directory or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "onionmind" / "keys"
+        self.path = base / f"{tag}.key"
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = bytes.fromhex(self.path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.path.parent, 0o700)
+        except OSError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(key.hex())
+        os.chmod(self.path, 0o600)
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class SecretServiceKeystore:
+    """Linux desktops: GNOME Keyring / KWallet through `secret-tool` (libsecret).
+    The key goes in on stdin, never on a command line."""
+
+    name = "secret-service"
+    label = "your desktop keyring (Secret Service)"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.attributes = ["service", "onionmind", "key", tag]
+
+    def _run(self, *args: str, data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["secret-tool", *args, *self.attributes], input=data, capture_output=True,
+                                  text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"secret-tool failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run("lookup")
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        result = self._run("store", "--label=Onionmind data key", data=key.hex())
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the keyring did not keep the key")
+
+    def delete(self) -> None:
+        self._run("clear")
+
+
+class MacKeychain:
+    """macOS: the login keychain through `security`. Commands go in on stdin
+    (`security -i`), so the key never appears in a process listing."""
+
+    name = "keychain"
+    label = "the macOS Keychain"
+    strong = True
+
+    def __init__(self, tag: str) -> None:
+        self.service, self.account = "Onionmind", f"data-key-{tag}"
+
+    def _run(self, args: list[str], data: Optional[str] = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(["security", *args], input=data, capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise KeystoreUnavailable(f"security failed: {exc}") from exc
+
+    def get(self) -> Optional[bytes]:
+        result = self._run(["find-generic-password", "-s", self.service, "-a", self.account, "-w"])
+        try:
+            value = bytes.fromhex(result.stdout.strip()) if result.returncode == 0 else b""
+        except ValueError:
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        command = (f"add-generic-password -U -s {self.service} -a {self.account} "
+                   f"-l \"Onionmind data key\" -w {key.hex()}\n")
+        result = self._run(["-i"], data=command)
+        if result.returncode != 0 or self.get() != key:
+            raise KeystoreUnavailable(result.stderr.strip() or "the Keychain did not keep the key")
+
+    def delete(self) -> None:
+        self._run(["delete-generic-password", "-s", self.service, "-a", self.account])
+
+
+class DpapiKeystore:
+    """Windows: the key sealed with DPAPI (CryptProtectData) for this user
+    account, stored beside vault.json. The sealed blob is useless to another
+    account or on another machine."""
+
+    name = "dpapi"
+    label = "Windows Data Protection (DPAPI) for your account"
+    strong = True
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    @staticmethod
+    def _call(function_name: str, data: bytes) -> bytes:
+        import ctypes
+        from ctypes import wintypes
+
+        class Blob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = getattr(crypt32, function_name)
+        function.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+        function.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        buffer = ctypes.create_string_buffer(data, len(data))
+        source = Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        result = Blob()
+        # 0x1 = CRYPTPROTECT_UI_FORBIDDEN: never show a prompt.
+        if not function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result)):
+            raise KeystoreUnavailable(f"{function_name} failed ({ctypes.get_last_error()})")
+        try:
+            return ctypes.string_at(result.pbData, result.cbData)
+        finally:
+            kernel32.LocalFree(result.pbData)
+
+    def get(self) -> Optional[bytes]:
+        try:
+            value = self._call("CryptUnprotectData", self.path.read_bytes())
+        except (OSError, KeystoreUnavailable):
+            return None
+        return value if len(value) == 32 else None
+
+    def put(self, key: bytes) -> None:
+        sealed = self._call("CryptProtectData", key)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_bytes(sealed)
+        os.replace(temporary, self.path)
+        if self.get() != key:
+            raise KeystoreUnavailable("DPAPI did not return the key it sealed")
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def keystore_for(root: PathInput, name: Optional[str] = None) -> Any:
+    """The key store a vault uses: `name` from its header, else this platform's best."""
+    root = Path(root).expanduser()
+    tag = _key_tag(root)
+    choice = name or ("dpapi" if os.name == "nt" else
+                      "keychain" if sys.platform == "darwin" else
+                      "secret-service" if shutil.which("secret-tool") else "file")
+    if choice == "dpapi":
+        return DpapiKeystore(root / "device-key.dpapi")
+    if choice == "keychain":
+        return MacKeychain(tag)
+    if choice == "secret-service":
+        return SecretServiceKeystore(tag)
+    return FileKeystore(tag)
+
+
+def _wrap_key(key: bytes, password: str) -> dict[str, Any]:
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=128 * 1024 * 1024, **_SCRYPT)
+    wrapped = _aesgcm(kek).encrypt(nonce, key, b"onionmind/key")
+    return {"kdf": "scrypt", **_SCRYPT, "salt": salt.hex(), "nonce": nonce.hex(), "wrapped": wrapped.hex()}
+
+
+def _unwrap_key(record: Mapping[str, Any], password: str) -> bytes:
+    from cryptography.exceptions import InvalidTag
+
+    try:
+        salt, nonce = bytes.fromhex(record["salt"]), bytes.fromhex(record["nonce"])
+        wrapped = bytes.fromhex(record["wrapped"])
+        params = {key: int(record[key]) for key in ("n", "r", "p")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VaultError("vault.json is damaged") from exc
+    if record.get("kdf") != "scrypt":
+        raise VaultError("vault.json names an unknown key derivation")
+    kek = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, maxmem=256 * 1024 * 1024, **params)
+    try:
+        return _aesgcm(kek).decrypt(nonce, wrapped, b"onionmind/key")
+    except InvalidTag:
+        raise WrongPassword("That password is not right.") from None
+
+
+class Vault:
+    """An open vault: the data key in memory, and the header describing it."""
+
+    def __init__(self, root: PathInput, key: bytes, header: Mapping[str, Any], keystore: Any = None) -> None:
+        self.root = Path(root).expanduser()
+        self._key: Optional[bytes] = key
+        self._cipher: Any = _aesgcm(key)
+        self.header = dict(header)
+        self.keystore = keystore
+
+    # lock
+
+    @property
+    def locked(self) -> bool:
+        return self._key is None
+
+    def lock(self) -> bool:
+        """Drop the data key from memory; only the password brings it back.
+
+        Only with a password: without one the key store would hand the key
+        straight back, so there is nothing to lock. Python cannot overwrite the
+        old bytes, so this drops every reference and leaves them to the
+        allocator. Returns True when the key was dropped."""
+        if not self.has_password:
+            return False
+        self._key = None
+        self._cipher = None
+        return True
+
+    def unlock(self, password: str) -> None:
+        """Bring the key back from the password. Raises WrongPassword."""
+        if not self.locked:
+            return
+        key = _unwrap_key(self.header["password"], password)
+        self._key, self._cipher = key, _aesgcm(key)
+
+    def _require_key(self) -> tuple[bytes, Any]:
+        if self._key is None:
+            raise VaultLocked("Onionmind is locked; unlock it to read or write its data.")
+        return self._key, self._cipher
+
+    # data
+
+    def encrypt(self, data: bytes) -> bytes:
+        _, cipher = self._require_key()
+        nonce = os.urandom(_NONCE_BYTES)
+        return _ENC_MAGIC + nonce + cipher.encrypt(nonce, data, _ENC_AAD)
+
+    def decrypt(self, blob: bytes) -> bytes:
+        from cryptography.exceptions import InvalidTag
+
+        if not is_encrypted(blob):
+            raise VaultError("not an Onionmind encrypted file")
+        _, cipher = self._require_key()
+        start = len(_ENC_MAGIC)
+        try:
+            return cipher.decrypt(blob[start:start + _NONCE_BYTES], blob[start + _NONCE_BYTES:], _ENC_AAD)
+        except InvalidTag:
+            raise VaultError("the file was not encrypted with this data key, or it was changed") from None
+
+    def encrypt_line(self, text: str) -> str:
+        import base64
+
+        return _ENC_LINE + base64.b64encode(self.encrypt(text.encode("utf-8"))).decode("ascii")
+
+    def decrypt_line(self, line: str) -> str:
+        import base64
+
+        if not line.startswith(_ENC_LINE):
+            return line
+        return self.decrypt(base64.b64decode(line[len(_ENC_LINE):])).decode("utf-8")
+
+    # password
+
+    @property
+    def mode(self) -> str:
+        return "password" if isinstance(self.header.get("password"), dict) else "device"
+
+    @property
+    def has_password(self) -> bool:
+        return self.mode == "password"
+
+    def describe(self) -> str:
+        if self.has_password:
+            return "Encrypted (AES-256-GCM). The key is unlocked by your password, which is never stored."
+        store = self.keystore or keystore_for(self.root, self.header.get("keystore"))
+        text = f"Encrypted (AES-256-GCM). The key is kept in {store.label}."
+        if not store.strong:
+            text += " Set a password for full protection: without one, programs running as you could read that file."
+        return text
+
+    def check_password(self, password: str) -> bool:
+        record = self.header.get("password")
+        if not isinstance(record, dict):
+            return False
+        try:
+            key = _unwrap_key(record, password)
+        except VaultError:
+            return False
+        return self._key is None or key == self._key
+
+    def set_password(self, password: str, current: Optional[str] = None) -> None:
+        """Set or change the password. Changing needs the current one."""
+        if not password:
+            raise VaultError("The password cannot be empty.")
+        if self.has_password and not self.check_password(current or ""):
+            raise WrongPassword("The current password is not right.")
+        key, _ = self._require_key()
+        header = {**self.header, "mode": "password", "password": _wrap_key(key, password)}
+        header.pop("keystore", None)
+        _write_header(self.root, header)            # the wrapped key first...
+        old = self.header.get("keystore")
+        self.header = header
+        if old:                                     # ...then the unwrapped copy goes
+            try:
+                keystore_for(self.root, old).delete()
+            except KeystoreUnavailable:
+                pass
+        self.keystore = None
+
+    def remove_password(self, current: str) -> None:
+        """Back to the key store: the data stays encrypted, no login needed."""
+        if not self.check_password(current):
+            raise WrongPassword("That password is not right.")
+        key, _ = self._require_key()
+        store = keystore_for(self.root)
+        store.put(key)                        # the key store first...
+        header = {key: value for key, value in self.header.items() if key != "password"}
+        header.update(mode="device", keystore=store.name)
+        _write_header(self.root, header)            # ...then the header stops asking
+        self.header, self.keystore = header, store
+
+
+def is_encrypted(blob: bytes) -> bool:
+    return blob[:len(_ENC_MAGIC)] == _ENC_MAGIC
+
+
+def _write_header(root: Path, header: Mapping[str, Any]) -> None:
+    _atomic_write_json(Path(root) / VAULT_FILE, header)
+
+
+def vault_header(root: PathInput) -> Optional[dict[str, Any]]:
+    """The plaintext header, or None when this data folder was never encrypted."""
+    path = Path(root).expanduser() / VAULT_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise VaultError(f"{path} is unreadable") from exc
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise VaultError(f"{path} is not a vault header this version understands")
+    return value
+
+
+def vault_needs_password(root: PathInput) -> bool:
+    header = vault_header(root)
+    return bool(header and isinstance(header.get("password"), dict))
+
+
+def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = None) -> Vault:
+    """Open (or, the first time, create) the vault of a data folder.
+
+    First run: a new random data key goes into the platform key store and every
+    plaintext file already in the folder is encrypted in place. Afterwards the
+    key comes from the key store, or from `password` once one is set. Raises
+    WrongPassword, KeystoreUnavailable or VaultError - never falls back to
+    plaintext on its own."""
+    if not encryption_available():
+        raise VaultError("The cryptography package is missing; run the updater to install it.")
+    root = Path(root).expanduser()
+    header = vault_header(root)
+    if header is None:
+        key = os.urandom(32)
+        store = keystore or keystore_for(root)
+        try:
+            store.put(key)
+        except KeystoreUnavailable:
+            if store.name == "file":
+                raise
+            store = FileKeystore(_key_tag(root))
+            store.put(key)
+        header = {"version": 1, "cipher": "AES-256-GCM", "mode": "device", "keystore": store.name,
+                  "created_at": _utc_now()}
+        _write_header(root, header)
+        vault = Vault(root, key, header, store)
+        encrypt_data_folder(root, vault)
+        return vault
+    if isinstance(header.get("password"), dict):
+        if password is None:
+            raise WrongPassword("A password is needed to open Onionmind's data.")
+        return Vault(root, _unwrap_key(header["password"], password), header)
+    store = keystore or keystore_for(root, header.get("keystore"))
+    key = store.get()
+    if key is None:
+        raise KeystoreUnavailable(
+            f"The data key is missing from {store.label}. Without it the encrypted data cannot be read.")
+    vault = Vault(root, key, header, store)
+    encrypt_data_folder(root, vault)                # anything an older version left in plaintext
+    return vault
+
+
+_VAULT_OWN_FILES = {VAULT_FILE, "device-key.dpapi"}
+
+
+def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
+    """Encrypt in place every plaintext file under the data folder. Returns the count."""
+    root = Path(root).expanduser()
+    done = 0
+    if not root.is_dir():
+        return done
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink() or path.name in _VAULT_OWN_FILES and path.parent == root:
+            continue
+        if path.name.endswith(".tmp"):
+            continue
+        try:
+            with path.open("rb") as handle:
+                if is_encrypted(handle.read(len(_ENC_MAGIC))) and path.suffix != ".jsonl":
+                    continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if path.suffix == ".jsonl":
+            lines = raw.decode("utf-8", "replace").splitlines()
+            if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
+                continue
+            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
+            _atomic_write_bytes(path, body.encode("ascii"))
+        elif is_encrypted(raw):
+            continue
+        else:
+            _atomic_write_bytes(path.with_name(f".{path.name}.migrating.tmp"), vault.encrypt(raw))
+            # Overwrite the plaintext bytes before the encrypted copy takes the
+            # name, so they do not simply linger in freed blocks (same limits as
+            # shred_file: SSDs and copy-on-write filesystems may keep a copy).
+            try:
+                with open(path, "r+b", buffering=0) as handle:
+                    handle.write(os.urandom(len(raw)))
+                    os.fsync(handle.fileno())
+            except OSError:
+                pass
+            os.replace(path.with_name(f".{path.name}.migrating.tmp"), path)
+        done += 1
+    return done
+
+
+def erase_data_folder(root: PathInput) -> None:
+    """Forgotten password: delete the encrypted data, its header and the key."""
+    root = Path(root).expanduser()
+    if not (root / VAULT_FILE).is_file():
+        raise VaultError(f"{root} is not an Onionmind data folder")
+    try:
+        header = vault_header(root) or {}
+    except VaultError:
+        header = {}
+    if header.get("keystore"):
+        try:
+            keystore_for(root, header["keystore"]).delete()
+        except KeystoreUnavailable:
+            pass
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_data_file(path: PathInput, vault: Optional[Vault]) -> bytes:
+    """A file from the data folder, decrypted when it is encrypted."""
+    raw = Path(path).read_bytes()
+    if is_encrypted(raw):
+        if vault is None:
+            raise VaultError("this file is encrypted and the vault is not open")
+        return vault.decrypt(raw)
+    return raw
+
+
+def write_data_file(path: PathInput, data: bytes, vault: Optional[Vault]) -> None:
+    """Write a file into the data folder, encrypted when a vault is open."""
+    _atomic_write_bytes(Path(path), vault.encrypt(data) if vault is not None else data)
+
+
+# export: one password-protected file with the sessions and settings, to move
+# them to another machine or keep a backup. It does not depend on the data
+# key, so it opens anywhere with the password alone. PBKDF2-HMAC-SHA256
+# rather than the vault's scrypt because the phone (javax.crypto) has it too,
+# and the same file imports on either side. Layout:
+#   OMEXPORT1\n  <header JSON, one line>\n  <12-byte nonce><AES-256-GCM ciphertext>
+# The magic and header line are the associated data, so changing the KDF
+# parameters breaks the tag instead of weakening the key.
+
+EXPORT_MAGIC = b"OMEXPORT1\n"
+EXPORT_SUFFIX = ".onionmind"
+EXPORT_PBKDF2_ITERATIONS = 600_000
+
+
+class ExportError(VaultError):
+    """An export file that is not one, is damaged, or needs another password."""
+
+
+def _export_key(password: str, salt: bytes, iterations: int) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+
+
+def export_bytes(password: str, payload: Mapping[str, Any]) -> bytes:
+    import base64
+
+    if not password:
+        raise ExportError("The export password cannot be empty.")
+    salt, nonce = os.urandom(16), os.urandom(_NONCE_BYTES)
+    header = json.dumps({"format": "onionmind-export", "version": 1, "kdf": "PBKDF2WithHmacSHA256",
+                         "iterations": EXPORT_PBKDF2_ITERATIONS,
+                         "salt": base64.b64encode(salt).decode("ascii")}, separators=(",", ":"))
+    preamble = EXPORT_MAGIC + header.encode("ascii") + b"\n"
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    key = _export_key(password, salt, EXPORT_PBKDF2_ITERATIONS)
+    return preamble + nonce + _aesgcm(key).encrypt(nonce, body, preamble)
+
+
+def read_export_bytes(blob: bytes, password: str) -> dict[str, Any]:
+    import base64
+    from cryptography.exceptions import InvalidTag
+
+    if not blob.startswith(EXPORT_MAGIC):
+        raise ExportError("This is not an Onionmind export file.")
+    end = blob.find(b"\n", len(EXPORT_MAGIC))
+    try:
+        header = json.loads(blob[len(EXPORT_MAGIC):end].decode("ascii"))
+        salt = base64.b64decode(header["salt"], validate=True)
+        iterations = int(header["iterations"])
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise ExportError("The export file is damaged.") from exc
+    if end < 0 or header.get("format") != "onionmind-export" or header.get("version") != 1:
+        raise ExportError("This export was made by a newer Onionmind; update to import it.")
+    if header.get("kdf") != "PBKDF2WithHmacSHA256" or not 100_000 <= iterations <= 10_000_000:
+        raise ExportError("The export file names a key derivation this version does not accept.")
+    preamble, rest = blob[:end + 1], blob[end + 1:]
+    if len(rest) < _NONCE_BYTES + 16:
+        raise ExportError("The export file is damaged.")
+    key = _export_key(password, salt, iterations)
+    try:
+        body = _aesgcm(key).decrypt(rest[:_NONCE_BYTES], rest[_NONCE_BYTES:], preamble)
+    except InvalidTag:
+        raise WrongPassword("That password does not open this export, or the file was changed.") from None
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ExportError("The export file is damaged.")
+    return payload
+
+
+def export_payload(sessions: Iterable[Any], settings: Optional[Mapping[str, Any]] = None,
+                   source: str = "desktop") -> dict[str, Any]:
+    """What an export carries: every session (archived ones too) and the
+    settings, minus anything that only means something on this machine."""
+    rows = [session.to_dict() if hasattr(session, "to_dict") else dict(session) for session in sessions]
+    clean = copy.deepcopy(dict(settings or {}))
+    lock = clean.get("lock")
+    if isinstance(lock, dict):
+        lock.pop("passphrase", None)                # an old hash; never travels
+    return {"version": 1, "from": source, "exported_at": _utc_now(), "sessions": rows, "settings": clean}
+
+
+def write_export(path: PathInput, password: str, store: SessionStore,
+                 settings: Optional[Mapping[str, Any]] = None) -> int:
+    """Write every session in `store` and `settings` to an export file. Returns the session count."""
+    sessions = store.list() + store.list(archived=True)
+    payload = export_payload(sessions, settings)
+    _atomic_write_bytes(Path(path).expanduser(), export_bytes(password, payload))
+    return len(sessions)
+
+
+def read_export(path: PathInput, password: str) -> dict[str, Any]:
+    try:
+        blob = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        raise ExportError(f"The export file could not be read: {exc.strerror or exc}") from exc
+    return read_export_bytes(blob, password)
+
+
+def import_sessions(store: SessionStore, payload: Mapping[str, Any]) -> dict[str, int]:
+    """Add the export's sessions to `store`. Ones already here are kept as they
+    are; ones that do not validate are skipped. Counts: added, existing, invalid."""
+    counts = {"added": 0, "existing": 0, "invalid": 0}
+    rows = payload.get("sessions")
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            counts["added" if store.adopt(row) else "existing"] += 1
+        except (TypeError, ValueError):
+            counts["invalid"] += 1
+    return counts
+
+
+def imported_settings(current: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    """`current` with the export's settings laid over it, for a desktop export only:
+    the phone's settings are different knobs."""
+    merged = copy.deepcopy(dict(current))
+    settings = payload.get("settings")
+    if payload.get("from") == "desktop" and isinstance(settings, dict):
+        merged.update(copy.deepcopy(settings))
+    return merged
+'@
+$desktopNetlog = @'
+"""The network log and the agent's private scratch folder.
+
+Part of onionmind_desktop_core, which re-exports every name defined here.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+import re
+import tempfile
+from typing import Any, Iterable, Mapping, Optional
+
+from onionmind_desktop_vault import (
+    PathInput,
+    Vault,
+    VaultError,
+    _ENC_LINE,
+    _as_text_core,
+    _atomic_write_bytes,
+    shred_file,
+    shred_tree,
+)
+
+
+# netlog: what left this machine, written by the desktop when it happens.
+# Times and destinations only - a prompt or a search query is never stored.
+
+class EgressLog:
+    ROUTES = ("Tor", "Direct", "Refused")
+
+    def __init__(self, path: PathInput, vault: Any = None) -> None:
+        self.path = Path(path).expanduser()
+        self.vault = vault
+
+    def append(self, route: str, what: str, when: Optional[datetime] = None) -> None:
+        """Record one connection. Never raises: logging must not break the action."""
+        entry = {
+            "time": (when or datetime.now().astimezone()).isoformat(timespec="seconds"),
+            "route": route if route in self.ROUTES else "Tor",
+            "what": _as_text_core(what)[:200],
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry, ensure_ascii=False)
+            if self.vault is not None:
+                line = self.vault.encrypt_line(line)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+
+    def entries(self, day: Optional[str] = None) -> list[dict[str, str]]:
+        """Entries for one local day (YYYY-MM-DD), oldest first; all when day is None."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        rows = []
+        for line in lines:
+            try:
+                if line.startswith(_ENC_LINE):
+                    if self.vault is None:
+                        continue
+                    line = self.vault.decrypt_line(line)
+                entry = json.loads(line)
+            except (ValueError, VaultError):
+                continue
+            if not isinstance(entry, dict) or not isinstance(entry.get("time"), str):
+                continue
+            if day and not entry["time"].startswith(day):
+                continue
+            rows.append({"time": entry["time"], "route": _as_text_core(entry.get("route")),
+                         "what": _as_text_core(entry.get("what"))})
+        return rows
+
+    def counts(self, day: Optional[str] = None) -> dict[str, int]:
+        rows = self.entries(day)
+        return {
+            "search": sum(1 for row in rows if row["route"] == "Tor" and row["what"].startswith("Chat search")),
+            "tor": sum(1 for row in rows if row["route"] == "Tor"),
+            "direct": sum(1 for row in rows if row["route"] == "Direct"),
+        }
+
+
+_AGENT_NET_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
+
+
+def agent_net_entries(path: PathInput, day: Optional[str] = None) -> list[dict[str, str]]:
+    """The agent bridge's own log (onionmind.py _net_log) as netlog rows.
+
+    Its lines name the destination and whether it went over Tor or was
+    refused; they never carry request bodies.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        match = _AGENT_NET_LINE.match(line.strip())
+        if not match or (day and match.group(1) != day):
+            continue
+        detail = match.group(3).strip()
+        lowered = detail.casefold()
+        route = "Refused" if "refused" in lowered else ("Tor" if lowered.startswith("tor") else "Local")
+        if route == "Local":
+            continue                              # loopback traffic never left the machine
+        rows.append({"time": f"{match.group(1)}T{match.group(2)}", "route": route,
+                     "what": f"Agent network · {detail}"[:200]})
+    return rows
+
+
+def absorb_agent_net_log(path: PathInput, egress: Optional["EgressLog"]) -> int:
+    """Move the agent's plaintext network log into the encrypted one, then shred it.
+
+    The agent runs in its own process without the data key, so it can only
+    write plaintext; the desktop takes the lines over after each run. With
+    logging off (`egress` None) the lines are dropped - no log unless asked.
+    Returns the rows moved."""
+    target = Path(path)
+    if not target.is_file():
+        return 0
+    rows = agent_net_entries(target)
+    if egress is not None:
+        for row in rows:
+            try:
+                when = datetime.fromisoformat(row["time"])
+            except ValueError:
+                when = None
+            egress.append(row["route"], row["what"], when)
+    shred_file(target)
+    return len(rows) if egress is not None else 0
+
+
+# qwen-code keeps its chats, tool output and todos under QWEN_RUNTIME_DIR, and
+# reads them back to resume a run, so it needs them in plaintext while it runs.
+# With a vault each run gets a private scratch folder - RAM-backed under
+# XDG_RUNTIME_DIR where there is one - and afterwards its contents go into the
+# vault as one encrypted archive per qwen session, and the plaintext is shredded.
+
+AGENT_ARCHIVE_DIR = "agent-runtime"
+AGENT_SCRATCH_PREFIX = "onionmind-agent-"
+AGENT_NET_LOG_NAME = "agent-net.log"
+_AGENT_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+def agent_scratch_base() -> Path:
+    """Where run scratch folders go: the per-user runtime dir (tmpfs on most
+    Linux systems, cleared at logout) when there is one, else the temp dir."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime and os.path.isdir(runtime) and os.access(runtime, os.W_OK):
+        return Path(runtime)
+    return Path(tempfile.gettempdir())
+
+
+def _agent_archive(root: PathInput, session_id: str) -> Optional[Path]:
+    if not _AGENT_SESSION_ID.fullmatch(session_id or ""):
+        return None
+    return Path(root).expanduser() / AGENT_ARCHIVE_DIR / f"{session_id}.tar"
+
+
+def open_agent_scratch(root: PathInput, vault: Vault, resume: str = "") -> Path:
+    """A new private (0700) scratch folder for one agent run. When resuming a
+    qwen session, its sealed archive is decrypted back into it first."""
+    scratch = Path(tempfile.mkdtemp(prefix=AGENT_SCRATCH_PREFIX, dir=agent_scratch_base()))
+    archive = _agent_archive(root, resume) if resume else None
+    if archive is not None and archive.is_file():
+        import io
+        import tarfile
+
+        data = vault.decrypt(archive.read_bytes())
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r") as bundle:
+            members = []
+            for member in bundle.getmembers():
+                name = Path(member.name)
+                # Our own authenticated archive, but extract defensively anyway.
+                if name.is_absolute() or ".." in name.parts or not (member.isfile() or member.isdir()):
+                    continue
+                members.append(member)
+            if hasattr(tarfile, "data_filter"):
+                bundle.extractall(scratch, members=members, filter="data")
+            else:
+                bundle.extractall(scratch, members=members)
+    return scratch
+
+
+def seal_agent_scratch(root: PathInput, vault: Vault, scratch: PathInput, session_id: str = "") -> bool:
+    """Encrypt what qwen wrote during the run into the vault (replacing that
+    session's earlier archive), then shred the scratch folder. The network log
+    and the socket shims are not kept: the log was absorbed already. Returns
+    True when an archive was written."""
+    import io
+    import tarfile
+
+    folder = Path(scratch)
+    archive = _agent_archive(root, session_id)
+    sealed = False
+    if archive is not None and folder.is_dir():
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as bundle:
+            for path in sorted(folder.rglob("*")):
+                rel = path.relative_to(folder)
+                if path.is_symlink() or rel.parts[0] in (AGENT_NET_LOG_NAME, "shims"):
+                    continue
+                if path.is_file() or path.is_dir():
+                    bundle.add(path, arcname=rel.as_posix(), recursive=False)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(archive, vault.encrypt(buffer.getvalue()))
+        sealed = True
+    shred_tree(folder)
+    return sealed
+
+
+def sweep_agent_scratch(egress: Optional["EgressLog"] = None) -> int:
+    """Scratch folders a crashed or killed run left behind: take their network
+    log in (or drop it), then shred them. Returns the folders removed."""
+    base = agent_scratch_base()
+    removed = 0
+    try:
+        leftovers = [p for p in base.iterdir() if p.name.startswith(AGENT_SCRATCH_PREFIX) and p.is_dir()]
+    except OSError:
+        return 0
+    for folder in leftovers:
+        try:
+            if folder.stat().st_uid != os.getuid():
+                continue
+        except (OSError, AttributeError):
+            pass
+        absorb_agent_net_log(folder / AGENT_NET_LOG_NAME, egress)
+        shred_tree(folder)
+        removed += 0 if folder.exists() else 1
+    return removed
+
+
+def network_log_csv(rows: Iterable[Mapping[str, Any]]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["time", "route", "what"])
+    for row in rows:
+        writer.writerow([row.get("time", ""), row.get("route", ""), row.get("what", "")])
+    return buffer.getvalue()
+
+
+def network_log_json(rows: Iterable[Mapping[str, Any]]) -> str:
+    clean = [{"time": row.get("time", ""), "route": row.get("route", ""), "what": row.get("what", "")}
+             for row in rows]
+    return json.dumps(clean, indent=2, ensure_ascii=False) + "\n"
+'@
+$desktopUpdate = @'
+"""The Tor-routed self-update of the Windows bundle.
+
+Part of onionmind_desktop_core, which re-exports every name defined here.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+import re
+import shutil
+from typing import Any, Callable, Optional
+import zipfile
+
+from onionmind_desktop_vault import (
+    PathInput,
+)
+
+
+# --- Tor-routed self-update -------------------------------------------------
+#
+# The installed workbench is a Nuitka standalone bundle: its code is compiled
+# into Onionmind.exe, so an update means a whole new bundle directory. The
+# feed is a plain GitHub release-asset URL (no api.github.com call, which is
+# aggressively rate-limited for shared Tor exit addresses) whose small JSON
+# manifest carries the source revision plus the size and SHA-256 of the zip.
+# Every request - manifest and bundle alike - goes through the local Tor SOCKS
+# port with fresh credentials, so each fetch rides its own circuit. A failed
+# Tor check fails closed; there is no direct-network fallback anywhere in this path.
+
+UPDATE_REPO = "Codemaster64/onionmind"
+UPDATE_FEED_TAG = "desktop-latest"
+UPDATE_MANIFEST_ASSET = "onionmind-update.json"
+UPDATE_REVISION_FILENAME = ".onionmind-source-revision"
+UPDATE_FEED_URL = (
+    f"https://github.com/{UPDATE_REPO}/releases/download/"
+    f"{UPDATE_FEED_TAG}/{UPDATE_MANIFEST_ASSET}"
+)
+_UPDATE_ASSET_HOSTS = ("github.com", "githubusercontent.com", "github.io")
+
+
+class BundleUpdateError(RuntimeError):
+    """A user-facing update failure. Never retried outside Tor."""
+
+
+@dataclass(frozen=True)
+class UpdateManifest:
+    revision: str
+    version: str
+    asset_name: str
+    asset_url: str
+    size: int
+    sha256: str
+
+
+def short_revision(revision: Optional[str]) -> str:
+    """Seven hex characters for display; honest fallbacks for odd values."""
+
+    if not revision:
+        return "unknown"
+    text = revision.strip()
+    return text[:7] if re.fullmatch(r"[0-9a-fA-F]{7,40}", text) else text[:12]
+
+
+def parse_update_manifest(text: str) -> UpdateManifest:
+    """Validate the release manifest strictly - it decides what gets executed.
+
+    A sloppily parsed manifest is the one file an attacker controlling the feed
+    could use to point the updater at an arbitrary URL, so asset names must be
+    plain filenames, URLs must be GitHub hosts over HTTPS, and the digest must
+    be a full lowercase SHA-256.
+    """
+
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        raise BundleUpdateError(f"update manifest is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise BundleUpdateError("update manifest must be a JSON object")
+
+    revision = payload.get("revision")
+    version = payload.get("version")
+    asset_name = payload.get("asset")
+    asset_url = payload.get("asset_url")
+    size = payload.get("size")
+    sha256 = payload.get("sha256")
+
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{7,40}", revision):
+        raise BundleUpdateError("update manifest has no valid revision")
+    if not isinstance(version, str) or not version.strip() or not version.isprintable():
+        raise BundleUpdateError("update manifest has no valid version")
+    if not isinstance(asset_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset_name):
+        raise BundleUpdateError("update manifest has no valid asset name")
+    if (
+        not isinstance(asset_url, str)
+        or not asset_url.startswith("https://")
+        or not any(
+            asset_url[len("https://") :].split("/", 1)[0].endswith(host)
+            for host in _UPDATE_ASSET_HOSTS
+        )
+    ):
+        raise BundleUpdateError("update manifest asset URL is not a GitHub HTTPS URL")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise BundleUpdateError("update manifest has no valid asset size")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise BundleUpdateError("update manifest has no valid SHA-256 digest")
+
+    return UpdateManifest(
+        revision=revision,
+        version=version,
+        asset_name=asset_name,
+        asset_url=asset_url,
+        size=size,
+        sha256=sha256,
+    )
+
+
+def installed_revision(install_dir: PathInput) -> Optional[str]:
+    """The revision marker written into the bundle at build time, if present."""
+
+    marker = Path(install_dir) / UPDATE_REVISION_FILENAME
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def update_state(installed: Optional[str], manifest: Optional[UpdateManifest]) -> str:
+    """'current', 'available', or 'development' - the honest tri-state.
+
+    Without git metadata the app cannot order revisions, so any difference
+    between the local marker and the feed is reported as an available update;
+    the dialog always shows both revisions and the user decides.
+    """
+
+    if manifest is None:
+        return "unavailable"
+    if installed is None:
+        return "development"
+    if installed == manifest.revision:
+        return "current"
+    return "available"
+
+
+# The swap itself runs outside the app: a running Windows executable cannot be
+# replaced in place, so this script waits for the app to exit, renames the old
+# bundle to a dated backup beside itself (the naming the installer already
+# uses), moves the verified staging directory into place, and relaunches. Any
+# failure rolls the backup back before giving up, so a half-applied update
+# cannot leave the machine without a working Onionmind.
+_APPLY_SCRIPT_TEMPLATE = r"""
+param(
+  [Parameter(Mandatory=$true)][int]$ParentPid,
+  [Parameter(Mandatory=$true)][string]$InstallDir,
+  [Parameter(Mandatory=$true)][string]$StagingDir,
+  [Parameter(Mandatory=$true)][string]$LogFile
+)
+
+$ErrorActionPreference = 'Stop'
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Write-ApplyLog([string]$Message) {
+  try {
+    [IO.File]::AppendAllText($LogFile, ("{0} {1}`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message), $Utf8NoBom)
+  } catch { }
+}
+
+function Get-MarkerRevision([string]$Directory) {
+  $Marker = Join-Path $Directory '@MARKER@'
+  try { return [string](Get-Content -LiteralPath $Marker -ErrorAction Stop | Select-Object -First 1) }
+  catch { return '' }
+}
+
+try {
+  if (-not (Test-Path -LiteralPath (Join-Path $StagingDir '@EXE_NAME@') -PathType Leaf)) {
+    throw "Staging directory has no @EXE_NAME@; refusing to swap."
+  }
+
+  # 1. The caller exits right after spawning this script; give it time to die
+  #    so the old executable stops being locked.
+  $Deadline = (Get-Date).AddSeconds(120)
+  while ($true) {
+    if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) { break }
+    if ((Get-Date) -gt $Deadline) { throw "Onionmind (pid $ParentPid) did not exit within 120s." }
+    Start-Sleep -Milliseconds 500
+  }
+  Start-Sleep -Milliseconds 800
+
+  $Parent = Split-Path -Parent $InstallDir
+  $Leaf = Split-Path -Leaf $InstallDir
+  $OldRevision = Get-MarkerRevision $InstallDir
+  $OldShort = if ($OldRevision) { $OldRevision.Substring(0, [Math]::Min(7, $OldRevision.Length)) } else { 'unknown' }
+  $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $Backup = Join-Path $Parent ("{0}.backup-before-{1}-{2}" -f $Leaf, $OldShort, $Stamp)
+
+  # 2. Swap. Rename first so the move lands at the exact original path.
+  Rename-Item -LiteralPath $InstallDir -NewName (Split-Path -Leaf $Backup)
+  Write-ApplyLog "renamed old bundle to $(Split-Path -Leaf $Backup)"
+  try {
+    Move-Item -LiteralPath $StagingDir -Destination $InstallDir
+    Write-ApplyLog "moved staged bundle into place"
+  } catch {
+    Rename-Item -LiteralPath $Backup -NewName $Leaf
+    Write-ApplyLog "move failed; restored the previous bundle"
+    throw
+  }
+
+  # 3. Keep the two newest backups only; older swaps otherwise pile up forever.
+  Get-ChildItem -LiteralPath $Parent -Directory -Filter ($Leaf + '.backup-before-*') -ErrorAction SilentlyContinue |
+    Sort-Object CreationTime -Descending |
+    Select-Object -Skip 2 |
+    ForEach-Object {
+      try { Remove-Item -LiteralPath $_.FullName -Recurse -Force; Write-ApplyLog "pruned old backup $($_.Name)" }
+      catch { Write-ApplyLog "could not prune old backup $($_.Name): $($_.Exception.Message)" }
+    }
+
+  # 4. Relaunch the freshly installed workbench. By this point the update is
+  #    applied regardless, so a relaunch problem is logged, not fatal.
+  try {
+    Start-Process -FilePath (Join-Path $InstallDir '@EXE_NAME@') -WorkingDirectory $InstallDir
+    Write-ApplyLog "relaunched the new workbench"
+  } catch {
+    Write-ApplyLog ("could not relaunch automatically; start Onionmind by hand: " + $_.Exception.Message)
+  }
+  Write-ApplyLog ("update applied; now running revision " + (Get-MarkerRevision $InstallDir))
+  exit 0
+} catch {
+  Write-ApplyLog ("FAILED: " + $_.Exception.Message)
+  exit 1
+}
+"""
+
+
+class BundleUpdater:
+    """Tor-only download and staging for the installed standalone bundle.
+
+    ``proxies_factory`` mirrors ``onionmind._proxies``: it receives the SOCKS
+    port and returns a requests proxy mapping, and it is called once per
+    request so every fetch gets a fresh isolated circuit.
+    """
+
+    def __init__(
+        self,
+        install_dir: PathInput,
+        work_dir: PathInput,
+        proxies_factory: Callable[[int], dict[str, str]],
+        user_agent: str,
+        session: Optional[Any] = None,
+    ) -> None:
+        self.install_dir = Path(install_dir)
+        self.work_dir = Path(work_dir)
+        self.proxies_factory = proxies_factory
+        self.user_agent = user_agent
+        self._session = session
+
+    def _request(self, method: str, url: str, port: int, **kwargs: Any) -> Any:
+        import requests  # deferred: the pure module stays importable without it
+
+        proxies = self.proxies_factory(port)
+        if not proxies:
+            raise BundleUpdateError("No verified Tor proxy is pinned for this update.")
+        request = self._session or requests
+        kwargs.setdefault("timeout", 90)
+        kwargs.setdefault(
+            "headers", {"User-Agent": self.user_agent, "Accept": "application/octet-stream"}
+        )
+        kwargs["proxies"] = proxies
+        try:
+            return request.request(method, url, **kwargs)
+        except BundleUpdateError:
+            raise
+        except Exception as exc:
+            raise BundleUpdateError(
+                f"Could not reach the update feed over Tor: {exc}"
+            ) from exc
+
+    def fetch_manifest(self, port: int) -> UpdateManifest:
+        response = self._request("GET", UPDATE_FEED_URL, port)
+        self._raise_for_status(response)
+        try:
+            body = response.content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BundleUpdateError("Update manifest is not UTF-8 text.") from exc
+        return parse_update_manifest(body)
+
+    @staticmethod
+    def _raise_for_status(response: Any) -> None:
+        status = getattr(response, "status_code", 0)
+        if status == 200:
+            return
+        detail = ""
+        text = getattr(response, "text", "")
+        if text:
+            detail = ": " + text[:160].strip()
+        raise BundleUpdateError(f"Update feed returned HTTP {status}{detail}")
+
+    def download(
+        self,
+        port: int,
+        manifest: UpdateManifest,
+        progress: Optional[Callable[[Optional[float], str], None]] = None,
+        stop_event: Optional[Any] = None,
+    ) -> Path:
+        """Stream the bundle zip through Tor into the work directory.
+
+        The archive lands under a ``.part`` name and is verified against the
+        manifest size and SHA-256 before it is allowed to keep the final name,
+        so a truncated or tampered download can never be staged.
+        """
+
+        downloads = self.work_dir / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        final_path = downloads / f"{manifest.asset_name}"
+        part_path = downloads / (manifest.asset_name + ".part")
+
+        response = self._request(
+            "GET",
+            manifest.asset_url,
+            port,
+            stream=True,
+            timeout=(60, 300),
+        )
+        self._raise_for_status(response)
+        total = manifest.size
+        digest = hashlib.sha256()
+        done = 0
+        last_note = -1.0
+        try:
+            with part_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=262144):
+                    if stop_event is not None and stop_event.is_set():
+                        raise BundleUpdateError("Update download was stopped.")
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    done += len(chunk)
+                    if done > total:
+                        raise BundleUpdateError(
+                            "Downloaded bundle is larger than the manifest announced."
+                        )
+                    if progress is not None and (done - last_note >= 1048576 or done == total):
+                        last_note = float(done)
+                        note = f"{done // 1048576} MB of {total // 1048576} MB over Tor"
+                        progress(done / total if total else None, note)
+        except BundleUpdateError:
+            part_path.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            part_path.unlink(missing_ok=True)
+            raise BundleUpdateError(f"Could not write the update download: {exc}") from exc
+
+        if done != total:
+            part_path.unlink(missing_ok=True)
+            raise BundleUpdateError(
+                f"Download stopped early at {done} of {total} bytes; nothing was installed."
+            )
+        if digest.hexdigest() != manifest.sha256:
+            part_path.unlink(missing_ok=True)
+            raise BundleUpdateError(
+                "Downloaded bundle failed the SHA-256 check; nothing was installed."
+            )
+        part_path.replace(final_path)
+        return final_path
+
+    def stage(self, manifest: UpdateManifest, archive_path: PathInput) -> Path:
+        """Unpack a verified archive into a staging directory beside the install.
+
+        Extraction is guarded against zip-slip (every member must stay inside
+        the staging root) and the result must contain both the executable and a
+        revision marker matching the manifest, so what gets swapped in is
+        exactly what the feed described.
+        """
+
+        staging = self.work_dir / f"staging-{manifest.revision[:12]}"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+
+        root = staging.resolve()
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for member in archive.namelist():
+                    resolved = (root / member).resolve()
+                    if resolved != root and root not in resolved.parents:
+                        raise BundleUpdateError(
+                            f"Update archive entry escapes the staging directory: {member}"
+                        )
+                archive.extractall(root)
+        except BundleUpdateError:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        except (OSError, zipfile.BadZipFile) as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise BundleUpdateError(f"Update archive could not be unpacked: {exc}") from exc
+
+        if not (staging / "Onionmind.exe").is_file():
+            shutil.rmtree(staging, ignore_errors=True)
+            raise BundleUpdateError("Update archive has no Onionmind.exe; nothing was installed.")
+        staged_revision = installed_revision(staging)
+        if staged_revision != manifest.revision:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise BundleUpdateError(
+                "Update archive revision marker does not match the manifest; nothing was installed."
+            )
+        return staging
+
+    def write_apply_script(self) -> Path:
+        """Materialise the post-exit swap script and return its path."""
+
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        script_path = self.work_dir / "apply-onionmind-update.ps1"
+        text = _APPLY_SCRIPT_TEMPLATE
+        for token, value in (
+            ("@MARKER@", UPDATE_REVISION_FILENAME),
+            ("@EXE_NAME@", "Onionmind.exe"),
+        ):
+            text = text.replace(token, value)
+        # BOM so Windows PowerShell 5.1 reads the script as UTF-8 regardless
+        # of the system code page.
+        script_path.write_text(text, encoding="utf-8-sig")
+        return script_path
+
+    def apply_command(self, staging_dir: PathInput) -> list[str]:
+        """The detached command that finishes the update after the app exits."""
+
+        script = self.write_apply_script()
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-ParentPid",
+            str(os.getpid()),
+            "-InstallDir",
+            str(self.install_dir),
+            "-StagingDir",
+            str(Path(staging_dir)),
+            "-LogFile",
+            str(self.work_dir / "apply.log"),
+        ]
+
+
+def pending_staging_dir(work_dir: PathInput) -> Optional[Path]:
+    """A previously staged, still-verified bundle waiting to be applied."""
+
+    work = Path(work_dir)
+    if not work.is_dir():
+        return None
+    candidates = sorted(
+        (entry for entry in work.iterdir() if entry.is_dir() and entry.name.startswith("staging-")),
+        key=lambda entry: entry.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if (candidate / "Onionmind.exe").is_file() and installed_revision(candidate):
+            return candidate
+    return None
+
+
+def prune_update_workdir(
+    work_dir: PathInput,
+    running_revision: Optional[str] = None,
+    max_age_days: int = 14,
+) -> None:
+    """Drop long-lived downloads and stale staging directories.
+
+    Staging directories whose revision matches the running bundle are stale by
+    definition - the update they hold is already installed - so they go first.
+    """
+
+    work = Path(work_dir)
+    if not work.is_dir():
+        return
+    cutoff = datetime.now().timestamp() - max_age_days * 86400
+    downloads = work / "downloads"
+    if downloads.is_dir():
+        for entry in downloads.iterdir():
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    entry.unlink(missing_ok=True)
+            except OSError:
+                continue
+    for entry in work.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("staging-"):
+            continue
+        try:
+            if installed_revision(entry) == running_revision or entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
+'@
+$desktopHardware = @'
+"""Real hardware numbers (RAM, VRAM per GPU vendor), model fit, and how to
+start a model server or check Node for the agent.
+
+Part of onionmind_desktop_core, which re-exports every name defined here.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from typing import Any, Callable, Iterable, Mapping, Optional
+
+from onionmind_desktop_vault import (
+    _NO_WINDOW,
+    _as_text_core,
+)
+
+
+# ladder / modelPlus: real hardware numbers, or None when the platform won't say.
+
+def _run_probe(argv: list[str]) -> Optional[str]:
+    """stdout of a hardware probe, or None when it is missing or fails."""
+    try:
+        output = subprocess.run(argv, capture_output=True, text=True, timeout=10,
+                                creationflags=_NO_WINDOW)
+    except Exception:
+        return None
+    return output.stdout if output.returncode == 0 and output.stdout.strip() else None
+
+
+def _nvidia_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    out = _run_probe(["nvidia-smi", "--query-gpu=memory.used,memory.total,name",
+                      "--format=csv,noheader,nounits"])
+    if out is None:
+        return None
+    try:
+        used, total, name = [part.strip() for part in out.strip().splitlines()[0].split(",", 2)]
+        return int(used), int(total), name or None
+    except ValueError:
+        return None
+
+
+_DRM_ROOT = Path("/sys/class/drm")
+
+
+def _amd_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """amdgpu's own sysfs counters (Linux): no rocm-smi needed. The card with the
+    most VRAM wins; an APU's small carve-out (under 1 GB) does not count."""
+    best: Optional[tuple[Optional[int], int, Optional[str]]] = None
+    try:
+        cards = sorted(_DRM_ROOT.glob("card[0-9]*/device"))
+    except OSError:
+        return None
+    for device in cards:
+        try:
+            if (device / "vendor").read_text().strip().lower() != "0x1002":
+                continue
+            total = int((device / "mem_info_vram_total").read_text()) // (1024 * 1024)
+            used = int((device / "mem_info_vram_used").read_text()) // (1024 * 1024)
+        except (OSError, ValueError):
+            continue
+        if total < 1024 or (best and best[1] >= total):
+            continue
+        try:
+            name = (device / "product_name").read_text().strip() or None
+        except OSError:
+            name = None
+        best = (used, total, name or "AMD GPU")
+    return best
+
+
+def _intel_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Intel discrete GPUs through xpu-smi (Arc, Data Center GPU)."""
+    out = _run_probe(["xpu-smi", "discovery", "-d", "0", "-j"])
+    if out is None:
+        return None
+    try:
+        found = json.loads(out)
+        total = int(found["memory_physical_size_byte"]) // (1024 * 1024)
+    except (ValueError, KeyError, TypeError):
+        return None
+    if total <= 0:
+        return None
+    used: Optional[int] = None
+    stats = _run_probe(["xpu-smi", "stats", "-d", "0", "-j"])
+    try:
+        for metric in json.loads(stats or "{}").get("device_level") or []:
+            if metric.get("metrics_type") == "XPUM_STATS_MEMORY_USED":
+                used = int(float(metric["value"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        used = None
+    return used, total, _as_text_core(found.get("device_name")) or "Intel GPU"
+
+
+def _apple_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Apple Silicon shares RAM with the GPU. Metal lets the GPU wire about 2/3
+    of it (3/4 above 36 GB) unless iogpu.wired_limit_mb raises the cap, so that is
+    the total. "Used" is left None: the caller takes Ollama's size_vram instead,
+    since system-wide memory use is not GPU use."""
+    if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+        return None
+    out = _run_probe(["sysctl", "-n", "hw.memsize"])
+    try:
+        ram = int((out or "").strip()) // (1024 * 1024)
+    except ValueError:
+        return None
+    if ram <= 0:
+        return None
+    try:
+        wired = int((_run_probe(["sysctl", "-n", "iogpu.wired_limit_mb"]) or "0").strip())
+    except ValueError:
+        wired = 0
+    total = wired if 0 < wired <= ram else (ram * 3 // 4 if ram > 36 * 1024 else ram * 2 // 3)
+    return None, total, "Apple GPU (unified memory)"
+
+
+def _dxgi_adapters() -> list[dict[str, Any]]:
+    """Every display adapter Windows knows, through DXGI (no vendor tool).
+
+    Each: name, vendor id, dedicated and shared memory (MB), software flag, and
+    the current local-memory use and budget (MB) where IDXGIAdapter3 exists
+    (Windows 10+). Empty off Windows or when DXGI cannot be loaded."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    def guid(text: str) -> GUID:
+        import uuid as _uuid
+
+        raw = _uuid.UUID(text).bytes_le
+        return GUID.from_buffer_copy(raw)
+
+    class DESC1(ctypes.Structure):
+        _fields_ = [("Description", ctypes.c_wchar * 128), ("VendorId", ctypes.c_uint),
+                    ("DeviceId", ctypes.c_uint), ("SubSysId", ctypes.c_uint), ("Revision", ctypes.c_uint),
+                    ("DedicatedVideoMemory", ctypes.c_size_t), ("DedicatedSystemMemory", ctypes.c_size_t),
+                    ("SharedSystemMemory", ctypes.c_size_t), ("LuidLow", wintypes.DWORD),
+                    ("LuidHigh", wintypes.LONG), ("Flags", ctypes.c_uint)]
+
+    class MEMINFO(ctypes.Structure):
+        _fields_ = [("Budget", ctypes.c_uint64), ("CurrentUsage", ctypes.c_uint64),
+                    ("AvailableForReservation", ctypes.c_uint64), ("CurrentReservation", ctypes.c_uint64)]
+
+    HRESULT = ctypes.c_long
+
+    def method(obj: ctypes.c_void_p, index: int, *argtypes: Any) -> Callable[..., int]:
+        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])
+
+    def release(obj: ctypes.c_void_p) -> None:
+        if obj:
+            vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(obj)
+
+    try:
+        dxgi = ctypes.WinDLL("dxgi")
+    except OSError:
+        return []
+    factory = ctypes.c_void_p()
+    create = dxgi.CreateDXGIFactory1
+    create.restype = HRESULT
+    create.argtypes = [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+    if create(ctypes.byref(guid("770aae78-f26f-4dba-a829-253c83d1b387")), ctypes.byref(factory)) != 0:
+        return []
+    found: list[dict[str, Any]] = []
+    mb = 1024 * 1024
+    try:
+        enum_adapters1 = method(factory, 12, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))
+        for index in range(16):
+            adapter = ctypes.c_void_p()
+            if enum_adapters1(factory, index, ctypes.byref(adapter)) != 0:
+                break                            # DXGI_ERROR_NOT_FOUND: no more adapters
+            try:
+                desc = DESC1()
+                if method(adapter, 10, ctypes.POINTER(DESC1))(adapter, ctypes.byref(desc)) != 0:
+                    continue
+                row: dict[str, Any] = {
+                    "name": desc.Description.strip() or None,
+                    "vendor": desc.VendorId,
+                    "dedicated_mb": desc.DedicatedVideoMemory // mb,
+                    "shared_mb": desc.SharedSystemMemory // mb,
+                    "software": bool(desc.Flags & 2),     # DXGI_ADAPTER_FLAG_SOFTWARE
+                    "used_mb": None,
+                    "budget_mb": None,
+                }
+                adapter3 = ctypes.c_void_p()
+                query = method(adapter, 0, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p))
+                if query(adapter, ctypes.byref(guid("645967a4-1392-4310-a798-8053ce3e93fd")),
+                         ctypes.byref(adapter3)) == 0:
+                    try:
+                        info = MEMINFO()
+                        memory = method(adapter3, 14, ctypes.c_uint, ctypes.c_int, ctypes.POINTER(MEMINFO))
+                        if memory(adapter3, 0, 0, ctypes.byref(info)) == 0:   # node 0, local segment
+                            row["used_mb"] = int(info.CurrentUsage // mb)
+                            row["budget_mb"] = int(info.Budget // mb)
+                    finally:
+                        release(adapter3)
+                found.append(row)
+            finally:
+                release(adapter)
+    finally:
+        release(factory)
+    return found
+
+
+def _pick_dxgi_adapter(adapters: Iterable[Mapping[str, Any]]) -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """The adapter models would run on, from _dxgi_adapters(): the hardware one
+    with the most dedicated memory. A discrete card (1 GB or more of its own)
+    reports its real use; an integrated GPU, which borrows system RAM, reports
+    the shared size with used=None, as Apple unified memory does."""
+    # Microsoft's Basic Render Driver (vendor 0x1414) is the CPU rasterizer of a
+    # VM or a machine without a GPU driver; on a Windows CI runner it does NOT
+    # carry the software flag, and would otherwise pass for 8 GB of shared VRAM.
+    hardware = [a for a in adapters
+                if not a.get("software") and int(a.get("vendor") or 0) != _DXGI_MICROSOFT
+                and (a.get("dedicated_mb") or a.get("shared_mb"))]
+    if not hardware:
+        return None
+    best = max(hardware, key=lambda a: (int(a.get("dedicated_mb") or 0), int(a.get("shared_mb") or 0)))
+    dedicated = int(best.get("dedicated_mb") or 0)
+    vendor = _DXGI_VENDORS.get(int(best.get("vendor") or 0), "GPU")
+    name = _as_text_core(best.get("name")) or vendor
+    if dedicated >= 1024:
+        used = best.get("used_mb")
+        return (int(used) if used is not None else None), dedicated, name
+    shared = int(best.get("shared_mb") or 0) + dedicated
+    if shared < 1024:
+        return None
+    return None, shared, f"{name} (shared memory)"
+
+
+_DXGI_VENDORS = {0x10DE: "NVIDIA GPU", 0x1002: "AMD GPU", 0x1022: "AMD GPU", 0x8086: "Intel GPU"}
+_DXGI_MICROSOFT = 0x1414
+
+
+def _windows_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Any vendor on Windows through DXGI; nvidia-smi still goes first."""
+    return _pick_dxgi_adapter(_dxgi_adapters())
+
+
+def _gpu_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """(used MB or None, total MB, name) of the GPU models would run on."""
+    probes = [_nvidia_memory]
+    if os.name != "nt":
+        probes += [_amd_memory, _intel_memory, _apple_memory]
+    else:
+        probes += [_intel_memory, _windows_memory]
+    for probe in probes:
+        try:
+            found = probe()
+        except Exception:
+            found = None
+        if found is not None:
+            return found
+    return None
+
+
+def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
+    """(used, total) MB of the GPU, or (None, None) without one we can read.
+
+    NVIDIA (nvidia-smi), AMD (amdgpu sysfs, Linux), Intel (xpu-smi), any
+    vendor on Windows through DXGI, and Apple unified memory. Apple and
+    integrated GPUs on Windows report used=None: there the caller shows the
+    size Ollama itself has in GPU memory.
+    """
+    found = _gpu_memory()
+    return (found[0], found[1]) if found else (None, None)
+
+
+def gpu_name() -> Optional[str]:
+    found = _gpu_memory()
+    return found[2] if found else None
+
+
+def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optional[int]) -> str:
+    """'Fits' / 'Tight' / 'Too big' / '' for an installed model's real file size.
+
+    Compares the on-disk size (what Ollama loads) with headroom for the KV
+    cache against VRAM, else RAM. '' means there is nothing honest to say.
+    """
+    if not size_bytes:
+        return ""
+    need_mb = size_bytes / (1024 * 1024) * 1.2
+    budget = vram_mb or (int(ram_mb * 0.85) if ram_mb else 0)
+    if not budget:
+        return ""
+    if need_mb <= budget:
+        return "Fits"
+    if need_mb <= budget * 1.35:
+        return "Tight"
+    return "Too big"
+
+
+def format_gb(mb: Optional[float]) -> str:
+    if mb is None:
+        return "?"
+    return f"{mb / 1024:.1f}"
+
+
+@dataclass(frozen=True)
+class ServerStart:
+    label: str                 # "the ollama system service", shown to the person
+    argv: tuple[str, ...]
+    waits: bool                # True: the command returns when done; False: it is the server
+    manual: str = ""           # what to run by hand when this way fails
+
+
+def model_server_start_plan(
+    platform: str = "",
+    which: Callable[[str], Optional[str]] = shutil.which,
+    exists: Callable[[str], bool] = os.path.exists,
+    unit_exists: Optional[Callable[[tuple[str, ...]], bool]] = None,
+) -> list[ServerStart]:
+    """How to start the local Ollama this machine already has, best first.
+
+    The installers set Ollama up as a service (Linux: the system ollama.service
+    with its own model store) or as the desktop app (macOS, Windows). Starting
+    `ollama serve` as the user instead would come up with an empty model list,
+    so when a service exists that is the only way offered.
+    """
+    platform = platform or sys.platform
+    if unit_exists is None:
+        def unit_exists(scope: tuple[str, ...]) -> bool:
+            try:
+                return subprocess.run(["systemctl", *scope, "cat", "ollama.service"],
+                                      capture_output=True, timeout=10).returncode == 0
+            except Exception:
+                return False
+    plan: list[ServerStart] = []
+    if platform.startswith("linux") and which("systemctl"):
+        if unit_exists(("--user",)):
+            return [ServerStart("your ollama user service",
+                                ("systemctl", "--user", "start", "ollama.service"), True,
+                                "systemctl --user start ollama")]
+        if unit_exists(()):
+            # Root-owned: polkit asks for a password where a desktop agent runs.
+            return [ServerStart("the ollama system service",
+                                ("systemctl", "start", "ollama.service"), True,
+                                "sudo systemctl start ollama")]
+    elif platform == "darwin":
+        for app in ("/Applications/Ollama.app", os.path.expanduser("~/Applications/Ollama.app")):
+            if exists(app):
+                plan.append(ServerStart("the Ollama app", ("open", "-g", "-a", app), True))
+                break
+    elif platform == "win32":
+        tray = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama app.exe")
+        if os.environ.get("LOCALAPPDATA") and exists(tray):
+            plan.append(ServerStart("the Ollama app", (tray,), False))
+    program = which("ollama")
+    if program:
+        plan.append(ServerStart("ollama serve", (program, "serve"), False, "ollama serve"))
+    return plan
+
+
+def node_version() -> Optional[str]:
+    """`node --version` without a console window, or None when Node is missing."""
+    executable = shutil.which("node")
+    if not executable:
+        return None
+    try:
+        output = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                timeout=10, creationflags=_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = output.stdout.strip()
+    return version or None
+
+
+def node_supports_agent(version: Optional[str]) -> bool:
+    """Qwen Code needs Node 22.19+ (or 24+)."""
+    match = re.match(r"v?(\d+)\.(\d+)", _as_text_core(version))
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return major >= 24 or (major == 22 and minor >= 19) or major == 23
+'@
+$desktopRemote = @'
+"""Remote compute: the model runs on another machine reached over SSH.
+
+Part of onionmind_desktop_core, which re-exports every name defined here.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+import re
+import shutil
+import subprocess
+from typing import Any, Callable, Mapping, Optional
+
+from onionmind_desktop_vault import (
+    _NO_WINDOW,
+    _as_text_core,
+)
+
+
+# --- Remote compute over SSH -------------------------------------------
+#
+# The model runs on another machine the user can SSH into; everything else -
+# files, agent, terminal, Tor - stays here. An `ssh -L` tunnel lands that
+# machine's Ollama on a free loopback port, so the core still only ever talks
+# to 127.0.0.1 and the agent's loopback-only socket shims need no exception.
+# The SSH connection itself is direct, not Tor: it is the user's own server,
+# opened only when they press Connect (or opted into connecting at launch).
+
+REMOTE_OLLAMA_PORT = 11434
+
+_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+(?::(\d{1,5}))?")
+
+
+@dataclass(frozen=True)
+class SshTarget:
+    destination: str              # user@host or a ~/.ssh/config alias
+    port: Optional[int] = None
+
+    @property
+    def label(self) -> str:
+        return self.destination if self.port is None else f"{self.destination}:{self.port}"
+
+
+def parse_ssh_target(value: Any) -> Optional[SshTarget]:
+    """`user@host`, `host`, an ssh-config alias, optionally `:port`; else None.
+
+    Deliberately narrow: no spaces, no leading dash (it would be read as an
+    ssh option), nothing a shell or ssh would interpret.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith("-"):
+        return None
+    match = _SSH_TARGET.fullmatch(text)
+    if match is None:
+        return None
+    if match.group(1) is None:
+        return SshTarget(text)
+    port = int(match.group(1))
+    if not 0 < port < 65536:
+        return None
+    return SshTarget(text.rsplit(":", 1)[0], port)
+
+
+def ssh_tunnel_argv(target: SshTarget, local_port: int,
+                    remote_port: int = REMOTE_OLLAMA_PORT,
+                    executable: str = "ssh") -> list[str]:
+    """The exact `ssh` command: a forward only, no shell, no prompts."""
+    argv = [
+        executable, "-N", "-T",
+        # A GUI has nowhere to type a password or accept a host key, so ssh
+        # must fail fast instead of waiting on a prompt nobody sees.
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-L", f"127.0.0.1:{int(local_port)}:127.0.0.1:{int(remote_port)}",
+    ]
+    if target.port is not None:
+        argv += ["-p", str(target.port)]
+    return argv + ["--", target.destination]
+
+
+def describe_ssh_failure(stderr: str, target_label: str = "the server") -> str:
+    """ssh's last words, turned into the step that fixes them."""
+    text = _as_text_core(stderr)
+    lowered = text.lower()
+    if "permission denied" in lowered:
+        return (f"{target_label} refused the login. Onionmind cannot type a password: "
+                f"set up key login once with `ssh-copy-id {target_label}` "
+                "(or load your key into ssh-agent), then connect again.")
+    if "host key verification failed" in lowered or "no matching host key" in lowered:
+        return (f"{target_label}'s host key is not trusted yet. Run `ssh {target_label}` "
+                "once in a terminal to check and accept it, then connect again.")
+    if "could not resolve hostname" in lowered:
+        return f"Could not find {target_label}. Check the name, or your VPN/Tailscale."
+    if "connection refused" in lowered and "channel" not in lowered:
+        return f"{target_label} refused the SSH connection. Is sshd running there?"
+    if "timed out" in lowered:
+        return f"{target_label} did not answer in time."
+    if "forwarding" in lowered and ("failed" in lowered or "denied" in lowered):
+        return f"{target_label} does not allow port forwarding (AllowTcpForwarding)."
+    last = [line.strip() for line in text.splitlines() if line.strip()]
+    return last[-1] if last else f"ssh to {target_label} exited without saying why."
+
+
+def load_remote_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The `remote_compute` block of settings.json, validated; junk is dropped."""
+    stored = settings.get("remote_compute") if isinstance(settings, Mapping) else None
+    stored = stored if isinstance(stored, Mapping) else {}
+    target = parse_ssh_target(stored.get("host"))
+    return {
+        "host": target.label if target else "",
+        "autoconnect": bool(stored.get("autoconnect")) and target is not None,
+    }
+
+
+def _free_loopback_port() -> int:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _ollama_version(port: int, timeout: float = 5.0) -> Optional[str]:
+    """The Ollama version answering on 127.0.0.1:<port>, or None."""
+    import urllib.request
+    # No proxy handler: this is loopback, and an HTTP(S)_PROXY in the
+    # environment must not carry it anywhere else.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{int(port)}/api/version", timeout=timeout) as reply:
+            data = json.loads(reply.read().decode("utf-8", errors="replace") or "{}")
+    except Exception:
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version else None
+
+
+class SshTunnel:
+    """One `ssh -L` child forwarding a remote Ollama to a local loopback port.
+
+    `start()` blocks until Ollama answers through the tunnel (or raises with
+    an actionable message), so callers run it off the UI thread.
+    """
+
+    def __init__(self, target: SshTarget, *, remote_port: int = REMOTE_OLLAMA_PORT,
+                 executable: str = "ssh", ready_timeout: float = 25.0,
+                 popen: Callable[..., Any] = subprocess.Popen,
+                 which: Callable[[str], Optional[str]] = shutil.which) -> None:
+        self.target = target
+        self.remote_port = remote_port
+        self.executable = executable
+        self.ready_timeout = ready_timeout
+        self._popen = popen
+        self._which = which
+        self.process: Any = None
+        self.local_port: Optional[int] = None
+        self.version: Optional[str] = None
+        self.cancelled = False
+        self._stderr_tail: list[str] = []
+
+    @property
+    def alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def _drain(self, stream: Any) -> None:
+        # ssh keeps a pipe it may write to for hours; reading it forever means
+        # a chatty server can never fill the pipe and stall the tunnel.
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line:
+                self._stderr_tail = (self._stderr_tail + [line])[-20:]
+
+    def last_error(self) -> str:
+        return describe_ssh_failure("\n".join(self._stderr_tail), self.target.label)
+
+    def start(self) -> int:
+        import threading
+        import time
+
+        executable = self._which(self.executable)
+        if executable is None:
+            raise RuntimeError(
+                "No `ssh` command found. Install the OpenSSH client "
+                "(Windows: Settings > Optional features > OpenSSH Client)."
+            )
+        self.stop()
+        port = _free_loopback_port()
+        process = self._popen(
+            ssh_tunnel_argv(self.target, port, self.remote_port, executable),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_NO_WINDOW,
+        )
+        self.process = process
+        self._stderr_tail = []
+        if getattr(process, "stderr", None) is not None:
+            threading.Thread(target=self._drain, args=(process.stderr,), daemon=True).start()
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            if self.cancelled:
+                self.process = process
+                self.stop()
+                raise RuntimeError("Cancelled.")
+            if process.poll() is not None:
+                time.sleep(0.1)          # let the drain thread catch ssh's last line
+                self.process = None
+                raise RuntimeError(self.last_error())
+            version = _ollama_version(port, timeout=2.0)
+            if version:
+                self.local_port, self.version = port, version
+                return port
+            # ssh logs "channel N: open failed: connect failed" when the login
+            # worked but nothing listens on the far side - no need to wait out
+            # the whole timeout to say so.
+            if any("open failed" in line for line in self._stderr_tail):
+                break
+            time.sleep(0.4)
+        connected = self.alive
+        self.stop()
+        if connected:
+            raise RuntimeError(
+                f"Connected to {self.target.label}, but no Ollama answered on its "
+                f"127.0.0.1:{self.remote_port}. Start it there (`systemctl status ollama`)."
+            )
+        raise RuntimeError(self.last_error())
+
+    def cancel(self) -> None:
+        """Stop from another thread, including mid-`start()` - nothing is left running."""
+        self.cancelled = True
+        self.stop()
+
+    def stop(self) -> None:
+        process, self.process = self.process, None
+        self.local_port = self.version = None
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
+'@
 $desktopCorePath = Join-Path $Dir 'onionmind_desktop_core.py'
 $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText($desktopCorePath, $desktopCore, $Utf8NoBom)
@@ -19621,6 +19864,11 @@ $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_widgets.py'), $desktopWidgets, $Utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_panes.py'), $desktopPanes, $Utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_dialogs.py'), $desktopDialogs, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_vault.py'), $desktopVault, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_netlog.py'), $desktopNetlog, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_update.py'), $desktopUpdate, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_hardware.py'), $desktopHardware, $Utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $Dir 'onionmind_desktop_remote.py'), $desktopRemote, $Utf8NoBom)
 
 $desktopEnv = Join-Path $Dir 'desktop-env'
 $desktopMarker = Join-Path $desktopEnv '.onionmind-desktop-ready'

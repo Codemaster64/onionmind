@@ -20,6 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import onionmind_desktop_core as core
+import onionmind_desktop_vault as vault_part
 
 
 class MemoryKeystore:
@@ -50,9 +51,10 @@ class VaultTests(unittest.TestCase):
         self.store = MemoryKeystore()
         # Every vault in these tests uses the in-memory store, also when it is
         # looked up again by name from vault.json.
-        patcher = mock.patch.object(core, "keystore_for", return_value=self.store)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for module in (core, vault_part):               # open_vault looks it up in its own module
+            patcher = mock.patch.object(module, "keystore_for", return_value=self.store)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self.temp.cleanup)
 
     def no_plaintext_anywhere(self) -> None:
@@ -455,6 +457,7 @@ class VaultDesktopTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "desktop"
         self.store = MemoryKeystore()
         for target, name, value in ((core, "keystore_for", mock.Mock(return_value=self.store)),
+                                    (vault_part, "keystore_for", mock.Mock(return_value=self.store)),
                                     (ui, "desktop_data_root", mock.Mock(return_value=self.root))):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -536,6 +539,7 @@ class VaultDesktopTests(unittest.TestCase):
         other_root = Path(self.temp.name) / "machine-b"
         other_store = MemoryKeystore()
         with mock.patch.object(core, "keystore_for", return_value=other_store), \
+                mock.patch.object(vault_part, "keystore_for", return_value=other_store), \
                 mock.patch.object(ui, "desktop_data_root", return_value=other_root):
             other = self.window(core.open_vault(other_root, keystore=other_store))
             other_dialog = ui.SettingsDialog(other.data_root, "limitation", None, other)

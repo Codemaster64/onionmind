@@ -30,7 +30,7 @@ if [ "$AUDIT" = 1 ]; then
   else
     printf '  %-30s %s\n' "installed revision" "unknown"
   fi
-  for name in onionmind.py onionmind_desktop_core.py onionmind_desktop.py onionmind_desktop_theme.py onionmind_desktop_widgets.py onionmind_desktop_panes.py onionmind_desktop_dialogs.py dsh-onionmind-tor-search.js dsh-onionmind-tor.patch.yml; do
+  for name in onionmind.py onionmind_desktop_core.py onionmind_desktop.py onionmind_desktop_theme.py onionmind_desktop_widgets.py onionmind_desktop_panes.py onionmind_desktop_dialogs.py onionmind_desktop_vault.py onionmind_desktop_netlog.py onionmind_desktop_update.py onionmind_desktop_hardware.py onionmind_desktop_remote.py dsh-onionmind-tor-search.js dsh-onionmind-tor.patch.yml; do
     [ -s "$DIR/$name" ] && state=present || state=MISSING
     printf '  %-30s %s\n' "$name" "$state"
   done
@@ -64,7 +64,7 @@ echo "Direct-network plan (nothing has contacted the network yet):"
 echo "  - https://api.github.com/repos/Codemaster64/onionmind/commits/main"
 echo "      (or https://github.com/Codemaster64/onionmind.git/info/refs when the API is rate-limited)"
 echo "      resolve one immutable source revision"
-echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/{onionmind.py,onionmind_desktop_core.py,onionmind_desktop.py,onionmind_desktop_theme.py,onionmind_desktop_widgets.py,onionmind_desktop_panes.py,onionmind_desktop_dialogs.py,dsh-onionmind-tor-search.js,dsh-onionmind-tor.patch.yml}"
+echo "  - https://raw.githubusercontent.com/Codemaster64/onionmind/<resolved-commit>/{onionmind.py,onionmind_desktop_core.py,onionmind_desktop.py,onionmind_desktop_theme.py,onionmind_desktop_widgets.py,onionmind_desktop_panes.py,onionmind_desktop_dialogs.py,onionmind_desktop_vault.py,onionmind_desktop_netlog.py,onionmind_desktop_update.py,onionmind_desktop_hardware.py,onionmind_desktop_remote.py,dsh-onionmind-tor-search.js,dsh-onionmind-tor.patch.yml}"
 echo "      download only when the recorded local revision differs or files are missing"
 echo "  - https://pypi.org/simple/requests/, https://pypi.org/simple/pysocks/, https://pypi.org/simple/pyside6-essentials/, https://pypi.org/simple/cryptography/"
 echo "      repair the isolated desktop runtime only when local version/import checks fail"
@@ -126,6 +126,11 @@ FILES=(
   onionmind_desktop_widgets.py
   onionmind_desktop_panes.py
   onionmind_desktop_dialogs.py
+  onionmind_desktop_vault.py
+  onionmind_desktop_netlog.py
+  onionmind_desktop_update.py
+  onionmind_desktop_hardware.py
+  onionmind_desktop_remote.py
   dsh-onionmind-tor-search.js
   dsh-onionmind-tor.patch.yml
 )
@@ -186,7 +191,17 @@ PY
       "$STAGE/onionmind_desktop_theme.py" \
       "$STAGE/onionmind_desktop_widgets.py" \
       "$STAGE/onionmind_desktop_panes.py" \
-      "$STAGE/onionmind_desktop_dialogs.py"
+      "$STAGE/onionmind_desktop_dialogs.py" \
+    "$STAGE/onionmind_desktop_vault.py" \
+    "$STAGE/onionmind_desktop_netlog.py" \
+    "$STAGE/onionmind_desktop_update.py" \
+    "$STAGE/onionmind_desktop_hardware.py" \
+    "$STAGE/onionmind_desktop_remote.py" \
+      "$STAGE/onionmind_desktop_vault.py" \
+      "$STAGE/onionmind_desktop_netlog.py" \
+      "$STAGE/onionmind_desktop_update.py" \
+      "$STAGE/onionmind_desktop_hardware.py" \
+      "$STAGE/onionmind_desktop_remote.py"
   else
     echo "Python 3.10+ is required for the native workbench; the classic UI will remain active." >&2
   fi
@@ -332,7 +347,7 @@ if [ "\$audit" = 1 ]; then
   echo "Onionmind updater local audit (no network or writes)"
   echo "  install directory: \$DIR"
   [ -f "\$DIR/.onionmind-revision" ] && echo "  installed revision: \$(cat "\$DIR/.onionmind-revision")" || echo "  installed revision: unknown"
-  for f in onionmind.py onionmind_desktop_core.py onionmind_desktop.py onionmind_desktop_theme.py onionmind_desktop_widgets.py onionmind_desktop_panes.py onionmind_desktop_dialogs.py dsh-onionmind-tor-search.js dsh-onionmind-tor.patch.yml; do
+  for f in onionmind.py onionmind_desktop_core.py onionmind_desktop.py onionmind_desktop_theme.py onionmind_desktop_widgets.py onionmind_desktop_panes.py onionmind_desktop_dialogs.py onionmind_desktop_vault.py onionmind_desktop_netlog.py onionmind_desktop_update.py onionmind_desktop_hardware.py onionmind_desktop_remote.py dsh-onionmind-tor-search.js dsh-onionmind-tor.patch.yml; do
     [ -s "\$DIR/\$f" ] && echo "  \$f: present" || echo "  \$f: MISSING"
   done
   echo "  remote freshness: UNKNOWN by design"
