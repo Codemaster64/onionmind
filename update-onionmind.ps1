@@ -130,7 +130,9 @@ function Resolve-MainRevision {
     return ''
   }
 }
-$revision = Resolve-MainRevision
+# ONIONMIND_UPDATE_REVISION pins one commit instead of main (CI installs the
+# pull request's own commit, whose new files main does not have yet).
+$revision = if ($env:ONIONMIND_UPDATE_REVISION) { $env:ONIONMIND_UPDATE_REVISION } else { Resolve-MainRevision }
 if ($revision -notmatch '^[0-9a-fA-F]{40}$') { throw 'Could not resolve a fixed update revision.' }
 if ($localRevision -eq $revision -and $present.Count -eq $files.Count -and $desktopDependenciesReady) {
   Write-Host "Onionmind sources are already current at $revision."

@@ -115,7 +115,9 @@ resolve_main() {
   curl -fsSL 'https://github.com/Codemaster64/onionmind.git/info/refs?service=git-upload-pack' |
     python3 -c 'import re,sys; m=re.search(rb"([0-9a-f]{40}) refs/heads/main(?![-/\w])", sys.stdin.buffer.read()); print(m.group(1).decode() if m else "")'
 }
-revision=$(resolve_main)
+# ONIONMIND_UPDATE_REVISION pins one commit instead of main (CI installs the
+# pull request's own commit, whose new files main does not have yet).
+revision=${ONIONMIND_UPDATE_REVISION:-$(resolve_main)}
 [[ "$revision" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Could not resolve a fixed update revision." >&2; exit 1; }
 base="https://raw.githubusercontent.com/Codemaster64/onionmind/$revision"
 FILES=(
