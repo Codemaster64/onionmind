@@ -4103,13 +4103,142 @@ def _apple_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
     return None, total, "Apple GPU (unified memory)"
 
 
+def _dxgi_adapters() -> list[dict[str, Any]]:
+    """Every display adapter Windows knows, through DXGI (no vendor tool).
+
+    Each: name, vendor id, dedicated and shared memory (MB), software flag, and
+    the current local-memory use and budget (MB) where IDXGIAdapter3 exists
+    (Windows 10+). Empty off Windows or when DXGI cannot be loaded."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    def guid(text: str) -> GUID:
+        import uuid as _uuid
+
+        raw = _uuid.UUID(text).bytes_le
+        return GUID.from_buffer_copy(raw)
+
+    class DESC1(ctypes.Structure):
+        _fields_ = [("Description", ctypes.c_wchar * 128), ("VendorId", ctypes.c_uint),
+                    ("DeviceId", ctypes.c_uint), ("SubSysId", ctypes.c_uint), ("Revision", ctypes.c_uint),
+                    ("DedicatedVideoMemory", ctypes.c_size_t), ("DedicatedSystemMemory", ctypes.c_size_t),
+                    ("SharedSystemMemory", ctypes.c_size_t), ("LuidLow", wintypes.DWORD),
+                    ("LuidHigh", wintypes.LONG), ("Flags", ctypes.c_uint)]
+
+    class MEMINFO(ctypes.Structure):
+        _fields_ = [("Budget", ctypes.c_uint64), ("CurrentUsage", ctypes.c_uint64),
+                    ("AvailableForReservation", ctypes.c_uint64), ("CurrentReservation", ctypes.c_uint64)]
+
+    HRESULT = ctypes.c_long
+
+    def method(obj: ctypes.c_void_p, index: int, *argtypes: Any) -> Callable[..., int]:
+        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        return ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])
+
+    def release(obj: ctypes.c_void_p) -> None:
+        if obj:
+            vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(obj)
+
+    try:
+        dxgi = ctypes.WinDLL("dxgi")
+    except OSError:
+        return []
+    factory = ctypes.c_void_p()
+    create = dxgi.CreateDXGIFactory1
+    create.restype = HRESULT
+    create.argtypes = [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+    if create(ctypes.byref(guid("770aae78-f26f-4dba-a829-253c83d1b387")), ctypes.byref(factory)) != 0:
+        return []
+    found: list[dict[str, Any]] = []
+    mb = 1024 * 1024
+    try:
+        enum_adapters1 = method(factory, 12, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))
+        for index in range(16):
+            adapter = ctypes.c_void_p()
+            if enum_adapters1(factory, index, ctypes.byref(adapter)) != 0:
+                break                            # DXGI_ERROR_NOT_FOUND: no more adapters
+            try:
+                desc = DESC1()
+                if method(adapter, 10, ctypes.POINTER(DESC1))(adapter, ctypes.byref(desc)) != 0:
+                    continue
+                row: dict[str, Any] = {
+                    "name": desc.Description.strip() or None,
+                    "vendor": desc.VendorId,
+                    "dedicated_mb": desc.DedicatedVideoMemory // mb,
+                    "shared_mb": desc.SharedSystemMemory // mb,
+                    "software": bool(desc.Flags & 2),     # DXGI_ADAPTER_FLAG_SOFTWARE
+                    "used_mb": None,
+                    "budget_mb": None,
+                }
+                adapter3 = ctypes.c_void_p()
+                query = method(adapter, 0, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p))
+                if query(adapter, ctypes.byref(guid("645967a4-1392-4310-a798-8053ce3e93fd")),
+                         ctypes.byref(adapter3)) == 0:
+                    try:
+                        info = MEMINFO()
+                        memory = method(adapter3, 14, ctypes.c_uint, ctypes.c_int, ctypes.POINTER(MEMINFO))
+                        if memory(adapter3, 0, 0, ctypes.byref(info)) == 0:   # node 0, local segment
+                            row["used_mb"] = int(info.CurrentUsage // mb)
+                            row["budget_mb"] = int(info.Budget // mb)
+                    finally:
+                        release(adapter3)
+                found.append(row)
+            finally:
+                release(adapter)
+    finally:
+        release(factory)
+    return found
+
+
+def _pick_dxgi_adapter(adapters: Iterable[Mapping[str, Any]]) -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """The adapter models would run on, from _dxgi_adapters(): the hardware one
+    with the most dedicated memory. A discrete card (1 GB or more of its own)
+    reports its real use; an integrated GPU, which borrows system RAM, reports
+    the shared size with used=None, as Apple unified memory does."""
+    # Microsoft's Basic Render Driver (vendor 0x1414) is the CPU rasterizer of a
+    # VM or a machine without a GPU driver; on a Windows CI runner it does NOT
+    # carry the software flag, and would otherwise pass for 8 GB of shared VRAM.
+    hardware = [a for a in adapters
+                if not a.get("software") and int(a.get("vendor") or 0) != _DXGI_MICROSOFT
+                and (a.get("dedicated_mb") or a.get("shared_mb"))]
+    if not hardware:
+        return None
+    best = max(hardware, key=lambda a: (int(a.get("dedicated_mb") or 0), int(a.get("shared_mb") or 0)))
+    dedicated = int(best.get("dedicated_mb") or 0)
+    vendor = _DXGI_VENDORS.get(int(best.get("vendor") or 0), "GPU")
+    name = _as_text_core(best.get("name")) or vendor
+    if dedicated >= 1024:
+        used = best.get("used_mb")
+        return (int(used) if used is not None else None), dedicated, name
+    shared = int(best.get("shared_mb") or 0) + dedicated
+    if shared < 1024:
+        return None
+    return None, shared, f"{name} (shared memory)"
+
+
+_DXGI_VENDORS = {0x10DE: "NVIDIA GPU", 0x1002: "AMD GPU", 0x1022: "AMD GPU", 0x8086: "Intel GPU"}
+_DXGI_MICROSOFT = 0x1414
+
+
+def _windows_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
+    """Any vendor on Windows through DXGI; nvidia-smi still goes first."""
+    return _pick_dxgi_adapter(_dxgi_adapters())
+
+
 def _gpu_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
     """(used MB or None, total MB, name) of the GPU models would run on."""
     probes = [_nvidia_memory]
     if os.name != "nt":
         probes += [_amd_memory, _intel_memory, _apple_memory]
     else:
-        probes.append(_intel_memory)
+        probes += [_intel_memory, _windows_memory]
     for probe in probes:
         try:
             found = probe()
@@ -4123,10 +4252,10 @@ def _gpu_memory() -> Optional[tuple[Optional[int], int, Optional[str]]]:
 def gpu_memory_mb() -> tuple[Optional[int], Optional[int]]:
     """(used, total) MB of the GPU, or (None, None) without one we can read.
 
-    NVIDIA (nvidia-smi), AMD (amdgpu sysfs, Linux), Intel (xpu-smi) and Apple
-    unified memory. Apple reports used=None: there the caller shows the size
-    Ollama itself has in GPU memory. AMD and integrated Intel on Windows still
-    report nothing, and the UI says "unknown".
+    NVIDIA (nvidia-smi), AMD (amdgpu sysfs, Linux), Intel (xpu-smi), any
+    vendor on Windows through DXGI, and Apple unified memory. Apple and
+    integrated GPUs on Windows report used=None: there the caller shows the
+    size Ollama itself has in GPU memory.
     """
     found = _gpu_memory()
     return (found[0], found[1]) if found else (None, None)

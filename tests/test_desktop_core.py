@@ -1098,6 +1098,42 @@ class GpuMemoryProbeTests(unittest.TestCase):
                 # 32 GB machine: 2/3 of RAM, no used figure of its own.
                 self.assertEqual(core._apple_memory(), (None, 21_845, "Apple GPU (unified memory)"))
 
+    def test_windows_dxgi_picks_the_real_gpu(self) -> None:
+        basic = {"name": "Microsoft Basic Render Driver", "vendor": 0x1414, "dedicated_mb": 0,
+                 "shared_mb": 8_000, "software": True, "used_mb": None, "budget_mb": None}
+        radeon = {"name": "AMD Radeon RX 6600", "vendor": 0x1002, "dedicated_mb": 8_176,
+                  "shared_mb": 8_000, "software": False, "used_mb": 1_234, "budget_mb": 7_600}
+        iris = {"name": "Intel(R) Iris(R) Xe Graphics", "vendor": 0x8086, "dedicated_mb": 128,
+                "shared_mb": 7_900, "software": False, "used_mb": 300, "budget_mb": 7_000}
+        # A discrete card reports its own memory and its real use.
+        self.assertEqual(core._pick_dxgi_adapter([basic, iris, radeon]), (1_234, 8_176, "AMD Radeon RX 6600"))
+        # An integrated GPU borrows RAM: the shared size, no "used" of its own.
+        self.assertEqual(core._pick_dxgi_adapter([basic, iris]),
+                         (None, 8_028, "Intel(R) Iris(R) Xe Graphics (shared memory)"))
+        # The software rasterizer alone (a VM, a CI runner) is no GPU - also
+        # without the software flag, as Windows CI really reports it.
+        self.assertIsNone(core._pick_dxgi_adapter([basic]))
+        self.assertIsNone(core._pick_dxgi_adapter([dict(basic, software=False)]))
+        self.assertIsNone(core._pick_dxgi_adapter([]))
+
+    @unittest.skipUnless(os.name == "nt", "DXGI exists only on Windows")
+    def test_dxgi_runs_for_real_on_windows(self) -> None:
+        # Calls into dxgi.dll through ctypes: every adapter comes back with its
+        # fields, and nothing crashes on a runner with only the software one.
+        adapters = core._dxgi_adapters()
+        self.assertIsInstance(adapters, list)
+        self.assertTrue(adapters, "Windows always lists at least one adapter")
+        for adapter in adapters:
+            self.assertIn("dedicated_mb", adapter)
+            self.assertIsInstance(adapter["software"], bool)
+        print("DXGI adapters:", adapters)
+        if all(a["vendor"] == 0x1414 for a in adapters):   # a runner: no GPU at all
+            self.assertIsNone(core._pick_dxgi_adapter(adapters))
+
+    def test_off_windows_dxgi_reports_nothing(self) -> None:
+        if os.name != "nt":
+            self.assertEqual(core._dxgi_adapters(), [])
+
     def test_first_vendor_found_wins_and_absence_is_none(self) -> None:
         # Intel is probed on every platform (AMD and Apple only off Windows).
         with mock.patch.object(core, "_nvidia_memory", return_value=None), \
