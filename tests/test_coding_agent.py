@@ -150,6 +150,20 @@ class TorOnlyTests(unittest.TestCase):
             onionmind._dial("127.0.0.1", 11434)
         conn.assert_called_once()
 
+    def test_a_slow_local_model_reply_is_not_cut_off(self):
+        # The connect timeout used to stay on the socket and kill any model
+        # reply slower than 30 s to start.
+        import socket
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        try:
+            s = onionmind._dial("127.0.0.1", server.getsockname()[1])
+            self.assertIsNone(s.gettimeout())
+            s.close()
+        finally:
+            server.close()
+
 
 class ContextTests(unittest.TestCase):
     """The context IS the budget. The installed chat model is num_ctx 8192, most

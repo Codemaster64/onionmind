@@ -1192,7 +1192,12 @@ def _dial(host, port):
         # local port that forwards off this machine would ride exactly this path
         # and the log is the only place it would show up.
         _net_log(f"local    {host}:{port}")
-        return socket.create_connection((host, port), 30)
+        s = socket.create_connection((host, port), 30)
+        # 30 s is for connecting only. Left on, it cut every local model reply
+        # that took longer to start (a 27B model reading the agent's ~15k-token
+        # prompt): the agent retried forever and Ollama logged 500s.
+        s.settimeout(None)
+        return s
     if not _port:
         # Without a pinned port PySocks quietly defaults to 1080, which is
         # whatever happens to be listening there. Refuse instead.

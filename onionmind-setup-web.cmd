@@ -285,7 +285,7 @@ Say "Installing Python deps (requests, PySocks)"
 & $py -m pip install --quiet --disable-pip-version-check requests PySocks
 if ($LASTEXITCODE -ne 0) { throw "Python dependencies could not be installed." }
 
-$search = Get-OnionmindSource 'onionmind.py' '6ca9ed637f428de36c8976f3ac2e4a9c9bf88361b602daf2b5e7fd6a270317a9'
+$search = Get-OnionmindSource 'onionmind.py' '216669d5435c89605eef9a1d56413afa8bb340a22c7919ccdf9e1dd3e127df82'
 # Point the tool at whichever model was installed - on the fast tier the model is NOT
 # named inferno, and the embedded default would reference a model that does
 # not exist. Plain .Replace(), not a regex: this file has CRLF endings and a $
