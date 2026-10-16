@@ -289,6 +289,31 @@ class VaultTests(unittest.TestCase):
 
 
 @unittest.skipUnless(core.encryption_available(), "the cryptography package is not installed")
+class WipeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows feature")
+    def test_wiping_a_project_never_follows_a_junction_out_of_it(self) -> None:
+        # is_symlink() is False for a junction and os.walk walked into one,
+        # so the wipe shredded whatever a project's junction pointed at.
+        with tempfile.TemporaryDirectory() as temporary:
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            (outside / "CANARY.txt").write_text("must survive", encoding="utf-8")
+            project = Path(temporary) / "project"
+            (project / "src").mkdir(parents=True)
+            (project / "src" / "code.py").write_text("print(1)", encoding="utf-8")
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(project / "src" / "linked"), str(outside)],
+                           check=True, capture_output=True)
+            vault_part.shred_tree(project)
+            self.assertFalse(project.exists())
+            self.assertTrue((outside / "CANARY.txt").exists())
+            # A junction handed in as the root is removed, not walked.
+            link = Path(temporary) / "root-link"
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+            vault_part.shred_tree(link)
+            self.assertFalse(link.exists())
+            self.assertTrue((outside / "CANARY.txt").exists())
+
+
 class ExportTests(unittest.TestCase):
     PASSWORD = "correct horse battery"
 

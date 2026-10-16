@@ -197,26 +197,65 @@ def shred_file(path: PathInput) -> bool:
     return False
 
 
+def _is_link(path: Path) -> bool:
+    """A symlink or any other reparse point - a Windows junction above all.
+
+    is_symlink() is False for a junction and os.walk walks into one, so the
+    wipe followed a junction in a project folder and shredded whatever it
+    pointed at, outside the project.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & reparse)
+
+
+def _drop_link(path: Path) -> bool:
+    """Remove the link itself; its target is never touched."""
+    for remove in (os.rmdir, os.unlink):     # rmdir for a directory junction or link
+        try:
+            remove(path)
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def shred_tree(root: PathInput) -> int:
     """Shred every file under root and remove the directories. Returns the
     number of files removed; a directory that will not go is left behind
-    rather than failing the whole wipe."""
+    rather than failing the whole wipe. Links are removed, never followed."""
     base = Path(root)
-    if not base.exists() and not base.is_symlink():
+    if not base.exists() and not base.is_symlink() and not _is_link(base):
         return 0
-    if base.is_symlink() or base.is_file():
+    if _is_link(base):
+        return 1 if _drop_link(base) else 0
+    if base.is_file():
         return 1 if shred_file(base) else 0
-    removed = 0
-    for parent, directories, files in os.walk(base, topdown=False):
-        for name in files:
-            if shred_file(Path(parent) / name):
+
+    def walk(directory: Path) -> int:
+        removed = 0
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return 0
+        for entry in entries:
+            path = Path(entry.path)
+            if _is_link(path):
+                removed += 1 if _drop_link(path) else 0
+            elif entry.is_dir(follow_symlinks=False):
+                removed += walk(path)
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+            elif shred_file(path):
                 removed += 1
-        for name in directories:
-            entry = Path(parent) / name
-            try:
-                entry.unlink() if entry.is_symlink() else entry.rmdir()
-            except OSError:
-                pass
+        return removed
+
+    removed = walk(base)
     try:
         base.rmdir()
     except OSError:
