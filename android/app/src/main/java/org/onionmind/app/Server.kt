@@ -142,6 +142,9 @@ object Server {
             put("llama", ProcessManager.llamaReady())
             // ladder: our llama-server is running but not listening yet.
             put("llamaLoading", ProcessManager.llamaLoading())
+            // Only while a reply is being written; the page turns it into progress.
+            if (stopFlag != null && ProcessManager.llamaReady())
+                ProcessManager.llamaGenerated()?.let { put("generated", it) }
             put("freeRamMb", memory.availMem / (1024 * 1024))
             put("contextLimit", ContextWindow.TOKENS)
             put("features", JsonObject(flags.mapValues { JsonPrimitive(it.value) }))

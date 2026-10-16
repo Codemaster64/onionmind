@@ -331,7 +331,20 @@ const form = body => ({method:'POST',
 const errorText = err => err instanceof Error ? (err.message || String(err)) : String(err);
 // A cold first message spends ~30s loading the weights before a token appears.
 // Saying "thinking" for that is indistinguishable from a hang.
-const busyText = () => status.llama === false ? 'loading the model into memory…' : 'thinking locally…';
+// Replies are not streamed, so a reply that crawls looked exactly like a hang
+// (seen: 32 tokens in 14 minutes on a phone out of memory). Show the count,
+// the rate, and what helps when it is too slow to wait for.
+let genSeen = null;
+const busyText = () => {
+  if (status.llama === false) return 'loading the model into memory…';
+  const n = status.generated;
+  if (typeof n !== 'number' || n <= 0) return 'thinking locally…';
+  const now = Date.now();
+  if (!genSeen || n < genSeen.n) genSeen = {n, t: now};
+  const rate = now - genSeen.t >= 10000 ? (n - genSeen.n) / ((now - genSeen.t) / 1000) : null;
+  return 'writing locally… ' + n + ' tokens' + (rate === null ? '' : ' · ' + rate.toFixed(1) + '/s') +
+    (rate !== null && rate < 1 ? ' — very slow: the phone is short on memory, closing other apps helps' : '');
+};
 let history = [], status = {model:'none', models:[]}, ready = false;
 let busy = false, pendingRedirect = null;
 let features = {}, featureCatalog = [], presets = [];
@@ -1019,7 +1032,7 @@ $('form').onsubmit = async e => {
 async function sendTurn(allowSearch) {
   if (busy) return;
   $('allow-search').disabled = true;
-  busy = true; $('send').textContent = 'Stop';
+  busy = true; genSeen = null; $('send').textContent = 'Stop';
   $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
   $('busy').style.display = 'block';
   try {

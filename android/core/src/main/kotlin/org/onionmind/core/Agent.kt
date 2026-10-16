@@ -338,7 +338,10 @@ object Agent {
             put("messages", JsonArray(messages))
             // Search consent gates the tools at every request; the no-tools
             // recovery pass asks for its answer with allowSearch left false.
-            if (allowSearch) put("tools", Json.parseToJsonElement(TOOLS))
+            // Today's date rides in the tool description: without it the model
+            // searched for its training year ("latest Python 2025 2026").
+            if (allowSearch) put("tools", Json.parseToJsonElement(TOOLS.replace(
+                "searching repeatedly.", "searching repeatedly. Today is ${java.time.LocalDate.now()}.")))
             put("stream", false)
             put("max_tokens", maxTokens)
             if (finalOnly) {

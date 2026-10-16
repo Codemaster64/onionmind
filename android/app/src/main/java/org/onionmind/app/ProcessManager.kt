@@ -3,6 +3,11 @@ package org.onionmind.app
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.onionmind.core.EgressLog
 import org.onionmind.core.ModelSource
 import org.onionmind.core.OwnedLoopbackProcess
@@ -377,6 +382,23 @@ object ProcessManager {
             try { responseCode == 200 } finally { disconnect() }
         }
     } catch (_: Exception) { false }
+
+    /** Tokens the busy slot has written so far, or null: replies are not
+     *  streamed, so without this a slow phone looked exactly like a hang. */
+    fun llamaGenerated(): Int? = try {
+        (URL("http://127.0.0.1:$LLAMA_PORT/slots").openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection).run {
+            connectTimeout = 500; readTimeout = 2000
+            try {
+                if (responseCode != 200) null
+                else kotlinx.serialization.json.Json.parseToJsonElement(inputStream.bufferedReader().readText())
+                    .jsonArray.map { it.jsonObject }
+                    .filter { it["is_processing"]?.jsonPrimitive?.booleanOrNull == true }   // idle slots keep stale counts
+                    .mapNotNull { it["next_token"]?.jsonArray?.firstOrNull()?.jsonObject
+                        ?.get("n_decoded")?.jsonPrimitive?.intOrNull }
+                    .maxOrNull()
+            } finally { disconnect() }
+        }
+    } catch (_: Exception) { null }
 
     fun awaitLlamaReady(timeoutMillis: Long = 90_000): Boolean {
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000
