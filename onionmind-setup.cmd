@@ -7008,6 +7008,8 @@ class OnionmindWindow(QMainWindow):
         if session is None or store is None:
             self.set_status("That session could not be renamed.")
             return
+        # One line: a pasted line break left the rail showing half the title.
+        title = " ".join(title.split())
         session.title = title
         try:
             store.save(session)
