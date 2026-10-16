@@ -256,6 +256,40 @@ class DesktopUiTests(unittest.TestCase):
         finally:
             self._close(window)
 
+    def test_agent_starts_tor_on_demand_instead_of_refusing(self) -> None:
+        # It used to refuse "Tor is not up ... Start Tor from the toolbar" while
+        # a Chat search started Tor by itself.
+        window = self._window()
+        try:
+            started: list[bool] = []
+            core = window.core
+            core._port = None
+            core.tor_proxy_port = lambda: 9150 if started else None
+            core.start_tor_hidden = lambda stop_event=None: started.append(True) or 9150
+            core.tor_check = lambda: setattr(core, "_port", 9150)
+            window.harness_bridge.check = lambda: (False, "stop before spawning")
+            window.workspace = tempfile.mkdtemp()
+            window._set_active("agent")
+            window._start_harness("task")
+            self.assertTrue(self._wait_until(lambda: window.active_kind is None))
+            self.assertEqual(started, [True])
+            self.assertEqual(window.tor_phase, "running")
+        finally:
+            self._close(window)
+
+    def test_agent_warns_when_its_context_overflows_the_gpu(self) -> None:
+        window = self._window()
+        try:
+            window.core.loaded_models = lambda: [{"name": "inferno-code", "size": 16 * 1024 ** 3}]
+            window.desktop_core = mock.Mock(gpu_memory_mb=lambda: (11000, 12288))
+            window.active_kind = "agent"
+            window._check_agent_fits_gpu(window.harness_generation)
+            self.assertTrue(self._wait_until(lambda: "Lower the context slider" in window.status_label.text()))
+            self.assertIn("16 GB", window.status_label.text())
+        finally:
+            window.active_kind = None
+            self._close(window)
+
     def test_left_rail_buttons_emit_and_unavailable_actions_disable(self) -> None:
         rail = ui.LeftRail()
         events: list[tuple[str, str]] = []

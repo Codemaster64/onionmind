@@ -1676,7 +1676,7 @@ class SettingsDialog(QDialog):
         listening = probe() if callable(probe) else None
         if not listening and bridge.tor_port() is None:
             self.update_feedback.setText(
-                "Tor is not up. Allow Tor search on a chat turn to start it, then check "
+                "Tor is not up. Turn it on with the Tor button in the toolbar, then check "
                 "again - updates never use a direct connection."
             )
             return

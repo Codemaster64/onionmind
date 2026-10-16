@@ -1316,7 +1316,9 @@ def resolve_model():
     if BACKEND != "ollama":
         return MODEL                             # llama-server serves whatever it loaded
     names = [strip_tag(n) for n in installed_models()]
-    if not names or MODEL in names:
+    # The desktop passes "inferno:latest"; comparing it raw to stripped names
+    # announced "inferno:latest is not installed - using inferno" every run.
+    if not names or strip_tag(MODEL) in names:
         return MODEL                             # nothing to go on, or already right
     # -code and -vision are built FROM another model; as a default they are a
     # worse answer than the model they came from.
@@ -8660,9 +8662,18 @@ class OnionmindWindow(QMainWindow):
             "Onionmind Agent",
         )
         self.set_status("Preparing Onionmind Agent…")
+        # Start Tor on demand, as a Chat search does, instead of refusing and
+        # sending the user to the toolbar. An explicit "Tor off" still refuses:
+        # start_tor_hidden() raises while Tor is turned off for Onionmind.
+        tor_stop = None
+        if not getattr(self.core, "_port", None) and callable(getattr(self.core, "start_tor_hidden", None)):
+            tor_stop = self.announce_tor_starting("Starting background Tor for Onionmind Agent…")
 
         def prepare(signals: WorkerSignals) -> dict[str, Any]:
             del signals
+            if tor_stop is not None:
+                self.ensure_tor(tor_stop)
+                self._verify_tor(tor_stop)
             available, reason = self.harness_bridge.check()
             if not available:
                 return {"available": False, "reason": reason}
@@ -8683,9 +8694,55 @@ class OnionmindWindow(QMainWindow):
             )
         )
 
+    def _check_agent_fits_gpu(self, generation: int) -> None:
+        """Warn when the agent's context pushed the model past the GPU.
+
+        Ollama on Windows still reports "100% GPU" once a big context has spilled
+        the model into shared memory, and it then runs many times slower (seen:
+        16 GB at 128k on a 12 GB card, a one-file task stuck for 15 minutes).
+        """
+        if generation != self.harness_generation or self.active_kind != "agent":
+            return
+        loaded = getattr(self.core, "loaded_models", None)
+        memory = getattr(self.desktop_core, "gpu_memory_mb", None)
+        if not callable(loaded) or not callable(memory):
+            return
+
+        def job(signals: WorkerSignals) -> dict[str, Any]:
+            del signals
+            used, total = memory()
+            return {"used": used, "total": total, "loaded": list(loaded())}
+
+        def done(info: dict[str, Any]) -> None:
+            total = info.get("total")
+            biggest = max((int(m.get("size") or 0) for m in info.get("loaded") or []), default=0)
+            # used is None on unified memory (Apple), where there is nothing to spill into.
+            if info.get("used") is None or not total or biggest <= total * 1024 * 1024:
+                return
+            message = (f"At this context the model needs {biggest / 1024 ** 3:.0f} GB but the GPU has "
+                       f"{total / 1024:.0f} GB, so it spills into shared memory and runs slowly. "
+                       "Lower the context slider for the next run.")
+            self.set_status(message)
+            self.inspector.append_activity(message)
+
+        self._start_worker(job).signals.result.connect(done)
+
+    def _settle_tor_after_agent_start(self) -> None:
+        """Leave the Tor control showing the truth once an agent-started Tor settles."""
+        if self.tor_phase != "starting":
+            return
+        self.tor_stop_event = None
+        probe = getattr(self.core, "tor_proxy_port", None)
+        try:
+            port = probe() if callable(probe) else None
+        except Exception:
+            port = None
+        self._show_local_tor_state(port)
+
     def _harness_prepared(self, generation: int, payload: dict[str, Any]) -> None:
         if generation != self.harness_generation or self.active_kind != "agent":
             return
+        self._settle_tor_after_agent_start()
         if not payload.get("available"):
             self.tor_in_use = False
             reason = payload.get("reason") or "Onionmind Agent is unavailable."
@@ -8744,6 +8801,8 @@ class OnionmindWindow(QMainWindow):
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
         process.start(argv[0], argv[1:])
+        # By then the model is loaded at this run's context size.
+        QTimer.singleShot(90_000, lambda value=generation: self._check_agent_fits_gpu(value))
         if self._agent_stream:
             # The handshake first - qwen never reads the task without it - then
             # the task itself, on stdin rather than in the process list.
@@ -8823,6 +8882,7 @@ class OnionmindWindow(QMainWindow):
             return
         message = _brand_runtime_text(message)
         self.tor_in_use = False
+        self._settle_tor_after_agent_start()
         self._seal_agent_scratch()
         text = f"Onionmind Agent could not start: {message}\n\n{self.harness_bridge.limitation}"
         if self.stream_block is None:
@@ -8933,7 +8993,7 @@ class OnionmindWindow(QMainWindow):
         port = self.update_bridge.tor_port()
         if not listening and port is None:
             dialog.set_catalog_error(
-                "Tor is not up. Allow Tor search on a chat turn to start it, then "
+                "Tor is not up. Turn it on with the Tor button in the toolbar, then "
                 "try again - never over a direct connection."
             )
             return
@@ -17540,7 +17600,7 @@ class SettingsDialog(QDialog):
         listening = probe() if callable(probe) else None
         if not listening and bridge.tor_port() is None:
             self.update_feedback.setText(
-                "Tor is not up. Allow Tor search on a chat turn to start it, then check "
+                "Tor is not up. Turn it on with the Tor button in the toolbar, then check "
                 "again - updates never use a direct connection."
             )
             return

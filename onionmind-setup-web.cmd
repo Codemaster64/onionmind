@@ -285,7 +285,7 @@ Say "Installing Python deps (requests, PySocks)"
 & $py -m pip install --quiet --disable-pip-version-check requests PySocks
 if ($LASTEXITCODE -ne 0) { throw "Python dependencies could not be installed." }
 
-$search = Get-OnionmindSource 'onionmind.py' 'b9b1bff1c66242feba86d3637463809096a439839c431f6d735f43b5d57806ab'
+$search = Get-OnionmindSource 'onionmind.py' '6599ca2115e3db2d279ef2d53a3575d971c8e8c627258e59bb2491f6c90afe53'
 # Point the tool at whichever model was installed - on the fast tier the model is NOT
 # named inferno, and the embedded default would reference a model that does
 # not exist. Plain .Replace(), not a regex: this file has CRLF endings and a $
@@ -299,11 +299,11 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
 $desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' 'b8859ca2c6b8f46db91b2a5b71b4ed67e12ef2d282eee41559f02e0e020c0423'
-$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' 'ad3bdf59e6e10d8cb51023dff50862513df6305b1b407b1e0b9c9d3ecded071d'
+$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '971394388e5f84be461297ad7f19234f681a4cc1d0f9208a4f947d121751ab95'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
 $desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' 'ee3a214f05ca147bab2f211165c55449627abaa4ca8d0036c63f00d72a63f46b'
-$desktopDialogs = Get-OnionmindSource 'onionmind_desktop_dialogs.py' '15da860a59d8c41e5e2325225c0e5786778edc3689d2a76088bf34b99d262125'
+$desktopDialogs = Get-OnionmindSource 'onionmind_desktop_dialogs.py' '6bb975440d93e744e7f554a26dfc994f534d53c2d76a88b1577bbdd9f658285a'
 $desktopVault = Get-OnionmindSource 'onionmind_desktop_vault.py' 'b00d99ac9d206d832b841b0a595e72a00a1911bc08d5b7d9e71278364f39ad98'
 $desktopNetlog = Get-OnionmindSource 'onionmind_desktop_netlog.py' '2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398'
 $desktopUpdate = Get-OnionmindSource 'onionmind_desktop_update.py' '486b577eae59acb39659e970139410f1c4c0ba554b2d0bea9026ddaf633097c3'

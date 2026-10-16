@@ -759,7 +759,9 @@ def resolve_model():
     if BACKEND != "ollama":
         return MODEL                             # llama-server serves whatever it loaded
     names = [strip_tag(n) for n in installed_models()]
-    if not names or MODEL in names:
+    # The desktop passes "inferno:latest"; comparing it raw to stripped names
+    # announced "inferno:latest is not installed - using inferno" every run.
+    if not names or strip_tag(MODEL) in names:
         return MODEL                             # nothing to go on, or already right
     # -code and -vision are built FROM another model; as a default they are a
     # worse answer than the model they came from.

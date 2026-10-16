@@ -64,7 +64,7 @@ say "Model: $WANT ($FILE) - ${RAM_MB}MB RAM detected"
       "https://huggingface.co/$REPO/resolve/main/$FILE"
 
 # --- 3. the search agent (build.py injects the canonical copy below) ---------
-fetch_source "$DIR/onionmind.py" onionmind.py b9b1bff1c66242feba86d3637463809096a439839c431f6d735f43b5d57806ab
+fetch_source "$DIR/onionmind.py" onionmind.py 6599ca2115e3db2d279ef2d53a3575d971c8e8c627258e59bb2491f6c90afe53
 MODEL_NAME=blaze
 [ "$WANT" = 4b ] && MODEL_NAME=ember
 sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
