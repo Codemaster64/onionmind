@@ -276,7 +276,7 @@ object Server {
     private fun conversation(session: IHTTPSession): Response {
         val vault = Workbench.vault
         if (session.method == NanoHTTPD.Method.DELETE) {
-            stopFlag?.set(true)       // a reply still running must not save it back
+            stopRunning()       // a reply still running must not save it back
             ConversationStore.save(ctx.filesDir, emptyList(), vault)
             return json("{\"ok\":true}")
         }
@@ -333,7 +333,7 @@ object Server {
         }
         val (messages, total) = ExportFile.newestConversation(payload)
             ?: return error(Response.Status.BAD_REQUEST, "The export has no conversation in it.")
-        stopFlag?.set(true)
+        stopRunning()
         ConversationStore.save(ctx.filesDir, messages, Workbench.vault)
         return json(buildJsonObject { put("messages", messages.size); put("sessions", total) }.toString())
     }
@@ -452,7 +452,7 @@ object Server {
     /** Forgotten password: erase the conversation, log and settings (models stay). */
     private fun erase(session: IHTTPSession): Response {
         if (field(session, "confirm") != "erase") return error(Response.Status.BAD_REQUEST, "not confirmed")
-        stopFlag?.set(true)
+        stopRunning()
         Workbench.eraseAll(ctx)
         return vaultState()
     }
@@ -607,8 +607,14 @@ object Server {
     // means a late stop can never kill the next turn.
     @Volatile private var stopFlag: AtomicBoolean? = null
 
-    private fun stopChat(): Response {
+    /** Flag the running reply stopped and abandon its model request. */
+    private fun stopRunning() {
         stopFlag?.set(true)
+        Agent.cancel()
+    }
+
+    private fun stopChat(): Response {
+        stopRunning()
         return json("{\"ok\":true}")
     }
 

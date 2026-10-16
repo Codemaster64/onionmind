@@ -323,6 +323,14 @@ object Agent {
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(1800, TimeUnit.SECONDS).build()
     }
 
+    // Stop used to only set a flag read between model calls, so the reply being
+    // generated ran to its end - minutes to an hour on a phone short of memory.
+    // Closing the connection makes llama-server drop the generation.
+    @Volatile private var inflight: okhttp3.Call? = null
+
+    /** Abandon the model request in flight, if any. Safe from any thread. */
+    fun cancel() { inflight?.cancel() }
+
     private data class ChatReply(
         val assistant: JsonObject? = null,
         val finishReason: String = "",
@@ -349,14 +357,18 @@ object Agent {
                 put("reasoning_effort", "none")
             }
         }
+        val call = localHttp.newCall(
+            Request.Builder().url("$llamaUrl/v1/chat/completions")
+                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+        )
+        inflight = call
         val response = try {
-            localHttp.newCall(
-                Request.Builder().url("$llamaUrl/v1/chat/completions")
-                    .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-            ).execute()
+            call.execute()
         } catch (e: Exception) {
             return ChatReply(error = "(local model request failed: ${e.message ?: e.javaClass.simpleName})")
+        } finally {
+            inflight = null
         }
         response.use {
             if (!it.isSuccessful) return ChatReply(error = "(llama-server returned HTTP ${it.code})")
@@ -514,7 +526,7 @@ object Agent {
         for (round in 0 until 6) {
             if (shouldStop()) return stopped(partial)
             val reply = chat(llamaUrl, messages, NUM_PREDICT, allowSearch = allowSearch)
-            if (reply.error != null) return reply.error
+            if (reply.error != null) return if (shouldStop()) stopped(partial) else reply.error
             record(stats, reply)
             val assistant = reply.assistant!!
             messages.add(assistant)
