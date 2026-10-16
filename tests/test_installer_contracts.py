@@ -155,9 +155,11 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("\nexit 0\n", text[: text.index(marker)])
         self.assertIn("onionmind-install.cmd text eol=lf", self.text(".gitattributes"))
 
-        result = subprocess.run(["sh", "-n", str(ROOT / "onionmind-install.cmd")],
-                                capture_output=True, text=True, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # Windows without Git's sh on PATH used to fail the whole test here.
+        if shutil.which("sh"):
+            result = subprocess.run(["sh", "-n", str(ROOT / "onionmind-install.cmd")],
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
         # It hands over rather than re-implementing installs, so every script it
         # fetches must be a published asset, and the ONIONMIND_MODEL values it
