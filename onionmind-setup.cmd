@@ -6762,6 +6762,25 @@ class OnionmindWindow(QMainWindow):
         self.model_combo.setCurrentIndex(index)
         self.model_combo.blockSignals(False)
 
+    def _model_for_images(self, model: str) -> str:
+        """An attached image goes to the model's installed -vision sibling.
+
+        A text model answers an image with Ollama's 500 "image input is not
+        supported", so attaching a picture to the default tier always failed
+        although the installer had put the vision model right next to it.
+        """
+        if not (self.chat_messages and self.chat_messages[-1].get("images")):
+            return model
+        base = model[:-7] if model.endswith(":latest") else model
+        if base.endswith("-vision"):
+            return model
+        installed = {m[:-7] if m.endswith(":latest") else m for m in self.installed_model_ids}
+        vision = base + "-vision"
+        if vision not in installed:
+            return model
+        self.inspector.append_activity(f"Image attached: this turn uses {self._tier_name(vision) or vision}")
+        return vision
+
     def current_model_id(self) -> str:
         return _as_text(self.model_combo.currentData()) or _as_text(getattr(self.core, "MODEL", "inferno")) or "inferno"
 
@@ -8059,8 +8078,9 @@ class OnionmindWindow(QMainWindow):
         self.send_button.setAccessibleName("Stop active run" if running else "Send task")
         if kind == "agent":
             self.send_button.setToolTip(
-                "Stop Onionmind Agent; child processes it started may require manual termination. "
-                "A typed direction is sent when it stops."
+                ("Stop Onionmind Agent and the processes it started. " if os.name == "nt" else
+                 "Stop Onionmind Agent; child processes it started may require manual termination. ")
+                + "A typed direction is sent when it stops."
             )
         elif kind == "chat":
             self.send_button.setToolTip(
@@ -8101,6 +8121,7 @@ class OnionmindWindow(QMainWindow):
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         model = self.current_model_id()
+        model = _v2(self, "_model_for_images", model, default=model)
         history = copy.deepcopy(self.chat_messages)
         preset = _v2(self, "_preset_text", default="")
         if preset and callable(getattr(self.desktop_core, "with_system_prompt", None)):

@@ -289,6 +289,21 @@ class DesktopUiTests(unittest.TestCase):
                              creationflags=ui.UPDATE_HELPER_FLAGS, close_fds=True)
             self.assertTrue(self._wait_until(log.exists, timeout_ms=20000))
 
+    def test_an_attached_image_goes_to_the_installed_vision_model(self) -> None:
+        # A text model answered every image with Ollama's 500 "image input is
+        # not supported" although the vision sibling was installed.
+        window = self._window()
+        try:
+            window.installed_model_ids = ["inferno:latest", "inferno-vision:latest", "blaze:latest"]
+            window.chat_messages = [{"role": "user", "content": "what is this", "images": ["aGk="]}]
+            self.assertEqual(window._model_for_images("inferno:latest"), "inferno-vision")
+            self.assertEqual(window._model_for_images("inferno-vision"), "inferno-vision")
+            self.assertEqual(window._model_for_images("blaze"), "blaze")      # no sibling installed
+            window.chat_messages = [{"role": "user", "content": "no picture"}]
+            self.assertEqual(window._model_for_images("inferno:latest"), "inferno:latest")
+        finally:
+            self._close(window)
+
     def test_screen_readers_hear_the_approval_mode_that_is_armed(self) -> None:
         window = self._window()
         try:
