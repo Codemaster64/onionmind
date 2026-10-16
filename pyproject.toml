@@ -42,7 +42,7 @@ tui = [
     "textual>=1,<9",
 ]
 desktop-build = [
-    "Nuitka>=4.1,<5",
+    "Nuitka>=4.1,<4.2",
     "ordered-set>=4.1,<5",
     "zstandard>=0.23,<1",
 ]

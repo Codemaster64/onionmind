@@ -5,6 +5,8 @@ PySide6-Essentials>=6.11,<6.12
 requests>=2.32,<3
 PySocks>=1.7,<2
 cryptography>=42,<51
-Nuitka>=4.1,<5
+# Below 4.2: Nuitka 4.2+/4.3 injects a PySide6 connect() probe that crashes the
+# bundle on its first signal (exit 0xC0000005); 4.1.x builds start fine.
+Nuitka>=4.1,<4.2
 ordered-set>=4.1,<5
 zstandard>=0.23,<1
