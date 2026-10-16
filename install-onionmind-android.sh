@@ -641,6 +641,13 @@ TOOLS = [{"type": "function", "function": {
                    "properties": {"query": {"type": "string", "description": "search terms"}}}}}]
 
 
+def _tools():
+    """TOOLS with today's date: without it the model searches for its training year."""
+    fn = dict(TOOLS[0]["function"])
+    fn["description"] += f" Today is {time.strftime('%Y-%m-%d')}."
+    return [{**TOOLS[0], "function": fn}]
+
+
 def _wire_messages(messages):
     """Remove client-only metadata before sending saved history to Ollama."""
     return [{key: value for key, value in message.items() if not key.startswith("_")}
@@ -651,7 +658,7 @@ def _ask_ollama(messages, num_predict=NUM_PREDICT, think=None, allow_search=Fals
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": False,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
-        body["tools"] = TOOLS
+        body["tools"] = _tools()
     if think is not None:
         body["think"] = think
     try:
@@ -698,7 +705,7 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
     body = {"model": MODEL, "messages": _wire_messages(messages), "stream": True,
             "options": {"num_predict": num_predict, "num_ctx": NUM_CTX}}
     if allow_search:
-        body["tools"] = TOOLS
+        body["tools"] = _tools()
     if think is not None:
         body["think"] = think
     try:
@@ -945,7 +952,7 @@ def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_search=False
     body = {"messages": _to_openai(messages), "stream": False,
             "max_tokens": num_predict}
     if allow_search:
-        body["tools"] = TOOLS
+        body["tools"] = _tools()
     if think is False:
         body["chat_template_kwargs"] = {"enable_thinking": False}
         body["reasoning_effort"] = "none"

@@ -279,7 +279,7 @@ def test_search_tools_are_absent_without_explicit_permission():
         onionmind._ask_ollama(
             [{"role": "user", "content": "hello"}], allow_search=True
         )
-        assert post.call_args.kwargs["json"]["tools"] == onionmind.TOOLS
+        assert post.call_args.kwargs["json"]["tools"] == onionmind._tools()
 
 
 def test_spurious_search_call_is_refused_without_network():

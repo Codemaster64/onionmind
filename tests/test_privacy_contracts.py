@@ -29,7 +29,7 @@ class SearchConsentTests(unittest.TestCase):
             self.assertNotIn("tools", post.call_args.kwargs["json"])
 
             onionmind._ask_ollama(messages, allow_search=True)
-            self.assertEqual(post.call_args.kwargs["json"]["tools"], onionmind.TOOLS)
+            self.assertEqual(post.call_args.kwargs["json"]["tools"], onionmind._tools())
 
     def test_unpermitted_model_tool_call_cannot_reach_tor_or_search(self) -> None:
         replies = iter(
