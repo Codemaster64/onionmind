@@ -2044,8 +2044,11 @@ class OnionmindWindow(QMainWindow):
         self.branch_label.setText(_as_text(branch))
         self.inspector.update_snapshot(snapshot)
         count = len(snapshot.get("changes") or [])
-        self.set_status(f"Project inspected · {count} observed change(s)")
-        self.inspector.append_activity(f"Project refreshed; {count} observed change(s)")
+        # Changes come from git; outside a repository "0" claimed nothing changed
+        # right after the agent wrote a file.
+        seen = f"{count} observed change(s)" if snapshot.get("is_git") else "not a git repository, so changes aren't tracked"
+        self.set_status(f"Project inspected · {seen}")
+        self.inspector.append_activity(f"Project refreshed; {seen}")
 
     def _workspace_failed(self, message: str) -> None:
         if not self.workspace:

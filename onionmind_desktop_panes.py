@@ -369,7 +369,8 @@ class WorkspaceBridge:
         return {
             "root": str(root), "is_git": is_git, "branch": branch, "dirty": bool(changes),
             "changes": changes, "agents_files": agents, "file_tree": files,
-            "tree_truncated": len(files) >= 260, "summary": f"{len(changes)} observed change(s)", "diff": diff,
+            "tree_truncated": len(files) >= 260, "summary": f"{len(changes)} observed change(s)" if is_git
+            else "Not a git repository: changes aren't tracked here", "diff": diff,
         }
 
 

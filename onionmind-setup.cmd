@@ -1965,8 +1965,18 @@ def run_agent(task=None, model=None, yolo=False, workdir=None, stream=False,
     # reader shows nothing until the agent has already produced output.
     sys.stdout.flush()
     extra = {"resume": resume} if resume else {}
+    pipes = {}
+    if os.name == "nt" and not (sys.stdout and sys.stdout.isatty()):
+        # Under the desktop's console-less pythonw, an implicit inherit hands
+        # qwen.CMD a NEW console instead of our pipes: qwen opened its
+        # interactive screen in a window and never read the task. Pass the
+        # pipes explicitly and open no window.
+        pipes = {"stdin": sys.stdin or subprocess.DEVNULL,
+                 "stdout": sys.stdout or subprocess.DEVNULL,
+                 "stderr": sys.stderr or subprocess.DEVNULL,
+                 "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
     return subprocess.call(agent_argv(model, None if stream else task, stream=stream, **extra),
-                           env=env, cwd=workdir)
+                           env=env, cwd=workdir, **pipes)
 
 
 def spawn_code(workdir, model=None):
@@ -7331,8 +7341,11 @@ class OnionmindWindow(QMainWindow):
         self.branch_label.setText(_as_text(branch))
         self.inspector.update_snapshot(snapshot)
         count = len(snapshot.get("changes") or [])
-        self.set_status(f"Project inspected · {count} observed change(s)")
-        self.inspector.append_activity(f"Project refreshed; {count} observed change(s)")
+        # Changes come from git; outside a repository "0" claimed nothing changed
+        # right after the agent wrote a file.
+        seen = f"{count} observed change(s)" if snapshot.get("is_git") else "not a git repository, so changes aren't tracked"
+        self.set_status(f"Project inspected · {seen}")
+        self.inspector.append_activity(f"Project refreshed; {seen}")
 
     def _workspace_failed(self, message: str) -> None:
         if not self.workspace:
@@ -14437,7 +14450,8 @@ class WorkspaceBridge:
         return {
             "root": str(root), "is_git": is_git, "branch": branch, "dirty": bool(changes),
             "changes": changes, "agents_files": agents, "file_tree": files,
-            "tree_truncated": len(files) >= 260, "summary": f"{len(changes)} observed change(s)", "diff": diff,
+            "tree_truncated": len(files) >= 260, "summary": f"{len(changes)} observed change(s)" if is_git
+            else "Not a git repository: changes aren't tracked here", "diff": diff,
         }
 
 
