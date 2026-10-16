@@ -564,7 +564,7 @@ class UpdateBridge:
         finder = getattr(self.desktop_core, "pending_staging_dir", None)
         if not self.available or not callable(finder):
             return None
-        return finder(self.work_dir)
+        return finder(self.work_dir, self.install_dir)
 
     def housekeep(self) -> None:
         pruner = getattr(self.desktop_core, "prune_update_workdir", None)

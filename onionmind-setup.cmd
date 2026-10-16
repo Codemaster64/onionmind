@@ -14738,7 +14738,7 @@ class UpdateBridge:
         finder = getattr(self.desktop_core, "pending_staging_dir", None)
         if not self.available or not callable(finder):
             return None
-        return finder(self.work_dir)
+        return finder(self.work_dir, self.install_dir)
 
     def housekeep(self) -> None:
         pruner = getattr(self.desktop_core, "prune_update_workdir", None)
@@ -19333,20 +19333,33 @@ class BundleUpdater:
         ]
 
 
-def pending_staging_dir(work_dir: PathInput) -> Optional[Path]:
-    """A previously staged, still-verified bundle waiting to be applied."""
+def pending_staging_dir(work_dir: PathInput, install_dir: Optional[PathInput] = None) -> Optional[Path]:
+    """A previously staged, still-verified bundle waiting to be applied.
+
+    With ``install_dir``, a staged build that is the running revision, or was
+    staged before the running bundle was installed, is not offered: an older
+    staged build (one whose install never ran) was presented as an update and
+    would have downgraded the app.
+    """
 
     work = Path(work_dir)
     if not work.is_dir():
         return None
+    running = installed_revision(install_dir) if install_dir is not None else None
+    marker = Path(install_dir) / UPDATE_REVISION_FILENAME if install_dir is not None else None
+    installed_at = marker.stat().st_mtime if marker is not None and marker.is_file() else None
     candidates = sorted(
         (entry for entry in work.iterdir() if entry.is_dir() and entry.name.startswith("staging-")),
         key=lambda entry: entry.stat().st_mtime,
         reverse=True,
     )
     for candidate in candidates:
-        if (candidate / "Onionmind.exe").is_file() and installed_revision(candidate):
-            return candidate
+        revision = installed_revision(candidate)
+        if not (candidate / "Onionmind.exe").is_file() or not revision:
+            continue
+        if revision == running or (installed_at is not None and candidate.stat().st_mtime < installed_at):
+            continue
+        return candidate
     return None
 
 

@@ -817,6 +817,22 @@ class BundleUpdaterTests(unittest.TestCase):
             empty.mkdir()
             self.assertEqual(core.pending_staging_dir(work), staging)
 
+            # A build staged before the running bundle was installed is older:
+            # offering it as an update would downgrade (seen: a broken build
+            # left staged by an install step that never ran).
+            install = root / "installed"
+            install.mkdir()
+            marker = install / core.UPDATE_REVISION_FILENAME
+            marker.write_text("f" * 40, encoding="utf-8")
+            later = staging.stat().st_mtime + 60
+            os.utime(marker, (later, later))
+            self.assertIsNone(core.pending_staging_dir(work, install))
+            os.utime(marker, (later - 120, later - 120))
+            self.assertEqual(core.pending_staging_dir(work, install), staging)
+            marker.write_text(manifest.revision, encoding="utf-8")            # already running it
+            os.utime(marker, (later - 120, later - 120))
+            self.assertIsNone(core.pending_staging_dir(work, install))
+
             core.prune_update_workdir(work, running_revision=manifest.revision)
             self.assertFalse(staging.exists())
             self.assertTrue(empty.exists())
