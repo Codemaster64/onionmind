@@ -88,6 +88,8 @@ object ProcessManager {
         // modelDir any more than a typed filename could.
         val target = file.ifBlank { ModelSource.filenameFrom(url).orEmpty() }
         require(target.matches(FILENAME)) { "could not read a model filename from that URL" }
+        // A link to notes.txt was accepted and downloaded as a "model".
+        require(target.endsWith(".gguf", ignoreCase = true)) { "that link is not a .gguf model file" }
         val label = name.trim().ifBlank { ModelSource.nameFrom(target) }.take(80)
         require(label.isNotEmpty() && label.matches(CLEAN)) { "invalid model name" }
         val model = Model("custom-" + UUID.randomUUID().toString(), label, target, url, bytes.coerceAtLeast(0))
