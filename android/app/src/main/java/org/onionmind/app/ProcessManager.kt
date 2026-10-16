@@ -23,6 +23,7 @@ object ProcessManager {
     private const val LLAMA_PORT = 8080
     private val llama = OwnedLoopbackProcess(listenerOpen = { portOpen(LLAMA_PORT) })
     private var tor: Process? = null
+    @Volatile private var torLog: File? = null
     private const val PREFS = "models"
     private const val CUSTOM = "custom"
     private const val ACTIVE = "active"
@@ -368,8 +369,25 @@ object ProcessManager {
         owned
     }
 
-    fun awaitLlamaReady(timeoutMillis: Long = 90_000): Boolean =
-        llama.awaitReady(timeoutMillis)
+    // The port opens before the model has loaded, and llama-server answers 503
+    // until it has: a chat sent on "port open" failed with HTTP 503.
+    private fun llamaHealthy() = try {
+        (URL("http://127.0.0.1:$LLAMA_PORT/health").openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection).run {
+            connectTimeout = 500; readTimeout = 2000
+            try { responseCode == 200 } finally { disconnect() }
+        }
+    } catch (_: Exception) { false }
+
+    fun awaitLlamaReady(timeoutMillis: Long = 90_000): Boolean {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        if (!llama.awaitReady(timeoutMillis)) return false
+        while (System.nanoTime() < deadline) {
+            if (!llama.alive()) return false
+            if (llamaHealthy()) return true
+            Thread.sleep(250)
+        }
+        return llamaHealthy()
+    }
 
     fun ensureTor(ctx: Context): Boolean {
         if (tor?.isAlive == true) return true
@@ -379,6 +397,7 @@ object ProcessManager {
         // unverified proxy or racing a second daemon for the same port.
         if (portOpen(9050)) return false
         val dir = File(ctx.filesDir, "tor").apply { mkdirs() }
+        torLog = File(dir, "log").apply { delete() }     // this start's progress only
         File(dir, "torrc").writeText("SocksPort 9050\nDataDirectory ${File(dir, "data").apply { mkdirs() }.absolutePath}\nCookieAuthentication 0\nAvoidDiskWrites 1\nLog notice file ${File(dir, "log").absolutePath}")
         tor = ProcessBuilder(File(ctx.applicationInfo.nativeLibraryDir, "libtor.so").absolutePath, "-f", File(dir, "torrc").absolutePath).redirectErrorStream(true).start()
         Workbench.recordEgress(ctx, EgressLog.TOR, "Tor network", "start Tor", "relay directory and circuits")
@@ -386,7 +405,8 @@ object ProcessManager {
         return true
     }
 
-    fun awaitTorReady(timeoutMillis: Long = 90_000): Boolean {
+    // A cold Tor needs one to two minutes to bootstrap (the desktop measured 110 s).
+    fun awaitTorReady(timeoutMillis: Long = 180_000): Boolean {
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000
         while (System.nanoTime() < deadline) {
             if (torReady()) return true
@@ -397,9 +417,12 @@ object ProcessManager {
     }
 
     private fun stopLlama() = llama.stop()
-    fun llamaReady(): Boolean = llama.ready()
-    fun llamaLoading(): Boolean = llama.alive() && !llama.ready()
-    fun torReady() = tor?.isAlive == true && portOpen(9050)
+    fun llamaReady(): Boolean = llama.ready() && llamaHealthy()
+    fun llamaLoading(): Boolean = llama.alive() && !llamaReady()
+    // The SOCKS port opens at once; a search sent before a circuit exists fails.
+    // Same rule as the desktop's _await_tor_ready: wait for "Bootstrapped 100%".
+    fun torReady() = tor?.isAlive == true && portOpen(9050) &&
+        torLog?.let { try { it.readText().contains("Bootstrapped 100%") } catch (_: Exception) { false } } == true
     private fun portOpen(port: Int) = try { Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }; true } catch (_: Exception) { false }
     fun stopAll() { stopLlama(); tor?.destroy() }
 
