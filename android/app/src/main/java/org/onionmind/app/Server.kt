@@ -276,6 +276,7 @@ object Server {
     private fun conversation(session: IHTTPSession): Response {
         val vault = Workbench.vault
         if (session.method == NanoHTTPD.Method.DELETE) {
+            stopFlag?.set(true)       // a reply still running must not save it back
             ConversationStore.save(ctx.filesDir, emptyList(), vault)
             return json("{\"ok\":true}")
         }

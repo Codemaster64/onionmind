@@ -347,6 +347,10 @@ const busyText = () => {
 };
 let history = [], status = {model:'none', models:[]}, ready = false;
 let busy = false, pendingRedirect = null;
+// Bumped when the conversation is replaced (clear, erase, import). A reply that
+// finishes into a newer epoch must not write the old conversation back - an
+// erase used to be undone by the reply it had just stopped.
+let convEpoch = 0;
 let features = {}, featureCatalog = [], presets = [];
 // The last context figure: real (from the model) or an estimate until then.
 let contextUse = null;
@@ -434,6 +438,7 @@ async function unlockVault() {
 }
 async function eraseVault() {
   if (!confirm('Erase the conversation, the network log and all settings on this phone? There is no way to get them back. Downloaded models stay.')) return;
+  convEpoch++;
   try { vaultInfo = await (await api('/api/vault/erase', form('confirm=erase'))).json(); } catch {}
   history = []; renderHistory();
   boot();
@@ -954,14 +959,14 @@ async function importFile(file) {
     feedback.textContent = body.sessions > 1
       ? `Imported the newest of ${body.sessions} conversations in the file; the phone keeps one at a time.`
       : 'Imported.';
-    contextUse = null;
+    contextUse = null; convEpoch++;
     await loadConversation();
     if (!history.length) renderHistory();
   } catch (err) { feedback.textContent = errorText(err); }
 }
 async function clearConversation() {
   if (!confirm('Clear this conversation from the phone? It cannot be recovered.')) return;
-  history = []; contextUse = null;
+  convEpoch++; history = []; contextUse = null;
   try { await api('/api/conversation', {method: 'DELETE'}); } catch {}
   renderHistory();
 }
@@ -1038,6 +1043,7 @@ async function sendTurn(allowSearch) {
   if (busy) return;
   $('allow-search').disabled = true;
   busy = true; genSeen = null; $('send').textContent = 'Stop';
+  const epoch = convEpoch;
   $('busy').textContent = allowSearch ? 'thinking · Tor search allowed this turn…' : busyText();
   $('busy').style.display = 'block';
   try {
@@ -1048,6 +1054,7 @@ async function sendTurn(allowSearch) {
     let r;
     try { r = JSON.parse(raw); }
     catch (_) { throw new Error(raw.slice(0, 240) || 'invalid server response'); }
+    if (epoch !== convEpoch) throw Object.assign(new Error('replaced'), {stale: true});
     if (!response.ok || r.error) throw Object.assign(new Error(r.error || 'chat request failed'), {kind: r.kind});
     // The server echoes the conversation it was sent plus this turn; earlier
     // replies keep the details they were saved with.
@@ -1069,9 +1076,11 @@ async function sendTurn(allowSearch) {
     }
     saveConversation();
   } catch (err) {
-    if (err.kind && on('errors')) showError(err.kind, errorText(err), allowSearch);
-    else add('bot', '(error: ' + errorText(err) + ')');
-    saveConversation();
+    if (epoch === convEpoch) {                   // else it was cleared, erased or imported meanwhile
+      if (err.kind && on('errors')) showError(err.kind, errorText(err), allowSearch);
+      else add('bot', '(error: ' + errorText(err) + ')');
+      saveConversation();
+    }
   }
   $('busy').style.display = 'none';
   $('allow-search').disabled = false;
