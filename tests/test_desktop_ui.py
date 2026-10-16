@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -1566,6 +1567,10 @@ class QualityOfLifeTests(unittest.TestCase):
 
     def test_rename_dialog_emits_the_selected_session_and_clean_title(self) -> None:
         rail = ui.LeftRail()
+        # A UTC stamp is shown in local time, not as the raw UTC string.
+        rail.set_sessions([{"id": "u", "title": "T", "updated_at": "2026-09-02T10:00:00+00:00"}])
+        local = datetime.fromisoformat("2026-09-02T10:00:00+00:00").astimezone()
+        self.assertIn(local.strftime("%Y-%m-%d %H:%M"), rail.sessions.item(0).text())
         rail.set_sessions(
             [{"id": "b2", "title": "Tor notes", "updated_at": "2026-09-02T10:00:00"}]
         )

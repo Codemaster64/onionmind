@@ -984,6 +984,14 @@ class LeftRail(QWidget):
             session_id = _as_text(_field(session, "id"))
             title = _as_text(_field(session, "title", "New session"))
             updated = _field(session, "updated_at")
+            if isinstance(updated, str):
+                # Saved as UTC; slicing the string showed UTC as if it were local time.
+                try:
+                    stamp = datetime.fromisoformat(updated)
+                    if stamp.tzinfo:
+                        updated = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
             if isinstance(updated, datetime):
                 meta = updated.astimezone().strftime("%b %d, %H:%M")
             else:
