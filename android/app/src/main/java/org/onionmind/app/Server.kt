@@ -551,12 +551,19 @@ object Server {
         // that a kind too, so the errors card can offer the right fix.
         val kind = if (answer.startsWith("(local model request failed") ||
             answer.startsWith("(llama-server returned")) ErrorKind.classify(answer, llamaLogTail()) else null
+        val saved = messages.filterNot { (it["role"] as? JsonPrimitive)?.contentOrNull == "system" }
+        // Only the page used to save a finished reply, so a page reloaded
+        // mid-reply (theme switch, split screen, the activity rebuilt after
+        // switching apps on a phone short of memory) lost it for good. Keep it
+        // here too; the page's own save afterwards just adds its details.
+        if (kind == null && !flag.get()) try {
+            ConversationStore.save(ctx.filesDir, saved, Workbench.vault)
+        } catch (_: Exception) { }
         return json(buildJsonObject {
             put("answer", answer)
             // The preset's system message is per request, never part of the
             // saved conversation.
-            put("messages", JsonArray(messages.filterNot {
-                (it["role"] as? JsonPrimitive)?.contentOrNull == "system" }))
+            put("messages", JsonArray(saved))
             put("stats", stats.toJson())
             ProcessManager.installedModel(ctx)?.let { put("model", it.name) }
             kind?.let { put("kind", it) }

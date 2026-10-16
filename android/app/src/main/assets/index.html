@@ -553,6 +553,11 @@ function openSettings() { $('settings').hidden = false; renderFeatureList(); ref
 function closeSettings() { $('settings').hidden = true; }
 function openBoundary() { $('boundary').hidden = false; renderBoundary(); }
 function closeBoundary() { $('boundary').hidden = true; }
+// Android Back: close the open sheet instead of leaving the app (MainActivity asks).
+function backPressed() {
+  for (const id of ['manager', 'settings', 'boundary']) if (!$(id).hidden) { $(id).hidden = true; return true; }
+  return false;
+}
 
 // --- Workbench preferences -------------------------------------------
 // Presentation-only: text size, the send key, animation, and the v2 choices

@@ -84,6 +84,16 @@ class MainActivity : Activity() {
         }
     }
 
+    // Back closed the whole app from the Models or Settings sheet; the page
+    // closes an open sheet first and only otherwise lets Back leave.
+    @Deprecated("Platform Activity; OnBackPressedDispatcher needs androidx")
+    override fun onBackPressed() {
+        web.evaluateJavascript("typeof backPressed === 'function' && backPressed()") { closed ->
+            @Suppress("DEPRECATION")
+            if (closed != "true") super.onBackPressed()
+        }
+    }
+
     private fun applySecure(wanted: Boolean) {
         if (wanted) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
