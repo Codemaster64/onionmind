@@ -97,6 +97,22 @@ class WorkbenchTest {
         assertEquals(100, ContextWindow.estimate(msgs))
     }
 
+    @Test fun `a long conversation is cut to the newest whole turns that fit`() {
+        fun msg(role: String, n: Int) = buildJsonObject { put("role", role); put("content", "x".repeat(n)) }
+        val system = msg("system", 400)                                  // 100 tokens
+        val turns = (1..40).flatMap { listOf(msg("user", 2_000), msg("assistant", 2_000)) }   // 1000 tokens a turn
+        val sent = ContextWindow.fit(listOf(system) + turns, budget = 8_000)
+        assertEquals("system", sent.first()["role"]!!.jsonPrimitive.content)
+        assertEquals("user", sent[1]["role"]!!.jsonPrimitive.content)   // cut at a user message
+        assertTrue(ContextWindow.estimate(sent) <= 8_000)
+        assertEquals(turns.last(), sent.last())                          // newest kept
+        assertEquals(1 + 2 * 7, sent.size)                               // 100 + 7 turns of 1000
+        // A short conversation goes as it is, and one huge turn is still sent.
+        assertEquals(turns.take(4), ContextWindow.fit(turns.take(4), budget = 8_000))
+        val huge = listOf(msg("user", 100_000))
+        assertEquals(huge, ContextWindow.fit(huge, budget = 8_000))
+    }
+
     @Test fun `the egress log keeps routes and hosts, never request text`() {
         val dir = createTempDirectory("onionmind-egress").toFile()
         val log = EgressLog(File(dir, "egress.jsonl"), maxEntries = 3)

@@ -219,6 +219,32 @@ object ContextWindow {
         return (chars + 3) / 4
     }
 
+    /**
+     * The newest whole turns that fit [budget] estimated tokens, leaving the
+     * rest of the window for the reply. The full conversation was sent every
+     * time, so once it outgrew the window llama-server refused every message
+     * and the conversation was stuck for good. Cuts only at a user message,
+     * keeps a leading system prompt, and always keeps the latest turn.
+     *
+     * ponytail: the cut moves every turn once trimming starts, which defeats
+     * llama-server's prompt cache (a long chat re-reads up to `budget` tokens a
+     * turn). Cutting in large steps would keep the prefix stable if that bites.
+     */
+    fun fit(messages: List<JsonObject>, budget: Int = TOKENS / 2): List<JsonObject> {
+        fun role(m: JsonObject) = (m["role"] as? JsonPrimitive)?.contentOrNull
+        val system = messages.takeWhile { role(it) == "system" }
+        val rest = messages.drop(system.size)
+        var used = estimate(system)
+        var start = rest.size
+        for (i in rest.indices.reversed()) {
+            used += estimate(listOf(rest[i]))
+            if (used > budget && start < rest.size) break
+            if (role(rest[i]) == "user") start = i
+        }
+        if (start == rest.size) start = rest.indexOfLast { role(it) == "user" }.coerceAtLeast(0)
+        return system + rest.drop(start)
+    }
+
     /** "3.1k", "16k": k is 1024 tokens, the unit context windows are sized in. */
     fun format(count: Int): String = when {
         count < 1000 -> count.toString()

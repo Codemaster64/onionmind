@@ -343,7 +343,7 @@ object Agent {
     private fun chat(llamaUrl: String, messages: List<JsonObject>, maxTokens: Int,
                      finalOnly: Boolean = false, allowSearch: Boolean = false): ChatReply {
         val body = buildJsonObject {
-            put("messages", JsonArray(messages))
+            put("messages", JsonArray(ContextWindow.fit(messages)))
             // Search consent gates the tools at every request; the no-tools
             // recovery pass asks for its answer with allowSearch left false.
             // Today's date rides in the tool description: without it the model
