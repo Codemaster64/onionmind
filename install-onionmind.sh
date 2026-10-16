@@ -941,10 +941,16 @@ def tor_check():
         _port = None
         sys.exit("Tor proxy is turned off in Onionmind. Turn it on before using a protected feature.")
     for port in PORTS:
-        try:
-            r = requests.get("https://check.torproject.org/api/ip",
-                             proxies=_proxies(port, False), timeout=30).json()
-        except Exception:
+        # Retry on a fresh circuit: one slow or dead exit used to fail the whole
+        # search while Tor itself was fine. A refused port fails instantly.
+        for attempt in range(3):
+            try:
+                r = requests.get("https://check.torproject.org/api/ip",
+                                 proxies=_proxies(port, attempt > 0), timeout=30).json()
+                break
+            except Exception:
+                r = None
+        if r is None:
             continue
         if r.get("IsTor"):
             # The desktop may turn Tor off while this request is in flight.
@@ -963,6 +969,10 @@ def tor_check():
     # A stale-but-set port must not survive a failed reverification: callers
     # would keep "verifying" against a proxy that just answered "not Tor".
     _port = None
+    if tor_proxy_port():
+        # Telling someone whose Tor is running to start Tor sends them hunting.
+        sys.exit("Tor is running but could not reach the Tor network just now. "
+                 "Try again in a moment.")
     # Telling a Windows user to run systemctl is telling them nothing. Name the
     # thing that works on the platform without exposing implementation ports.
     if os.name == "nt":

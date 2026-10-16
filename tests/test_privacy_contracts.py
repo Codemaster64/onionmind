@@ -251,6 +251,27 @@ class BackgroundTorTests(unittest.TestCase):
             onionmind.tor_check()
         self.assertIsNone(onionmind._port)
 
+    def test_a_dropped_check_retries_on_a_fresh_circuit(self) -> None:
+        # One slow exit used to fail the whole search while Tor was running.
+        ok = mock.Mock()
+        ok.json.return_value = {"IsTor": True, "IP": "127.0.0.2"}
+        with mock.patch.object(onionmind, "PORTS", [9150]), \
+             mock.patch.object(onionmind.requests, "get",
+                               side_effect=[TimeoutError(), TimeoutError(), ok]) as get:
+            onionmind.tor_check()
+        self.assertEqual(onionmind._port, 9150)
+        proxies = [call.kwargs["proxies"]["https"] for call in get.call_args_list]
+        self.assertNotIn("@", proxies[0])
+        self.assertTrue(all("@" in p for p in proxies[1:]), proxies)
+
+    def test_running_tor_that_cannot_verify_is_not_told_to_start_tor(self) -> None:
+        with mock.patch.object(onionmind, "PORTS", [9150]), \
+             mock.patch.object(onionmind, "tor_proxy_port", return_value=9150), \
+             mock.patch.object(onionmind.requests, "get", side_effect=TimeoutError()), \
+             self.assertRaisesRegex(SystemExit, "Tor is running"):
+            onionmind.tor_check()
+        self.assertIsNone(onionmind._port)
+
     def test_turning_tor_off_during_verification_cannot_repin_the_port(self) -> None:
         response = mock.Mock()
 

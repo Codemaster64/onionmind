@@ -569,7 +569,7 @@ fi
 say "Step: Onionmind program files -> $DIR"
 
 # --- 8. Tor search tool -----------------------------------------------------
-fetch_source "$DIR/onionmind.py" onionmind.py 51dadbf6e36fc7afdd920ccf4df5847b7793301a459453960297ebee5266a009
+fetch_source "$DIR/onionmind.py" onionmind.py dfa5c4b84ef6baf144333760bf7807a75b4eab6b40640700f2fb1bb9d9104255
 # point the tool at whichever model was installed
 sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
 chmod 755 "$DIR/onionmind.py"
