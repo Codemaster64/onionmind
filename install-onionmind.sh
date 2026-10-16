@@ -8844,15 +8844,30 @@ class OnionmindWindow(QMainWindow):
                 if self._agent_outcome is None:
                     self._agent_outcome = "stopped"
                 self._clear_agent_cards()
+                self._kill_harness_tree()
                 self.harness_process.terminate()
                 QTimer.singleShot(1500, self._kill_harness_if_running)
-                self.set_status(
-                    "Stopping Onionmind Agent; spawned child processes may require manual termination."
-                )
+                self.set_status("Stopping Onionmind Agent…")
 
     def _kill_harness_if_running(self) -> None:
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
+            self._kill_harness_tree()
             self.harness_process.kill()
+
+    def _kill_harness_tree(self) -> None:
+        """Windows: killing the wrapper left qwen-code's node processes running
+        (and keeping the GPU busy). taskkill /T ends the whole tree."""
+        process = self.harness_process
+        if os.name != "nt" or process is None or process.state() == QProcess.ProcessState.NotRunning:
+            return
+        pid_of = getattr(process, "processId", None)
+        pid = int(pid_of() or 0) if callable(pid_of) else 0
+        if pid:
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True,
+                               timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.SubprocessError):
+                pass
 
     def open_model_manager(self) -> None:
         dialog = ModelManagerDialog(
@@ -11207,6 +11222,7 @@ class OnionmindWindow(QMainWindow):
         if self.stop_event is not None:
             self.stop_event.set()
         if self.harness_process is not None and self.harness_process.state() != QProcess.ProcessState.NotRunning:
+            self._kill_harness_tree()
             self.harness_process.kill()
         self.terminal.stop()
         for tunnel in (self.remote_tunnel, self._remote_pending):

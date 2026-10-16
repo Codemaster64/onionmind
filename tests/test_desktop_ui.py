@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -74,6 +75,27 @@ class DesktopUiTests(unittest.TestCase):
         widget.close()
         widget.deleteLater()
         self.app.processEvents()
+
+    @unittest.skipUnless(os.name == "nt", "taskkill tree kill is the Windows path")
+    def test_stopping_the_agent_ends_its_child_processes_too(self) -> None:
+        # Killing only the wrapper left qwen-code's node children running.
+        from PySide6.QtCore import QProcess
+        window = self._window()
+        try:
+            process = QProcess(window)
+            process.start(sys.executable, ["-c",
+                "import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)']); print(c.pid, flush=True); time.sleep(60)"])
+            self.assertTrue(process.waitForReadyRead(10000))
+            child = int(bytes(process.readAllStandardOutput()).decode().strip())
+            window.harness_process = process
+            window._kill_harness_tree()
+            self.assertTrue(process.waitForFinished(10000))
+            gone = subprocess.run(["tasklist", "/FI", f"PID eq {child}"], capture_output=True, text=True)
+            self.assertNotIn(str(child), gone.stdout)
+        finally:
+            window.harness_process = None
+            self._close(window)
 
     def test_tor_status_is_the_single_explicit_button_that_starts_tor(self) -> None:
         """The compact status itself is a native power button with clear semantics."""
