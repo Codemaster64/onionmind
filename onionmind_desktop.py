@@ -201,6 +201,11 @@ from onionmind_desktop_dialogs import (  # noqa: F401
     UnlockDialog,
 )
 _SCREENSHOT_PATH: Optional[str] = None
+# How the post-exit update helper starts: CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+# so it outlives the app without a console window. Not DETACHED_PROCESS:
+# powershell.exe started that way never runs its -File script, so "Restart to
+# install" quit the app and silently installed nothing.
+UPDATE_HELPER_FLAGS = (0x08000000 | 0x00000200) if os.name == "nt" else 0
 
 
 def _v2(host: Any, name: str, *args: Any, default: Any = None) -> Any:
@@ -652,7 +657,8 @@ class OnionmindWindow(QMainWindow):
         self.update_status.setObjectName("updateStatus")
         self.update_status.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_status.setFlat(True)
-        self.update_status.clicked.connect(self.open_settings)
+        # It used to land on General, two clicks away from what it is named for.
+        self.update_status.clicked.connect(lambda: self.open_settings_tab("Updates"))
         self._set_update_notice(None)
         # v2 modelPlus: live speed, graphics memory and context, hidden until on.
         self.speed_status = QLabel("Idle")
@@ -1485,7 +1491,7 @@ class OnionmindWindow(QMainWindow):
 
     def _yolo_toggled(self, on: bool) -> None:
         """The label beside the box states what is actually armed, not a default."""
-        self.approval_state.setText(self._approval_text(on))
+        self._sync_approval_label(on)
         self.inspector.append_activity(
             "YOLO armed: edits and commands run unattended; network boundary unchanged"
             if on else (
@@ -3611,10 +3617,7 @@ class OnionmindWindow(QMainWindow):
     def restart_for_update(self, staging: str) -> None:
         try:
             command = self.update_bridge.apply_command(staging)
-            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the swap helper must
-            # outlive this process without holding on to its console.
-            creationflags = (0x00000008 | 0x00000200) if os.name == "nt" else 0
-            subprocess.Popen(command, creationflags=creationflags, close_fds=True)
+            subprocess.Popen(command, creationflags=UPDATE_HELPER_FLAGS, close_fds=True)
         except OSError as exc:
             self.set_status(f"Could not start the update installer: {exc}")
             return
@@ -5524,7 +5527,14 @@ class OnionmindWindow(QMainWindow):
 
     def _apply_feature_approvals(self, on: bool) -> None:
         del on
-        self.approval_state.setText(self._approval_text(self.yolo_consent.isChecked()))
+        self._sync_approval_label(self.yolo_consent.isChecked())
+
+    def _sync_approval_label(self, yolo: bool) -> None:
+        # The accessible name used to stay "protected actions stop safely"
+        # whatever was armed, so a screen reader announced the wrong mode.
+        text = self._approval_text(yolo)
+        self.approval_state.setText(text)
+        self.approval_state.setAccessibleName(f"Onionmind Agent: {text}")
 
     def _notify(self, title: str, body: str) -> None:
         """A real OS notification (system tray), only with appearance on, the

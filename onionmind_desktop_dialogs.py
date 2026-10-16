@@ -1395,14 +1395,22 @@ class SettingsDialog(QDialog):
         updates_heading.setObjectName("brand")
         outer.addWidget(updates_heading)
         updates_row = QHBoxLayout()
+        available = bool(update_bridge and update_bridge.available)
+        # The installer's source install was labelled a "development copy", and
+        # its Check button silently did nothing; say what does update it.
+        source_install = (Path(__file__).resolve().parent / ".onionmind-revision").is_file()
         version = QLabel(
-            update_bridge.revision_label() if update_bridge and update_bridge.available
+            update_bridge.revision_label() if available
+            else "Installed from source: update it with the onionmind-update command. "
+                 "This in-app updater replaces only the standalone Onionmind.exe bundle."
+            if source_install
             else "Development copy — the updater applies to an installed Onionmind bundle"
         )
         version.setWordWrap(True)
         updates_row.addWidget(version, 1)
         self.check_updates_button = QPushButton("Check for updates")
         self.check_updates_button.setAccessibleName("Check for Onionmind updates over Tor")
+        self.check_updates_button.setEnabled(available)
         self.check_updates_button.clicked.connect(self._check_updates)
         updates_row.addWidget(self.check_updates_button)
         outer.addLayout(updates_row)

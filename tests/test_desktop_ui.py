@@ -277,6 +277,29 @@ class DesktopUiTests(unittest.TestCase):
         finally:
             self._close(window)
 
+    @unittest.skipUnless(os.name == "nt", "the update helper is a Windows PowerShell script")
+    def test_the_update_helper_actually_runs_its_script(self) -> None:
+        # Started with DETACHED_PROCESS, powershell.exe never ran the script.
+        with tempfile.TemporaryDirectory() as temporary:
+            script, log = Path(temporary) / "probe.ps1", Path(temporary) / "probe.log"
+            script.write_text("param([string]$LogFile)\n[IO.File]::WriteAllText($LogFile, 'ran')\n",
+                              encoding="utf-8-sig")
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                              "-File", str(script), "-LogFile", str(log)],
+                             creationflags=ui.UPDATE_HELPER_FLAGS, close_fds=True)
+            self.assertTrue(self._wait_until(log.exists, timeout_ms=20000))
+
+    def test_screen_readers_hear_the_approval_mode_that_is_armed(self) -> None:
+        window = self._window()
+        try:
+            window._sync_approval_label(True)
+            self.assertIn("YOLO", window.approval_state.accessibleName())
+            window._sync_approval_label(False)
+            self.assertEqual(window.approval_state.accessibleName(),
+                             "Onionmind Agent: " + window.approval_state.text())
+        finally:
+            self._close(window)
+
     def test_agent_warns_when_its_context_overflows_the_gpu(self) -> None:
         window = self._window()
         try:
