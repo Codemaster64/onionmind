@@ -476,7 +476,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0onionmind-launch.ps1" 
 @echo off
 title Onionmind Update
 set "ONIONMIND_DIR=%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "`$u=Join-Path `$env:TEMP 'onionmind-update.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.ps1' -OutFile `$u; & `$u -InstallDir `$env:ONIONMIND_DIR; exit `$LASTEXITCODE"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "`$u=Join-Path `$env:TEMP 'onionmind-update.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Codemaster64/onionmind/main/update-onionmind.ps1' -OutFile `$u; & `$u -InstallDir `$env:ONIONMIND_DIR -AllowDirectNetwork; exit `$LASTEXITCODE"
 "@ | Set-Content -LiteralPath (Join-Path $Dir 'onionmind-update.cmd') -Encoding ASCII
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
