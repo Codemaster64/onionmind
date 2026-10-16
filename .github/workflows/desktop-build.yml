@@ -213,6 +213,18 @@ jobs:
             throw "Bundle revision $Revision does not match the built commit ${{ github.sha }}"
           }
 
+      - name: Launch the bundle once
+        shell: powershell
+        # Checking files is not enough: a Nuitka upgrade shipped an exe that
+        # crashed on its first signal connect, and this job published it.
+        run: |
+          $Shot = Join-Path $env:RUNNER_TEMP "bundle-smoke.png"
+          $Process = Start-Process "dist\onionmind_desktop.dist\Onionmind.exe" -ArgumentList "--screenshot", $Shot -PassThru
+          if (-not $Process.WaitForExit(120000)) { $Process.Kill(); throw "Onionmind.exe did not exit within 120s" }
+          if ($Process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Shot)) {
+            throw "Onionmind.exe did not start (exit $($Process.ExitCode))"
+          }
+
       - name: Upload Windows bundle
         uses: actions/upload-artifact@v4
         with:
