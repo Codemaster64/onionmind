@@ -97,7 +97,7 @@ function Resolve-OnionmindPython {
   foreach ($candidate in $candidates | Select-Object -Unique) {
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
     try {
-      $versionText = & $candidate -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null
+      $versionText = & $candidate -c 'import sys; print(''%d.%d'' % sys.version_info[:2])' 2>$null
       if ($LASTEXITCODE -eq 0 -and [version]$versionText -ge [version]'3.10') {
         return [IO.Path]::GetFullPath($candidate)
       }
