@@ -986,6 +986,15 @@ const WEB_ASK = /\b(latest|newest|newer|current(ly)?|today|this week|news|releas
 const WEB_LEAD = /^(is there|are there|can you|could you|please|what('s| is)|do you know)\s+/i;
 const webQuery = text => text.trim().replace(/[?.!]+$/, '').replace(WEB_LEAD, '').slice(0, 70);
 
+// The pill's title is a hover tooltip, which a phone never shows, so a grey
+// "tor" read as "Tor is broken". Tapping it says how Tor starts here.
+$('d-tor').setAttribute('role', 'button');
+$('d-tor').onclick = () => note('ask', status.tor ? 'Tor is running' : 'Tor starts when a search needs it',
+  status.tor ? "Onionmind's background Tor is up; searches you allow go through it."
+    : 'Tick "Allow Tor search this turn" and ask something that needs the web. Tor starts '
+      + 'the moment the model searches; the first start can take a minute or two.',
+  [['OK', () => {}, 'muted']]);
+
 $('form').onsubmit = async e => {
   e.preventDefault();
   if (busy) { stopRun(); return; }
