@@ -4758,7 +4758,9 @@ def parse_terminal_command(
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            command,
+            # Windows PowerShell writes the console's legacy code page; the
+            # terminal decodes UTF-8, so "æøå" came out as "���".
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); " + command,
         )
     if mode == "cmd":
         return ("cmd.exe", "/d", "/s", "/c", command)

@@ -552,7 +552,13 @@ class HarnessAndTerminalTests(unittest.TestCase):
             powershell_text, interpreter="powershell"
         )
         self.assertIn(powershell[0], {"powershell.exe", "pwsh"})
-        self.assertEqual(powershell[-2:], ("-Command", powershell_text))
+        self.assertEqual(powershell[-2], "-Command")
+        self.assertTrue(powershell[-1].endswith("; " + powershell_text))
+        if os.name == "nt":
+            # Non-ASCII output survives the trip into the terminal pane.
+            done = subprocess.run(core.parse_terminal_command('"æøå üñí"', interpreter="powershell"),
+                                  capture_output=True, timeout=60)
+            self.assertEqual(done.stdout.decode("utf-8").strip(), "æøå üñí")
 
         cmd_text = "dir && echo ready"
         self.assertEqual(
