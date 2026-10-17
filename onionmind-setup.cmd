@@ -5190,8 +5190,15 @@ def revert_changes(
                 if retry.returncode != 0:
                     raise RuntimeError(retry.stderr.decode("utf-8", "replace").strip() or "git restore failed")
     for relative in untracked:
+        link = root / relative
+        if link.is_symlink():
+            # The link goes, never what it points at: resolved first, its
+            # target was deleted and the link left behind.
+            _safe_relative(root, str(Path(relative).parent))   # its folder stays inside
+            link.unlink()
+            continue
         target = _safe_relative(root, relative)
-        if target.is_file() or target.is_symlink():
+        if target.is_file():
             target.unlink()
     (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
     record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))

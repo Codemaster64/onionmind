@@ -575,7 +575,7 @@ sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
 chmod 755 "$DIR/onionmind.py"
 
 # build.py injects the two focused native-desktop modules into these payloads.
-fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py 18fa7ecef1d116638c833d375b86e47d6cf4f98be2bc9d2d51b043ad22b4cdfc
+fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py a7013986e463b1b6a5ea561de2cb4baf64bfbb059cabdd2676440021dfc6cba3
 fetch_source "$DIR/onionmind_desktop.py" onionmind_desktop.py 8d12e7c82ba748b048494213d75cb8b87a829ce03140b1368c55ca8c93b4a4d5
 fetch_source "$DIR/onionmind_desktop_theme.py" onionmind_desktop_theme.py 42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed
 fetch_source "$DIR/onionmind_desktop_widgets.py" onionmind_desktop_widgets.py c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b

@@ -1471,6 +1471,30 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             self.assertEqual(core.undo_revert(record), 1)
             self.assertEqual((project / "x.txt").read_text(encoding="utf-8"), "agent edit\n")
 
+    def test_revert_removes_an_untracked_link_never_what_it_points_at(self) -> None:
+        if shutil_which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as backups:
+            root = Path(tmp)
+            run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+            run("init", "-q")
+            run("config", "user.email", "t@example.invalid")
+            run("config", "user.name", "t")
+            (root / "kept.txt").write_text("keep me\n", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-q", "-m", "init")
+            try:
+                os.symlink("kept.txt", root / "link.txt")
+            except OSError:
+                self.skipTest("this account may not create symlinks (Windows without Developer Mode)")
+            snapshot = core.WorkspaceInspector().inspect(root)
+            link = [change for change in snapshot.changes if change.path == "link.txt"]
+            self.assertEqual([change.status for change in link], ["??"])
+            core.revert_changes(root, link, backups)
+            # Resolved first, the link's target was deleted and the link left behind.
+            self.assertFalse((root / "link.txt").is_symlink())
+            self.assertEqual((root / "kept.txt").read_text(encoding="utf-8"), "keep me\n")
+
     def test_revert_hunks_puts_back_only_the_chosen_parts(self) -> None:
         if shutil_which("git") is None:
             self.skipTest("git is not installed")
