@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtCore import QProcess, QStandardPaths, Qt
     from PySide6.QtGui import QKeyEvent
-    from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+    from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QWidget
 
     import onionmind_desktop as ui
     import onionmind_desktop_theme as theme
@@ -1607,14 +1607,24 @@ class LockTests(V2Base):
                 self.assertTrue(window.lock_now())
                 overlay = window.lock_overlay
                 self.assertFalse(overlay.isHidden())
+                # Nothing under the overlay answers while locked: Tab reached the
+                # widgets beneath it, and the app-wide shortcuts still fired
+                # (Ctrl+Shift+S wrote the open conversation out in plaintext).
+                self.assertFalse(window.centralWidget().isEnabled())
+                self.assertFalse(window.statusBar().isEnabled())
+                self.assertFalse(any(shortcut.isEnabled() for shortcut in window.shortcuts))
                 overlay.unlock_button.click()
                 self.assertEqual(overlay.error.text(), "Enter your passphrase to unlock.")
                 overlay.passphrase.setText("wrong")
                 overlay.unlock_button.click()
                 self.assertFalse(overlay.isHidden())
+                self.assertFalse(window.centralWidget().isEnabled())
                 overlay.passphrase.setText("open sesame")
                 overlay.unlock_button.click()
                 self.assertTrue(overlay.isHidden())
+                self.assertTrue(window.centralWidget().isEnabled())
+                self.assertTrue(window.statusBar().isEnabled())
+                self.assertTrue(all(shortcut.isEnabled() for shortcut in window.shortcuts))
                 window.set_lock_setting("lock_after", 5)
                 self.assertTrue(window.idle_timer.isActive())
                 window._last_input -= 6 * 60
@@ -1637,6 +1647,25 @@ class LockTests(V2Base):
             finally:
                 window.set_lock_setting("lock_after", 0)
                 self._close(window)
+
+    def test_on_the_lock_closes_a_dialog_left_open_over_the_window(self) -> None:
+        # The idle lock fires with Settings (or any dialog) still open; the
+        # overlay sits under it, so the dialog has to go - closing is its Cancel.
+        window = self._window(lock=True)
+        try:
+            self.assertTrue(window.set_passphrase("open sesame"))
+            left_open = QDialog(window)
+            left_open.setModal(True)
+            left_open.show()
+            self.app.processEvents()
+            self.assertIs(QApplication.activeModalWidget(), left_open)
+            self.assertTrue(window.lock_now())
+            self.assertTrue(left_open.isHidden())
+            window.lock_overlay.passphrase.setText("open sesame")
+            window.lock_overlay.try_unlock()
+            self.assertTrue(window.lock_overlay.isHidden())
+        finally:
+            self._close(window)
 
 
 class AppearanceTests(V2Base):

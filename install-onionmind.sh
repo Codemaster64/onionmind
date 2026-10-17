@@ -10998,10 +10998,28 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Set a passphrase in Settings → Privacy before locking.")
             self.open_settings_tab("Privacy")
             return False
+        self._lock_ui(True)
         self.lock_overlay.lock()
         self.inspector.append_activity("Onionmind locked")
         self._drop_key_if_locked()
         return True
+
+    def _lock_ui(self, locked: bool) -> None:
+        """While locked nothing under the overlay answers. The overlay only
+        covered the window: Tab still reached the widgets beneath it, and the
+        app-wide shortcuts still fired - Ctrl+Shift+S wrote the open
+        conversation out in plaintext, Ctrl+K listed every session."""
+        self.centralWidget().setEnabled(not locked)
+        self.statusBar().setEnabled(not locked)      # its Updates… button opens Settings
+        for shortcut in self.shortcuts:
+            shortcut.setEnabled(not locked)
+        # A dialog or menu left open when the idle lock fires stays on top of
+        # the overlay; closing it is its Cancel.
+        for _ in range(8):
+            left_open = QApplication.activePopupWidget() or QApplication.activeModalWidget()
+            if not locked or left_open is None:
+                break
+            left_open.close()
 
     def _drop_key_if_locked(self) -> None:
         """Take the data key out of memory while the window is locked.
@@ -11018,6 +11036,7 @@ class OnionmindWindow(QMainWindow):
             self.inspector.append_activity("Data key removed from memory until unlock")
 
     def _after_unlock(self) -> None:
+        self._lock_ui(False)
         self._egress_counts = None                   # counts read while locked came back empty
         self._refresh_session_rows()
         self.set_status("Unlocked.")
