@@ -608,6 +608,7 @@ class UpdateFeedTests(unittest.TestCase):
             self._manifest_dict(asset="bundle/inner.zip"),
             self._manifest_dict(asset_url="http://github.com/Onionmind-Windows-x64.zip"),
             self._manifest_dict(asset_url="https://evil.example.com/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(asset_url="https://evilgithub.com/Onionmind-Windows-x64.zip"),
             self._manifest_dict(size=0),
             self._manifest_dict(size="1024"),
             self._manifest_dict(sha256="A" * 64),

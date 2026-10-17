@@ -760,7 +760,10 @@ def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
             lines = raw.decode("utf-8", "replace").splitlines()
             if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
                 continue
-            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
+            # Already-sealed lines stay as they are: sealing one twice reads
+            # back as "enc1:..." text, which every reader drops as junk.
+            body = "".join((line if line.startswith(_ENC_LINE) else vault.encrypt_line(line)) + "\n"
+                           for line in lines if line.strip())
             _atomic_write_bytes(path, body.encode("ascii"))
         elif is_encrypted(raw):
             continue

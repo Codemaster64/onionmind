@@ -18758,7 +18758,10 @@ def encrypt_data_folder(root: PathInput, vault: Vault) -> int:
             lines = raw.decode("utf-8", "replace").splitlines()
             if all(line.startswith(_ENC_LINE) or not line.strip() for line in lines):
                 continue
-            body = "".join(vault.encrypt_line(line) + "\n" for line in lines if line.strip())
+            # Already-sealed lines stay as they are: sealing one twice reads
+            # back as "enc1:..." text, which every reader drops as junk.
+            body = "".join((line if line.startswith(_ENC_LINE) else vault.encrypt_line(line)) + "\n"
+                           for line in lines if line.strip())
             _atomic_write_bytes(path, body.encode("ascii"))
         elif is_encrypted(raw):
             continue
@@ -19221,6 +19224,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 import zipfile
 
 from onionmind_desktop_vault import (
@@ -19302,13 +19306,15 @@ def parse_update_manifest(text: str) -> UpdateManifest:
         raise BundleUpdateError("update manifest has no valid version")
     if not isinstance(asset_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset_name):
         raise BundleUpdateError("update manifest has no valid asset name")
+    # A bare suffix match let "evilgithub.com" through; match whole labels.
+    try:
+        asset_host = (urlsplit(asset_url).hostname or "") if isinstance(asset_url, str) else ""
+    except ValueError:
+        asset_host = ""
     if (
         not isinstance(asset_url, str)
         or not asset_url.startswith("https://")
-        or not any(
-            asset_url[len("https://") :].split("/", 1)[0].endswith(host)
-            for host in _UPDATE_ASSET_HOSTS
-        )
+        or not any(asset_host == host or asset_host.endswith("." + host) for host in _UPDATE_ASSET_HOSTS)
     ):
         raise BundleUpdateError("update manifest asset URL is not a GitHub HTTPS URL")
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:

@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 import zipfile
 
 from onionmind_desktop_vault import (
@@ -95,13 +96,15 @@ def parse_update_manifest(text: str) -> UpdateManifest:
         raise BundleUpdateError("update manifest has no valid version")
     if not isinstance(asset_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", asset_name):
         raise BundleUpdateError("update manifest has no valid asset name")
+    # A bare suffix match let "evilgithub.com" through; match whole labels.
+    try:
+        asset_host = (urlsplit(asset_url).hostname or "") if isinstance(asset_url, str) else ""
+    except ValueError:
+        asset_host = ""
     if (
         not isinstance(asset_url, str)
         or not asset_url.startswith("https://")
-        or not any(
-            asset_url[len("https://") :].split("/", 1)[0].endswith(host)
-            for host in _UPDATE_ASSET_HOSTS
-        )
+        or not any(asset_host == host or asset_host.endswith("." + host) for host in _UPDATE_ASSET_HOSTS)
     ):
         raise BundleUpdateError("update manifest asset URL is not a GitHub HTTPS URL")
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:

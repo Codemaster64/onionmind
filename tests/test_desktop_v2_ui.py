@@ -997,7 +997,7 @@ class NetlogTests(V2Base):
         with tempfile.TemporaryDirectory() as tmp:
             core = SimpleNamespace(MODEL="inferno", BACKEND="onionmind", NET_LOG=str(Path(tmp) / "agent-net.log"))
             today = time.strftime("%Y-%m-%d")
-            Path(core.NET_LOG).write_text(f"{today} 10:00:00 tor pypi.org:443\n", encoding="utf-8")
+            Path(core.NET_LOG).write_text(f"{today} 00:00:00 tor pypi.org:443\n", encoding="utf-8")
             window = self._window(core=core, netlog=True)
             try:
                 window.egress_path = Path(tmp) / "net.jsonl"

@@ -101,6 +101,14 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("enc1:") for line in
                             (self.root / "network-log.jsonl").read_text().splitlines()))
 
+    def test_a_half_sealed_log_keeps_its_sealed_lines(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        path = self.root / "network-log.jsonl"
+        core.EgressLog(path, vault).append("Tor", "sealed")
+        core.EgressLog(path).append("Direct", "plain")      # written without the vault
+        core.encrypt_data_folder(self.root, vault)
+        self.assertEqual([row["what"] for row in core.EgressLog(path, vault).entries()], ["sealed", "plain"])
+
     def test_reopening_uses_the_stored_key(self) -> None:
         vault = core.open_vault(self.root, keystore=self.store)
         core.SettingsStore(self.root / "settings.json", vault=vault).save({"note": SECRET})
