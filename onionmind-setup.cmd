@@ -18565,7 +18565,9 @@ def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = 
     if isinstance(header.get("password"), dict):
         if password is None:
             raise WrongPassword("A password is needed to open Onionmind's data.")
-        return Vault(root, _unwrap_key(header["password"], password), header)
+        vault = Vault(root, _unwrap_key(header["password"], password), header)
+        encrypt_data_folder(root, vault)            # as opening through the key store does
+        return vault
     store = keystore or keystore_for(root, header.get("keystore"))
     key = store.get()
     if key is None:
