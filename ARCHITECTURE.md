@@ -83,14 +83,20 @@ no way off.** It is enforced in layers, all funnelled through `agent_env()`:
    lands on Tor automatically.
 3. **Deny direct sockets.** `_contain_env()` injects two shims (`_write_shims`):
    - `PY_SHIM` (via `PYTHONPATH`/`sitecustomize.py`) overrides `socket.connect`,
-     `connect_ex`, and `getaddrinfo` — non-loopback connects and name lookups
-     raise. Names never leak to the ISP resolver; Tor resolves at the exit.
-   - `JS_SHIM` (via `NODE_OPTIONS --require`) does the same for Node's `net` and
-     `dns`. Note the Windows path quirk handled in `_contain_env`: `NODE_OPTIONS`
-     eats backslashes, so the shim path is forward-slashed.
+     `connect_ex`, `sendto`/`sendmsg` and every name lookup (`getaddrinfo`,
+     `gethostbyname`/`_ex`, `gethostbyaddr`, `getnameinfo`) — non-loopback
+     connects, datagrams and lookups raise. Names never leak to the ISP
+     resolver; Tor resolves at the exit. The wildcard addresses a server binds
+     to (`0.0.0.0`, `::`) count as local: binding is not leaving.
+   - `JS_SHIM` (via `NODE_OPTIONS --require`) does the same for Node's `net`,
+     `dgram` and `dns` (callbacks, `dns.promises`, and both `Resolver`s). Note
+     the Windows path quirk handled in `_contain_env`: `NODE_OPTIONS` eats
+     backslashes, so the shim path is forward-slashed.
 4. **Known gap, documented not hidden.** Tools that ignore proxies entirely
-   (`ping`, `nslookup`, `traceroute`) and any compiled binary or `python -S` still
-   go straight out. The `ponytail:` comments in `agent_argv`/`_contain_env` say so
+   (`ping`, `nslookup`, `traceroute`), any compiled binary or `python -S`, and
+   on Windows Python's asyncio reaching a literal IP address (its proactor loop
+   works below the socket methods the shim wraps) still go straight out. The
+   `ponytail:` comments in `agent_argv`/`_contain_env`/`_write_shims` say so
    and name the only real fix: an **OS egress rule** (firewall-by-user, container,
    netns) — which is what Matchstick's nftables ruleset actually is.
 

@@ -1729,11 +1729,12 @@ PY_SHIM = '''# Onionmind: this interpreter may only open loopback sockets. Anyth
 # that, so it fails here instead of leaving the machine.
 import socket
 
-_LOCAL = ("127.0.0.1", "::1", "localhost", "")
+# Loopback, plus the wildcard a server binds to: binding is not leaving.
+_LOCAL = ("127.0.0.1", "::1", "localhost", "", "0.0.0.0", "::")
 _OFF = "onionmind: direct network access is off - go through HTTPS_PROXY (Tor)"
 _connect = socket.socket.connect
 _connect_ex = socket.socket.connect_ex
-_getaddrinfo = socket.getaddrinfo
+_sendto = socket.socket.sendto
 
 
 def _local(address):
@@ -1753,17 +1754,41 @@ def connect_ex(self, address):
     return _connect_ex(self, address)
 
 
-def getaddrinfo(host, *args, **kwargs):
+def sendto(self, data, *args):
+    # (data, address) or (data, flags, address): a datagram - a DNS query among
+    # them - leaves without ever calling connect.
+    if args and not _local(args[-1]):
+        raise OSError(_OFF)
+    return _sendto(self, data, *args)
+
+
+def _no_lookup(real):
     # Resolving a name is already a packet to the ISP's resolver saying what the
-    # agent is doing. Tor resolves at the exit instead, so names never get here.
-    if host is not None and str(host) not in _LOCAL:
-        raise socket.gaierror(_OFF)
-    return _getaddrinfo(host, *args, **kwargs)
+    # agent is doing. Tor resolves at the exit instead, so names never get here:
+    # not through getaddrinfo, gethostbyname and its kin, or a reverse lookup.
+    def lookup(*args, **kwargs):
+        target = args[0] if args else kwargs.get("host")
+        host = target[0] if isinstance(target, tuple) else target
+        if host is not None and str(host) not in _LOCAL:
+            raise socket.gaierror(_OFF)
+        return real(*args, **kwargs)
+    return lookup
 
 
 socket.socket.connect = connect
 socket.socket.connect_ex = connect_ex
-socket.getaddrinfo = getaddrinfo
+socket.socket.sendto = sendto
+if hasattr(socket.socket, "sendmsg"):               # POSIX: (buffers, ancdata, flags, address)
+    _sendmsg = socket.socket.sendmsg
+
+    def sendmsg(self, buffers, *args):
+        if len(args) > 2 and not _local(args[2]):
+            raise OSError(_OFF)
+        return _sendmsg(self, buffers, *args)
+
+    socket.socket.sendmsg = sendmsg
+for _name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+    setattr(socket, _name, _no_lookup(getattr(socket, _name)))
 '''
 
 JS_SHIM = """// Onionmind: this node process may only open loopback sockets. Anything that
@@ -1772,7 +1797,11 @@ JS_SHIM = """// Onionmind: this node process may only open loopback sockets. Any
 // work. A socket to any other address is bypassing Tor and fails here.
 const net = require('net');
 const dns = require('dns');
-const LOCAL = new Set(['127.0.0.1', '::1', 'localhost', '']);
+const dgram = require('dgram');
+// Loopback, plus the wildcard a server or a UDP socket binds to: binding is not
+// leaving, and refusing 0.0.0.0 broke every UDP socket and every server
+// listening on all interfaces.
+const LOCAL = new Set(['127.0.0.1', '::1', 'localhost', '', '0.0.0.0', '::']);
 const OFF = 'onionmind: direct network access is off - go through HTTPS_PROXY (Tor)';
 const connect = net.Socket.prototype.connect;
 
@@ -1792,20 +1821,44 @@ net.Socket.prototype.connect = function (...args) {
 };
 
 // Same reason as the python shim: a lookup is a packet that says what the agent
-// is doing. Tor resolves at the exit, so nothing legitimate resolves here.
-for (const name of ['lookup', 'resolve', 'resolve4', 'resolve6']) {
-  const real = dns[name];
-  if (!real) continue;
-  dns[name] = function (host, ...rest) {
-    if (!LOCAL.has(String(host))) {
-      const cb = rest[rest.length - 1];
-      const err = new Error(OFF);
-      if (typeof cb === 'function') return cb(err);
-      throw err;
-    }
-    return real.call(dns, host, ...rest);
-  };
+// is doing. Tor resolves at the exit, so nothing legitimate resolves here -
+// through the callback API, dns.promises, or a Resolver of either kind.
+const LOOKUPS = /^(lookup|lookupService|resolve[A-Za-z0-9]*|reverse)$/;
+function refuse(target, promises) {
+  for (const name of Object.getOwnPropertyNames(target)) {
+    if (!LOOKUPS.test(name) || typeof target[name] !== 'function') continue;
+    const real = target[name];
+    target[name] = function (host, ...rest) {
+      if (!LOCAL.has(String(host))) {
+        const err = new Error(OFF);
+        const cb = rest[rest.length - 1];
+        if (promises) return Promise.reject(err);
+        if (typeof cb === 'function') return cb(err);
+        throw err;
+      }
+      return real.call(this, host, ...rest);
+    };
+  }
 }
+refuse(dns, false);
+refuse(dns.Resolver.prototype, false);
+refuse(dns.promises, true);
+refuse(dns.promises.Resolver.prototype, true);
+
+// A datagram never calls connect() before it leaves, so UDP is checked too.
+const send = dgram.Socket.prototype.send;
+dgram.Socket.prototype.send = function (msg, ...args) {
+  // send(msg[, offset, length][, port][, address][, callback]): the address is
+  // the one string among the rest; a connected socket has none.
+  const address = args.find((arg) => typeof arg === 'string');
+  if (address !== undefined && !LOCAL.has(address)) throw new Error(OFF);
+  return send.call(this, msg, ...args);
+};
+const udpConnect = dgram.Socket.prototype.connect;
+dgram.Socket.prototype.connect = function (port, address, ...rest) {
+  if (typeof address === 'string' && !LOCAL.has(address)) throw new Error(OFF);
+  return udpConnect.call(this, port, address, ...rest);
+};
 """
 
 
@@ -1826,8 +1879,11 @@ def _write_shims():
     """Drop the two shims next to the log and return (PYTHONPATH dir, node file).
 
     ponytail: covers python and node, the two runtimes a coding agent reaches
-    for. A compiled binary, or `python -S`, still goes straight out; only an OS
-    egress rule - firewall by user, container, network namespace - closes that.
+    for. A compiled binary, or `python -S`, still goes straight out, as does
+    asyncio on Windows reaching a literal IP (its proactor works below the
+    socket methods wrapped here, and no audit event sees it; host names are
+    still refused at the lookup). Only an OS egress rule - firewall by user,
+    container, network namespace - closes that.
     """
     shim_dir = os.path.join(os.path.dirname(NET_LOG), "shims")
     os.makedirs(shim_dir, exist_ok=True)
