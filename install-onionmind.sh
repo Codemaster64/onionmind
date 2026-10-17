@@ -4959,12 +4959,20 @@ def blocked_paths(rules: Mapping[str, Any]) -> list[str]:
 # request names one of these; anything else is not an edit.
 AGENT_EDIT_TOOLS = frozenset({"edit", "write_file", "notebook_edit", "replace"})
 AGENT_SHELL_TOOLS = frozenset({"run_shell_command", "exec", "monitor"})
+# A command that IS a test run, from its first word: a runner (through
+# `python -m` or a ./ wrapper), or an interpreter running a file in tests/.
 _TEST_COMMAND = re.compile(
-    r"(^|[\s;&|/])(pytest|py\.test|unittest|tox|nox|npm (run )?test|yarn test|pnpm test|"
-    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake( test)?|"
-    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (check|test))\b|(^|[\s/])tests?/",
+    r"(?:(?:python[\d.]*|py)(?:\.exe)?\s+-m\s+|\.[\\/])?"
+    r"(?:pytest|py\.test|unittest|tox|nox|npm (?:run )?test|yarn test|pnpm test|"
+    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake(?: test)?|"
+    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (?:check|test))\b"
+    r"|(?:python[\d.]*|py|node)(?:\.exe)?\s+(?:\.[\\/])?tests?[\\/]",
     re.IGNORECASE,
 )
+# Chaining, pipes, redirection and substitution (sh and PowerShell alike) make
+# a command more than a test run, whatever it mentions: "rm -rf src; pytest"
+# was allowed without asking because it contained "pytest".
+_SHELL_CONTROL = re.compile(r"[;&|<>`()\r\n]")
 
 
 def _request_path(tool_input: Mapping[str, Any]) -> str:
@@ -5046,7 +5054,7 @@ def rule_decision(
         for pattern in blocked_paths(rules):
             if pattern and pattern in command:
                 return "deny", f"the command touches a blocked path ({pattern})"
-        if rules.get("runTests") and _TEST_COMMAND.search(command):
+        if rules.get("runTests") and not _SHELL_CONTROL.search(command) and _TEST_COMMAND.match(command.strip()):
             return "allow", "project rule: run the test suite without asking"
         return "ask", ""
     if tool_name in AGENT_EDIT_TOOLS:
