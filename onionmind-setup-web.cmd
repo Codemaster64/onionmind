@@ -299,10 +299,10 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
 $desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' 'a7013986e463b1b6a5ea561de2cb4baf64bfbb059cabdd2676440021dfc6cba3'
-$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '8d12e7c82ba748b048494213d75cb8b87a829ce03140b1368c55ca8c93b4a4d5'
+$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '36c55b0a9c6ed16dfb8c17ae2898b57fcbf4eb7ac950f71bad6cb731cc3eea6d'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
-$desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' '23b0f683db63b3bf5edfeb409de9db81c26dc8c2f52720982c5a4c6fce9e4539'
+$desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' '0c2b004508eb0cc875feae657e3f21b79159c4c28e3f6bee995de1dd8fb20e27'
 $desktopDialogs = Get-OnionmindSource 'onionmind_desktop_dialogs.py' '3efb4bb71fa36c226dfadada102b26e428a7ed62708de527b24533296986f628'
 $desktopVault = Get-OnionmindSource 'onionmind_desktop_vault.py' '2d719d97cb555bb79cb2e10ed72c33155e2a82251dc9c360b130216b010e02ed'
 $desktopNetlog = Get-OnionmindSource 'onionmind_desktop_netlog.py' '2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398'
