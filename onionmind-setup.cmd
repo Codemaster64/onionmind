@@ -5129,6 +5129,15 @@ def _safe_relative(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _repo_top(root: Path) -> Path:
+    """Where git's change paths start: the top of the repository, which is
+    above the project when a folder inside a repository is open. Taken from
+    the open folder instead, a revert there failed or touched nothing."""
+    result = WorkspaceInspector._git(root, "rev-parse", "--show-toplevel")
+    top = os.fsdecode(result.stdout).strip() if result.returncode == 0 else ""
+    return Path(top).resolve() if top else root
+
+
 def _backup_copy(source: Path, target: Path, vault: Any) -> None:
     """copy2, encrypted when a vault is open; the file mode rides on the backup."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -5153,7 +5162,7 @@ def revert_changes(
     `changes` are WorkspaceChange-like (status, path). The backup lives under
     backup_root, outside the project, until the next revert replaces it.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     backup = Path(backup_root).expanduser() / uuid4().hex
     tracked: list[str] = []
     untracked: list[str] = []
@@ -5253,7 +5262,7 @@ def _make_hunk(index: int, raw: list[str]) -> DiffHunk:
 
 def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
     """The hunks of one changed, tracked file, for choosing which to revert."""
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     _safe_relative(root, relative)
     return _file_diff(root, relative)[1]
 
@@ -5266,7 +5275,7 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
     The diff is re-read here, not trusted from the UI: when the file changed
     since the hunks were shown, the patch no longer applies and nothing is touched.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     source = _safe_relative(root, relative)
     header, hunks = _file_diff(root, relative)
     wanted = sorted(set(int(i) for i in indices))

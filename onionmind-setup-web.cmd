@@ -298,7 +298,7 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
-$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '40f0eb2f7f9be325d352aa631bcbaad4cff758602f2da353a8f965650f9e81c6'
+$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '18fa7ecef1d116638c833d375b86e47d6cf4f98be2bc9d2d51b043ad22b4cdfc'
 $desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '8d12e7c82ba748b048494213d75cb8b87a829ce03140b1368c55ca8c93b4a4d5'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'

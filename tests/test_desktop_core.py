@@ -1445,6 +1445,32 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             self.assertEqual((root / "a[1].txt").read_text(encoding="utf-8"), "original\n")
             self.assertEqual((root / "a1.txt").read_text(encoding="utf-8"), "work in progress\n")
 
+    def test_revert_works_when_the_project_is_a_folder_inside_the_repository(self) -> None:
+        if shutil_which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as backups:
+            root = Path(tmp)
+            run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+            run("init", "-q")
+            run("config", "user.email", "t@example.invalid")
+            run("config", "user.name", "t")
+            project = root / "app"
+            project.mkdir()
+            (project / "x.txt").write_text("original\n", encoding="utf-8")
+            (root / "x.txt").write_text("top\n", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-q", "-m", "init")
+            (project / "x.txt").write_text("agent edit\n", encoding="utf-8")
+            snapshot = core.WorkspaceInspector().inspect(project)
+            # git names changes from the top of the repository, not the open folder.
+            self.assertEqual([change.path for change in snapshot.changes], ["app/x.txt"])
+            self.assertEqual(len(core.diff_hunks(project, "app/x.txt")), 1)
+            record = core.revert_changes(project, snapshot.changes, backups)
+            self.assertEqual((project / "x.txt").read_text(encoding="utf-8"), "original\n")
+            self.assertEqual((root / "x.txt").read_text(encoding="utf-8"), "top\n")
+            self.assertEqual(core.undo_revert(record), 1)
+            self.assertEqual((project / "x.txt").read_text(encoding="utf-8"), "agent edit\n")
+
     def test_revert_hunks_puts_back_only_the_chosen_parts(self) -> None:
         if shutil_which("git") is None:
             self.skipTest("git is not installed")
