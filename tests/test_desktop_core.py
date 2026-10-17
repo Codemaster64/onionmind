@@ -1423,6 +1423,28 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 core.revert_changes(root, [{"status": "M", "path": "../escape.txt"}], backups)
 
+    def test_revert_takes_a_file_name_as_a_name_not_a_git_pattern(self) -> None:
+        if shutil_which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as backups:
+            root = Path(tmp)
+            run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+            run("init", "-q")
+            run("config", "user.email", "t@example.invalid")
+            run("config", "user.name", "t")
+            for name in ("a[1].txt", "a1.txt"):
+                (root / name).write_text("original\n", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-q", "-m", "init")
+            for name in ("a[1].txt", "a1.txt"):
+                (root / name).write_text("work in progress\n", encoding="utf-8")
+            # As a git pattern "a[1].txt" also matches a1.txt: its hunks were
+            # mixed in, and reverting a[1].txt reverted a1.txt with no backup.
+            self.assertEqual(len(core.diff_hunks(root, "a[1].txt")), 1)
+            core.revert_changes(root, [{"status": " M", "path": "a[1].txt"}], backups)
+            self.assertEqual((root / "a[1].txt").read_text(encoding="utf-8"), "original\n")
+            self.assertEqual((root / "a1.txt").read_text(encoding="utf-8"), "work in progress\n")
+
     def test_revert_hunks_puts_back_only_the_chosen_parts(self) -> None:
         if shutil_which("git") is None:
             self.skipTest("git is not installed")

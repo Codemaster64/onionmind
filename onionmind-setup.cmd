@@ -3928,6 +3928,9 @@ class WorkspaceInspector:
         environment = os.environ.copy()
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["LC_ALL"] = "C"
+        # Every path handed to git here is a file name, never a pattern: as a
+        # glob, reverting "a[1].txt" also reverted a1.txt, with no backup.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
         try:
             return subprocess.run(
                 [
