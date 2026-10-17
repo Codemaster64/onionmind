@@ -2232,10 +2232,19 @@ def run_legacy_ui():
     def start():
         try:
             detect_backend()
-            tor_check()
             models = installed_models() if BACKEND == "ollama" else []
+            # Chat is local. Requiring Tor here left the window "not ready",
+            # its models unlisted, whenever Tor was off; like the terminal UI,
+            # verify Tor only when a listener already exists.
+            tor = "Tor off"
+            if tor_proxy_port() is not None:
+                try:
+                    tor_check()
+                    tor = "Tor connected"
+                except SystemExit:
+                    tor = "Tor not verified"
             root.after(0, lambda: populate_models(models))
-            root.after(0, lambda: set_status(f"ready · {MODEL} · Tor connected", "#9ef0b0"))
+            root.after(0, lambda: set_status(f"ready · {MODEL} · {tor}", "#9ef0b0"))
             root.after(0, lambda: append("onion", f"Ready with {MODEL}. Ask anything."))
         except (Exception, SystemExit) as exc:
             root.after(0, lambda: set_status("not ready", "#e39a9a"))
