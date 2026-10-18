@@ -14239,7 +14239,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QStyledItemDelegate,
-    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QTreeWidget,
@@ -14790,28 +14789,27 @@ class _TwoLineDelegate(QStyledItemDelegate):
     """Rail rows as the design draws them: a title, then a smaller muted line
     (the project path or the session time) instead of two equal lines."""
 
-    def __init__(self, title_weight: int, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, title_weight: int, text_left: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._title_weight = title_weight
+        self._text_left = text_left   # past the row's icon, if it has one
+
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        option.text = ""   # the base paint draws background, selection and icon only
 
     def paint(self, painter, option, index) -> None:
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        title, _, meta = opt.text.replace(" ", "\n").partition("\n")
-        opt.text = ""
-        style = opt.widget.style() if opt.widget else None
-        if style is not None:
-            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        super().paint(painter, option, index)
+        text = _as_text(index.data(Qt.ItemDataRole.DisplayRole))
+        title, _, meta = text.partition("\n")
+        rect = option.rect.adjusted(self._text_left, 5, -8, -5)
         tokens = theme_tokens()
-        rect = opt.rect.adjusted(10, 5, -8, -5)
-        if not opt.icon.isNull():
-            rect.setLeft(rect.left() + opt.decorationSize.width() + 8)
         painter.save()
-        title_font = QFont(opt.font)
+        title_font = QFont(option.font)
         title_font.setWeight(QFont.Weight(self._title_weight))
-        meta_font = QFont(opt.font)
-        meta_font.setPointSizeF(max(6.0, opt.font.pointSizeF() * 0.85))
-        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        meta_font = QFont(option.font)
+        meta_font.setPointSizeF(max(6.0, option.font.pointSizeF() * 0.85))
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
         painter.setFont(title_font)
         painter.setPen(QColor(tokens["strong"] if selected else tokens["text"]))
         top = painter.fontMetrics()
@@ -14912,7 +14910,7 @@ class LeftRail(QWidget):
         self.projects = QListWidget()
         self.projects.setMaximumHeight(240)
         self.projects.setAccessibleName("Projects")
-        self.projects.setItemDelegate(_TwoLineDelegate(500, self.projects))
+        self.projects.setItemDelegate(_TwoLineDelegate(500, 36, self.projects))
         self.projects.itemClicked.connect(
             lambda item: self.projectSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -14990,7 +14988,7 @@ class LeftRail(QWidget):
         layout.addWidget(self.session_filter)
         self.sessions = QListWidget()
         self.sessions.setAccessibleName("Saved sessions")
-        self.sessions.setItemDelegate(_TwoLineDelegate(400, self.sessions))
+        self.sessions.setItemDelegate(_TwoLineDelegate(400, 10, self.sessions))
         self.sessions.itemClicked.connect(
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
