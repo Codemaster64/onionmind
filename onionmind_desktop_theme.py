@@ -914,8 +914,13 @@ def _register_system_fonts(app: QApplication) -> None:
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
     ]
     ui_family = ""
-    # Nocturne's face is Inter at weight 500 for headings. It is not bundled,
-    # so it wins only where the system already has it.
+    # Nocturne's face is Inter at weight 500 for headings. It ships in fonts/
+    # (SIL OFL); an install without that folder falls back to a system Inter,
+    # then to the readable families below.
+    for path in sorted((MODULE_DIR / "fonts").glob("Inter-*.ttf")):
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        if font_id >= 0 and "Inter" in QFontDatabase.applicationFontFamilies(font_id):
+            ui_family = "Inter"
     if "Inter" in QFontDatabase.families():
         ui_family = "Inter"
     for path in candidates:

@@ -67,6 +67,13 @@ at rest, installed into the desktop runtime from PyPI and bundled in the
 Windows build. Copyright (c) Individual contributors. Full text:
 https://github.com/pyca/cryptography/blob/main/LICENSE
 
+## Inter (SIL Open Font License 1.1)
+
+https://github.com/rsms/inter — the desktop UI typeface. `fonts/` carries the
+Regular, Medium and SemiBold TTFs from the v4.1 release, unmodified, and is
+bundled in the Windows build. Copyright (c) 2016 The Inter Project Authors.
+Full text: `fonts/LICENSE.txt`.
+
 ## DeepSeek Harness (MIT)
 
 https://github.com/deepseek-ai/deepseek-harness — the optional repository-aware

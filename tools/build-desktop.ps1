@@ -37,6 +37,10 @@ $RuntimeAssets = @(
     "onionmind.ico",
     "logo.svg",
     "logo-small.svg",
+    "fonts/Inter-Regular.ttf",
+    "fonts/Inter-Medium.ttf",
+    "fonts/Inter-SemiBold.ttf",
+    "fonts/LICENSE.txt",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
 )
@@ -291,6 +295,10 @@ $NuitkaArguments = @(
     "--include-data-files=$(Join-Path $RepoRoot 'onionmind.ico')=onionmind.ico",
     "--include-data-files=$(Join-Path $RepoRoot 'logo.svg')=logo.svg",
     "--include-data-files=$(Join-Path $RepoRoot 'logo-small.svg')=logo-small.svg",
+    "--include-data-files=$(Join-Path $RepoRoot 'fonts/Inter-Regular.ttf')=fonts/Inter-Regular.ttf",
+    "--include-data-files=$(Join-Path $RepoRoot 'fonts/Inter-Medium.ttf')=fonts/Inter-Medium.ttf",
+    "--include-data-files=$(Join-Path $RepoRoot 'fonts/Inter-SemiBold.ttf')=fonts/Inter-SemiBold.ttf",
+    "--include-data-files=$(Join-Path $RepoRoot 'fonts/LICENSE.txt')=fonts/LICENSE.txt",
     "--include-data-files=$(Join-Path $RepoRoot 'LICENSE')=LICENSE",
     "--include-data-files=$(Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md')=THIRD_PARTY_NOTICES.md",
     $EntryPoint

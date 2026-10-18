@@ -577,7 +577,7 @@ chmod 755 "$DIR/onionmind.py"
 # build.py injects the two focused native-desktop modules into these payloads.
 fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py 950eaa31a2e4c60930cab8e56db80ff7bc6f2e28a90325bdad02ff43a9d1dc0b
 fetch_source "$DIR/onionmind_desktop.py" onionmind_desktop.py 22e3cfaaf1f336656ab096fda710f5e627608517664db1df86361162ebde8625
-fetch_source "$DIR/onionmind_desktop_theme.py" onionmind_desktop_theme.py 73b4ee3029da5669a841d183a83c877e4363022877c1632ff08c7e4c00eda54c
+fetch_source "$DIR/onionmind_desktop_theme.py" onionmind_desktop_theme.py d6a584b65df6d56e685f30286982382c1a36697abc66d9dfa59ccd9274e6ccce
 fetch_source "$DIR/onionmind_desktop_widgets.py" onionmind_desktop_widgets.py 790aad277f1e6a5fd972f43802057f6f384a9470f0cc859e72cff7a8c7e55a2f
 fetch_source "$DIR/onionmind_desktop_panes.py" onionmind_desktop_panes.py d73a45a54741cf34d1086c0a73a97446222d7256b6109b6793061d8f29061ab2
 fetch_source "$DIR/onionmind_desktop_dialogs.py" onionmind_desktop_dialogs.py 3efb4bb71fa36c226dfadada102b26e428a7ed62708de527b24533296986f628
