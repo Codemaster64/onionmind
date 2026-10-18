@@ -608,7 +608,12 @@ class UpdateFeedTests(unittest.TestCase):
             self._manifest_dict(asset="bundle/inner.zip"),
             self._manifest_dict(asset_url="http://github.com/Onionmind-Windows-x64.zip"),
             self._manifest_dict(asset_url="https://evil.example.com/Onionmind-Windows-x64.zip"),
+            # The host is the whole host: not a name that ends like GitHub's,
+            # nor GitHub's name tucked into a fragment, query or user part.
             self._manifest_dict(asset_url="https://evilgithub.com/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(asset_url="https://evil.example#github.com/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(asset_url="https://evil.example?q=github.io/Onionmind-Windows-x64.zip"),
+            self._manifest_dict(asset_url="https://github.com@evil.example/Onionmind-Windows-x64.zip"),
             self._manifest_dict(size=0),
             self._manifest_dict(size="1024"),
             self._manifest_dict(sha256="A" * 64),
@@ -619,6 +624,9 @@ class UpdateFeedTests(unittest.TestCase):
                 core.parse_update_manifest(json.dumps(payload))
         with self.assertRaises(core.BundleUpdateError):
             core.parse_update_manifest("not json at all")
+        # GitHub's own asset hosts, subdomains included, still pass.
+        url = "https://objects.githubusercontent.com/Onionmind-Windows-x64.zip"
+        self.assertEqual(core.parse_update_manifest(json.dumps(self._manifest_dict(asset_url=url))).asset_url, url)
 
     def test_update_state_is_the_honest_tri_state(self):
         manifest = core.parse_update_manifest(json.dumps(self._manifest_dict()))
