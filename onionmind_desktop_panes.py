@@ -6,6 +6,7 @@ Part of onionmind_desktop, which re-exports every name defined here.
 
 from __future__ import annotations
 
+import codecs
 import copy
 import dataclasses
 import json
@@ -1022,6 +1023,9 @@ class TerminalPane(QFrame):
         self.setMaximumHeight(200)
         self.workspace = str(Path.cwd())
         self.process = QProcess(self)
+        # A read can end inside a UTF-8 character; decoded read by read, both
+        # halves came out as replacement characters.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read_output)
         self.process.finished.connect(self._finished)
@@ -1135,6 +1139,7 @@ class TerminalPane(QFrame):
             self.append("No command to run.\n")
             return
         self.process.setWorkingDirectory(self.workspace)
+        self._decoder.reset()
         self.process.start(argv[0], list(argv[1:]))
         self.stateChanged.emit(f"Running {command}")
 
@@ -1155,10 +1160,11 @@ class TerminalPane(QFrame):
             self.process.kill()
 
     def _read_output(self) -> None:
-        text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        text = self._decoder.decode(bytes(self.process.readAllStandardOutput()))
         self.append(ANSI_ESCAPE.sub("", text))
 
     def _finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
+        self.append(self._decoder.decode(b"", final=True))
         label = "finished" if status == QProcess.ExitStatus.NormalExit else "crashed"
         self.append(f"\n[command {label}, exit {exit_code}]\n")
         self.stateChanged.emit(f"Terminal command {label} with exit code {exit_code}.")

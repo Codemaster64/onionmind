@@ -2017,11 +2017,12 @@ PY_SHIM = '''# Onionmind: this interpreter may only open loopback sockets. Anyth
 # that, so it fails here instead of leaving the machine.
 import socket
 
-_LOCAL = ("127.0.0.1", "::1", "localhost", "")
+# Loopback, plus the wildcard a server binds to: binding is not leaving.
+_LOCAL = ("127.0.0.1", "::1", "localhost", "", "0.0.0.0", "::")
 _OFF = "onionmind: direct network access is off - go through HTTPS_PROXY (Tor)"
 _connect = socket.socket.connect
 _connect_ex = socket.socket.connect_ex
-_getaddrinfo = socket.getaddrinfo
+_sendto = socket.socket.sendto
 
 
 def _local(address):
@@ -2041,17 +2042,41 @@ def connect_ex(self, address):
     return _connect_ex(self, address)
 
 
-def getaddrinfo(host, *args, **kwargs):
+def sendto(self, data, *args):
+    # (data, address) or (data, flags, address): a datagram - a DNS query among
+    # them - leaves without ever calling connect.
+    if args and not _local(args[-1]):
+        raise OSError(_OFF)
+    return _sendto(self, data, *args)
+
+
+def _no_lookup(real):
     # Resolving a name is already a packet to the ISP's resolver saying what the
-    # agent is doing. Tor resolves at the exit instead, so names never get here.
-    if host is not None and str(host) not in _LOCAL:
-        raise socket.gaierror(_OFF)
-    return _getaddrinfo(host, *args, **kwargs)
+    # agent is doing. Tor resolves at the exit instead, so names never get here:
+    # not through getaddrinfo, gethostbyname and its kin, or a reverse lookup.
+    def lookup(*args, **kwargs):
+        target = args[0] if args else kwargs.get("host")
+        host = target[0] if isinstance(target, tuple) else target
+        if host is not None and str(host) not in _LOCAL:
+            raise socket.gaierror(_OFF)
+        return real(*args, **kwargs)
+    return lookup
 
 
 socket.socket.connect = connect
 socket.socket.connect_ex = connect_ex
-socket.getaddrinfo = getaddrinfo
+socket.socket.sendto = sendto
+if hasattr(socket.socket, "sendmsg"):               # POSIX: (buffers, ancdata, flags, address)
+    _sendmsg = socket.socket.sendmsg
+
+    def sendmsg(self, buffers, *args):
+        if len(args) > 2 and not _local(args[2]):
+            raise OSError(_OFF)
+        return _sendmsg(self, buffers, *args)
+
+    socket.socket.sendmsg = sendmsg
+for _name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+    setattr(socket, _name, _no_lookup(getattr(socket, _name)))
 '''
 
 JS_SHIM = """// Onionmind: this node process may only open loopback sockets. Anything that
@@ -2060,7 +2085,11 @@ JS_SHIM = """// Onionmind: this node process may only open loopback sockets. Any
 // work. A socket to any other address is bypassing Tor and fails here.
 const net = require('net');
 const dns = require('dns');
-const LOCAL = new Set(['127.0.0.1', '::1', 'localhost', '']);
+const dgram = require('dgram');
+// Loopback, plus the wildcard a server or a UDP socket binds to: binding is not
+// leaving, and refusing 0.0.0.0 broke every UDP socket and every server
+// listening on all interfaces.
+const LOCAL = new Set(['127.0.0.1', '::1', 'localhost', '', '0.0.0.0', '::']);
 const OFF = 'onionmind: direct network access is off - go through HTTPS_PROXY (Tor)';
 const connect = net.Socket.prototype.connect;
 
@@ -2080,20 +2109,44 @@ net.Socket.prototype.connect = function (...args) {
 };
 
 // Same reason as the python shim: a lookup is a packet that says what the agent
-// is doing. Tor resolves at the exit, so nothing legitimate resolves here.
-for (const name of ['lookup', 'resolve', 'resolve4', 'resolve6']) {
-  const real = dns[name];
-  if (!real) continue;
-  dns[name] = function (host, ...rest) {
-    if (!LOCAL.has(String(host))) {
-      const cb = rest[rest.length - 1];
-      const err = new Error(OFF);
-      if (typeof cb === 'function') return cb(err);
-      throw err;
-    }
-    return real.call(dns, host, ...rest);
-  };
+// is doing. Tor resolves at the exit, so nothing legitimate resolves here -
+// through the callback API, dns.promises, or a Resolver of either kind.
+const LOOKUPS = /^(lookup|lookupService|resolve[A-Za-z0-9]*|reverse)$/;
+function refuse(target, promises) {
+  for (const name of Object.getOwnPropertyNames(target)) {
+    if (!LOOKUPS.test(name) || typeof target[name] !== 'function') continue;
+    const real = target[name];
+    target[name] = function (host, ...rest) {
+      if (!LOCAL.has(String(host))) {
+        const err = new Error(OFF);
+        const cb = rest[rest.length - 1];
+        if (promises) return Promise.reject(err);
+        if (typeof cb === 'function') return cb(err);
+        throw err;
+      }
+      return real.call(this, host, ...rest);
+    };
+  }
 }
+refuse(dns, false);
+refuse(dns.Resolver.prototype, false);
+refuse(dns.promises, true);
+refuse(dns.promises.Resolver.prototype, true);
+
+// A datagram never calls connect() before it leaves, so UDP is checked too.
+const send = dgram.Socket.prototype.send;
+dgram.Socket.prototype.send = function (msg, ...args) {
+  // send(msg[, offset, length][, port][, address][, callback]): the address is
+  // the one string among the rest; a connected socket has none.
+  const address = args.find((arg) => typeof arg === 'string');
+  if (address !== undefined && !LOCAL.has(address)) throw new Error(OFF);
+  return send.call(this, msg, ...args);
+};
+const udpConnect = dgram.Socket.prototype.connect;
+dgram.Socket.prototype.connect = function (port, address, ...rest) {
+  if (typeof address === 'string' && !LOCAL.has(address)) throw new Error(OFF);
+  return udpConnect.call(this, port, address, ...rest);
+};
 """
 
 
@@ -2114,8 +2167,11 @@ def _write_shims():
     """Drop the two shims next to the log and return (PYTHONPATH dir, node file).
 
     ponytail: covers python and node, the two runtimes a coding agent reaches
-    for. A compiled binary, or `python -S`, still goes straight out; only an OS
-    egress rule - firewall by user, container, network namespace - closes that.
+    for. A compiled binary, or `python -S`, still goes straight out, as does
+    asyncio on Windows reaching a literal IP (its proactor works below the
+    socket methods wrapped here, and no audit event sees it; host names are
+    still refused at the lookup). Only an OS egress rule - firewall by user,
+    container, network namespace - closes that.
     """
     shim_dir = os.path.join(os.path.dirname(NET_LOG), "shims")
     os.makedirs(shim_dir, exist_ok=True)
@@ -2681,10 +2737,19 @@ def run_legacy_ui():
     def start():
         try:
             detect_backend()
-            tor_check()
             models = installed_models() if BACKEND == "ollama" else []
+            # Chat is local. Requiring Tor here left the window "not ready",
+            # its models unlisted, whenever Tor was off; like the terminal UI,
+            # verify Tor only when a listener already exists.
+            tor = "Tor off"
+            if tor_proxy_port() is not None:
+                try:
+                    tor_check()
+                    tor = "Tor connected"
+                except SystemExit:
+                    tor = "Tor not verified"
             root.after(0, lambda: populate_models(models))
-            root.after(0, lambda: set_status(f"ready · {MODEL} · Tor connected", "#9ef0b0"))
+            root.after(0, lambda: set_status(f"ready · {MODEL} · {tor}", "#9ef0b0"))
             root.after(0, lambda: append("onion", f"Ready with {MODEL}. Ask anything."))
         except (Exception, SystemExit) as exc:
             root.after(0, lambda: set_status("not ready", "#e39a9a"))
@@ -4209,6 +4274,9 @@ class WorkspaceInspector:
         environment = os.environ.copy()
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["LC_ALL"] = "C"
+        # Every path handed to git here is a file name, never a pattern: as a
+        # glob, reverting "a[1].txt" also reverted a1.txt, with no backup.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
         try:
             return subprocess.run(
                 [
@@ -4959,12 +5027,20 @@ def blocked_paths(rules: Mapping[str, Any]) -> list[str]:
 # request names one of these; anything else is not an edit.
 AGENT_EDIT_TOOLS = frozenset({"edit", "write_file", "notebook_edit", "replace"})
 AGENT_SHELL_TOOLS = frozenset({"run_shell_command", "exec", "monitor"})
+# A command that IS a test run, from its first word: a runner (through
+# `python -m` or a ./ wrapper), or an interpreter running a file in tests/.
 _TEST_COMMAND = re.compile(
-    r"(^|[\s;&|/])(pytest|py\.test|unittest|tox|nox|npm (run )?test|yarn test|pnpm test|"
-    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake( test)?|"
-    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (check|test))\b|(^|[\s/])tests?/",
+    r"(?:(?:python[\d.]*|py)(?:\.exe)?\s+-m\s+|\.[\\/])?"
+    r"(?:pytest|py\.test|unittest|tox|nox|npm (?:run )?test|yarn test|pnpm test|"
+    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake(?: test)?|"
+    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (?:check|test))\b"
+    r"|(?:python[\d.]*|py|node)(?:\.exe)?\s+(?:\.[\\/])?tests?[\\/]",
     re.IGNORECASE,
 )
+# Chaining, pipes, redirection and substitution (sh and PowerShell alike) make
+# a command more than a test run, whatever it mentions: "rm -rf src; pytest"
+# was allowed without asking because it contained "pytest".
+_SHELL_CONTROL = re.compile(r"[;&|<>`()\r\n]")
 
 
 def _request_path(tool_input: Mapping[str, Any]) -> str:
@@ -5046,7 +5122,7 @@ def rule_decision(
         for pattern in blocked_paths(rules):
             if pattern and pattern in command:
                 return "deny", f"the command touches a blocked path ({pattern})"
-        if rules.get("runTests") and _TEST_COMMAND.search(command):
+        if rules.get("runTests") and not _SHELL_CONTROL.search(command) and _TEST_COMMAND.match(command.strip()):
             return "allow", "project rule: run the test suite without asking"
         return "ask", ""
     if tool_name in AGENT_EDIT_TOOLS:
@@ -5399,6 +5475,15 @@ def _safe_relative(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _repo_top(root: Path) -> Path:
+    """Where git's change paths start: the top of the repository, which is
+    above the project when a folder inside a repository is open. Taken from
+    the open folder instead, a revert there failed or touched nothing."""
+    result = WorkspaceInspector._git(root, "rev-parse", "--show-toplevel")
+    top = os.fsdecode(result.stdout).strip() if result.returncode == 0 else ""
+    return Path(top).resolve() if top else root
+
+
 def _backup_copy(source: Path, target: Path, vault: Any) -> None:
     """copy2, encrypted when a vault is open; the file mode rides on the backup."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -5423,7 +5508,7 @@ def revert_changes(
     `changes` are WorkspaceChange-like (status, path). The backup lives under
     backup_root, outside the project, until the next revert replaces it.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     backup = Path(backup_root).expanduser() / uuid4().hex
     tracked: list[str] = []
     untracked: list[str] = []
@@ -5451,8 +5536,15 @@ def revert_changes(
                 if retry.returncode != 0:
                     raise RuntimeError(retry.stderr.decode("utf-8", "replace").strip() or "git restore failed")
     for relative in untracked:
+        link = root / relative
+        if link.is_symlink():
+            # The link goes, never what it points at: resolved first, its
+            # target was deleted and the link left behind.
+            _safe_relative(root, str(Path(relative).parent))   # its folder stays inside
+            link.unlink()
+            continue
         target = _safe_relative(root, relative)
-        if target.is_file() or target.is_symlink():
+        if target.is_file():
             target.unlink()
     (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
     record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
@@ -5523,7 +5615,7 @@ def _make_hunk(index: int, raw: list[str]) -> DiffHunk:
 
 def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
     """The hunks of one changed, tracked file, for choosing which to revert."""
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     _safe_relative(root, relative)
     return _file_diff(root, relative)[1]
 
@@ -5536,7 +5628,7 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
     The diff is re-read here, not trusted from the UI: when the file changed
     since the hunks were shown, the patch no longer applies and nothing is touched.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     source = _safe_relative(root, relative)
     header, hunks = _file_diff(root, relative)
     wanted = sorted(set(int(i) for i in indices))
@@ -5592,6 +5684,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import copy
 import dataclasses
 import importlib
@@ -5940,6 +6033,10 @@ class OnionmindWindow(QMainWindow):
         self._web_ask_task = ""
         self._agent_stream = False
         self._agent_buffer = b""
+        # A read can end inside a UTF-8 character: decode the agent's output
+        # across reads, not read by read.
+        self._agent_out = codecs.getincrementaldecoder("utf-8")("replace")
+        self._agent_err = codecs.getincrementaldecoder("utf-8")("replace")
         self._agent_rules: Optional[dict[str, Any]] = None
         self._agent_steps: dict[str, Any] = {}
         self._agent_permission: Optional[dict[str, Any]] = None
@@ -8831,6 +8928,8 @@ class OnionmindWindow(QMainWindow):
         process.readyReadStandardOutput.connect(self._read_harness_output)
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
+        self._agent_out.reset()
+        self._agent_err.reset()
         process.start(argv[0], argv[1:])
         # By then the model is loaded at this run's context size.
         QTimer.singleShot(90_000, lambda value=generation: self._check_agent_fits_gpu(value))
@@ -8858,7 +8957,7 @@ class OnionmindWindow(QMainWindow):
                 line, self._agent_buffer = self._agent_buffer.split(b"\n", 1)
                 self._handle_agent_line(line.decode("utf-8", errors="replace"))
             return
-        chunk = bytes(self.harness_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        chunk = self._agent_out.decode(bytes(self.harness_process.readAllStandardOutput()))
         clean = _brand_runtime_text(ANSI_ESCAPE.sub("", chunk))
         self.harness_output += clean
         if self.stream_block is not None:
@@ -9377,7 +9476,7 @@ class OnionmindWindow(QMainWindow):
     def _read_harness_errors(self) -> None:
         if self.harness_process is None:
             return
-        chunk = bytes(self.harness_process.readAllStandardError()).decode("utf-8", errors="replace")
+        chunk = self._agent_err.decode(bytes(self.harness_process.readAllStandardError()))
         for line in chunk.splitlines():
             self._agent_log(line)
 
@@ -10990,10 +11089,28 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Set a passphrase in Settings → Privacy before locking.")
             self.open_settings_tab("Privacy")
             return False
+        self._lock_ui(True)
         self.lock_overlay.lock()
         self.inspector.append_activity("Onionmind locked")
         self._drop_key_if_locked()
         return True
+
+    def _lock_ui(self, locked: bool) -> None:
+        """While locked nothing under the overlay answers. The overlay only
+        covered the window: Tab still reached the widgets beneath it, and the
+        app-wide shortcuts still fired - Ctrl+Shift+S wrote the open
+        conversation out in plaintext, Ctrl+K listed every session."""
+        self.centralWidget().setEnabled(not locked)
+        self.statusBar().setEnabled(not locked)      # its Updates… button opens Settings
+        for shortcut in self.shortcuts:
+            shortcut.setEnabled(not locked)
+        # A dialog or menu left open when the idle lock fires stays on top of
+        # the overlay; closing it is its Cancel.
+        for _ in range(8):
+            left_open = QApplication.activePopupWidget() or QApplication.activeModalWidget()
+            if not locked or left_open is None:
+                break
+            left_open.close()
 
     def _drop_key_if_locked(self) -> None:
         """Take the data key out of memory while the window is locked.
@@ -11010,6 +11127,7 @@ class OnionmindWindow(QMainWindow):
             self.inspector.append_activity("Data key removed from memory until unlock")
 
     def _after_unlock(self) -> None:
+        self._lock_ui(False)
         self._egress_counts = None                   # counts read while locked came back empty
         self._refresh_session_rows()
         self.set_status("Unlocked.")
@@ -14463,6 +14581,7 @@ Part of onionmind_desktop, which re-exports every name defined here.
 
 from __future__ import annotations
 
+import codecs
 import copy
 import dataclasses
 import json
@@ -15479,6 +15598,9 @@ class TerminalPane(QFrame):
         self.setMaximumHeight(200)
         self.workspace = str(Path.cwd())
         self.process = QProcess(self)
+        # A read can end inside a UTF-8 character; decoded read by read, both
+        # halves came out as replacement characters.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read_output)
         self.process.finished.connect(self._finished)
@@ -15592,6 +15714,7 @@ class TerminalPane(QFrame):
             self.append("No command to run.\n")
             return
         self.process.setWorkingDirectory(self.workspace)
+        self._decoder.reset()
         self.process.start(argv[0], list(argv[1:]))
         self.stateChanged.emit(f"Running {command}")
 
@@ -15612,10 +15735,11 @@ class TerminalPane(QFrame):
             self.process.kill()
 
     def _read_output(self) -> None:
-        text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        text = self._decoder.decode(bytes(self.process.readAllStandardOutput()))
         self.append(ANSI_ESCAPE.sub("", text))
 
     def _finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
+        self.append(self._decoder.decode(b"", final=True))
         label = "finished" if status == QProcess.ExitStatus.NormalExit else "crashed"
         self.append(f"\n[command {label}, exit {exit_code}]\n")
         self.stateChanged.emit(f"Terminal command {label} with exit code {exit_code}.")
@@ -18722,7 +18846,9 @@ def open_vault(root: PathInput, password: Optional[str] = None, keystore: Any = 
     if isinstance(header.get("password"), dict):
         if password is None:
             raise WrongPassword("A password is needed to open Onionmind's data.")
-        return Vault(root, _unwrap_key(header["password"], password), header)
+        vault = Vault(root, _unwrap_key(header["password"], password), header)
+        encrypt_data_folder(root, vault)            # as opening through the key store does
+        return vault
     store = keystore or keystore_for(root, header.get("keystore"))
     key = store.get()
     if key is None:

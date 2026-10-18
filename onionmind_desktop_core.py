@@ -1307,6 +1307,9 @@ class WorkspaceInspector:
         environment = os.environ.copy()
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["LC_ALL"] = "C"
+        # Every path handed to git here is a file name, never a pattern: as a
+        # glob, reverting "a[1].txt" also reverted a1.txt, with no backup.
+        environment["GIT_LITERAL_PATHSPECS"] = "1"
         try:
             return subprocess.run(
                 [
@@ -2057,12 +2060,20 @@ def blocked_paths(rules: Mapping[str, Any]) -> list[str]:
 # request names one of these; anything else is not an edit.
 AGENT_EDIT_TOOLS = frozenset({"edit", "write_file", "notebook_edit", "replace"})
 AGENT_SHELL_TOOLS = frozenset({"run_shell_command", "exec", "monitor"})
+# A command that IS a test run, from its first word: a runner (through
+# `python -m` or a ./ wrapper), or an interpreter running a file in tests/.
 _TEST_COMMAND = re.compile(
-    r"(^|[\s;&|/])(pytest|py\.test|unittest|tox|nox|npm (run )?test|yarn test|pnpm test|"
-    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake( test)?|"
-    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (check|test))\b|(^|[\s/])tests?/",
+    r"(?:(?:python[\d.]*|py)(?:\.exe)?\s+-m\s+|\.[\\/])?"
+    r"(?:pytest|py\.test|unittest|tox|nox|npm (?:run )?test|yarn test|pnpm test|"
+    r"go test|cargo test|mvn test|gradlew? test|dotnet test|rake test|bundle exec rake(?: test)?|"
+    r"bundle exec rspec|rspec|phpunit|mix test|ctest|make (?:check|test))\b"
+    r"|(?:python[\d.]*|py|node)(?:\.exe)?\s+(?:\.[\\/])?tests?[\\/]",
     re.IGNORECASE,
 )
+# Chaining, pipes, redirection and substitution (sh and PowerShell alike) make
+# a command more than a test run, whatever it mentions: "rm -rf src; pytest"
+# was allowed without asking because it contained "pytest".
+_SHELL_CONTROL = re.compile(r"[;&|<>`()\r\n]")
 
 
 def _request_path(tool_input: Mapping[str, Any]) -> str:
@@ -2144,7 +2155,7 @@ def rule_decision(
         for pattern in blocked_paths(rules):
             if pattern and pattern in command:
                 return "deny", f"the command touches a blocked path ({pattern})"
-        if rules.get("runTests") and _TEST_COMMAND.search(command):
+        if rules.get("runTests") and not _SHELL_CONTROL.search(command) and _TEST_COMMAND.match(command.strip()):
             return "allow", "project rule: run the test suite without asking"
         return "ask", ""
     if tool_name in AGENT_EDIT_TOOLS:
@@ -2497,6 +2508,15 @@ def _safe_relative(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _repo_top(root: Path) -> Path:
+    """Where git's change paths start: the top of the repository, which is
+    above the project when a folder inside a repository is open. Taken from
+    the open folder instead, a revert there failed or touched nothing."""
+    result = WorkspaceInspector._git(root, "rev-parse", "--show-toplevel")
+    top = os.fsdecode(result.stdout).strip() if result.returncode == 0 else ""
+    return Path(top).resolve() if top else root
+
+
 def _backup_copy(source: Path, target: Path, vault: Any) -> None:
     """copy2, encrypted when a vault is open; the file mode rides on the backup."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2521,7 +2541,7 @@ def revert_changes(
     `changes` are WorkspaceChange-like (status, path). The backup lives under
     backup_root, outside the project, until the next revert replaces it.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     backup = Path(backup_root).expanduser() / uuid4().hex
     tracked: list[str] = []
     untracked: list[str] = []
@@ -2549,8 +2569,15 @@ def revert_changes(
                 if retry.returncode != 0:
                     raise RuntimeError(retry.stderr.decode("utf-8", "replace").strip() or "git restore failed")
     for relative in untracked:
+        link = root / relative
+        if link.is_symlink():
+            # The link goes, never what it points at: resolved first, its
+            # target was deleted and the link left behind.
+            _safe_relative(root, str(Path(relative).parent))   # its folder stays inside
+            link.unlink()
+            continue
         target = _safe_relative(root, relative)
-        if target.is_file() or target.is_symlink():
+        if target.is_file():
             target.unlink()
     (backup / ".onionmind-revert.json").parent.mkdir(parents=True, exist_ok=True)
     record = RevertRecord(str(root), str(backup), tuple(tracked + untracked), tuple(untracked))
@@ -2621,7 +2648,7 @@ def _make_hunk(index: int, raw: list[str]) -> DiffHunk:
 
 def diff_hunks(selected: PathInput, relative: str) -> list[DiffHunk]:
     """The hunks of one changed, tracked file, for choosing which to revert."""
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     _safe_relative(root, relative)
     return _file_diff(root, relative)[1]
 
@@ -2634,7 +2661,7 @@ def revert_hunks(selected: PathInput, relative: str, indices: Iterable[int],
     The diff is re-read here, not trusted from the UI: when the file changed
     since the hunks were shown, the patch no longer applies and nothing is touched.
     """
-    root = WorkspaceInspector._root(selected)
+    root = _repo_top(WorkspaceInspector._root(selected))
     source = _safe_relative(root, relative)
     header, hunks = _file_diff(root, relative)
     wanted = sorted(set(int(i) for i in indices))

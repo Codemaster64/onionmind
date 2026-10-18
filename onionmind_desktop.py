@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import copy
 import dataclasses
 import importlib
@@ -358,6 +359,10 @@ class OnionmindWindow(QMainWindow):
         self._web_ask_task = ""
         self._agent_stream = False
         self._agent_buffer = b""
+        # A read can end inside a UTF-8 character: decode the agent's output
+        # across reads, not read by read.
+        self._agent_out = codecs.getincrementaldecoder("utf-8")("replace")
+        self._agent_err = codecs.getincrementaldecoder("utf-8")("replace")
         self._agent_rules: Optional[dict[str, Any]] = None
         self._agent_steps: dict[str, Any] = {}
         self._agent_permission: Optional[dict[str, Any]] = None
@@ -3249,6 +3254,8 @@ class OnionmindWindow(QMainWindow):
         process.readyReadStandardOutput.connect(self._read_harness_output)
         process.finished.connect(self._harness_finished)
         process.errorOccurred.connect(self._harness_process_error)
+        self._agent_out.reset()
+        self._agent_err.reset()
         process.start(argv[0], argv[1:])
         # By then the model is loaded at this run's context size.
         QTimer.singleShot(90_000, lambda value=generation: self._check_agent_fits_gpu(value))
@@ -3276,7 +3283,7 @@ class OnionmindWindow(QMainWindow):
                 line, self._agent_buffer = self._agent_buffer.split(b"\n", 1)
                 self._handle_agent_line(line.decode("utf-8", errors="replace"))
             return
-        chunk = bytes(self.harness_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        chunk = self._agent_out.decode(bytes(self.harness_process.readAllStandardOutput()))
         clean = _brand_runtime_text(ANSI_ESCAPE.sub("", chunk))
         self.harness_output += clean
         if self.stream_block is not None:
@@ -3795,7 +3802,7 @@ class OnionmindWindow(QMainWindow):
     def _read_harness_errors(self) -> None:
         if self.harness_process is None:
             return
-        chunk = bytes(self.harness_process.readAllStandardError()).decode("utf-8", errors="replace")
+        chunk = self._agent_err.decode(bytes(self.harness_process.readAllStandardError()))
         for line in chunk.splitlines():
             self._agent_log(line)
 
@@ -5408,10 +5415,28 @@ class OnionmindWindow(QMainWindow):
             self.set_status("Set a passphrase in Settings → Privacy before locking.")
             self.open_settings_tab("Privacy")
             return False
+        self._lock_ui(True)
         self.lock_overlay.lock()
         self.inspector.append_activity("Onionmind locked")
         self._drop_key_if_locked()
         return True
+
+    def _lock_ui(self, locked: bool) -> None:
+        """While locked nothing under the overlay answers. The overlay only
+        covered the window: Tab still reached the widgets beneath it, and the
+        app-wide shortcuts still fired - Ctrl+Shift+S wrote the open
+        conversation out in plaintext, Ctrl+K listed every session."""
+        self.centralWidget().setEnabled(not locked)
+        self.statusBar().setEnabled(not locked)      # its Updates… button opens Settings
+        for shortcut in self.shortcuts:
+            shortcut.setEnabled(not locked)
+        # A dialog or menu left open when the idle lock fires stays on top of
+        # the overlay; closing it is its Cancel.
+        for _ in range(8):
+            left_open = QApplication.activePopupWidget() or QApplication.activeModalWidget()
+            if not locked or left_open is None:
+                break
+            left_open.close()
 
     def _drop_key_if_locked(self) -> None:
         """Take the data key out of memory while the window is locked.
@@ -5428,6 +5453,7 @@ class OnionmindWindow(QMainWindow):
             self.inspector.append_activity("Data key removed from memory until unlock")
 
     def _after_unlock(self) -> None:
+        self._lock_ui(False)
         self._egress_counts = None                   # counts read while locked came back empty
         self._refresh_session_rows()
         self.set_status("Unlocked.")

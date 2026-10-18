@@ -537,8 +537,13 @@ containment `run_code()` gives Qwen Code: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
 and `NODE_USE_ENV_PROXY` point at a loopback HTTP bridge that only knows how to
 dial out through Tor (an unroutable host gets a 502, never a direct connection),
 `NO_PROXY` is blanked, and a `sitecustomize.py` plus a Node `--require` shim
-refuse any socket or DNS lookup that is not loopback - so code that opens its own
-socket fails instead of leaving directly. Everything that leaves is logged to
+refuse any socket, datagram or DNS lookup that is not loopback - so code that
+opens its own socket fails instead of leaving directly (verified:
+`ContainmentTests` in `tests/test_coding_agent.py` run real python and node
+children). One Python path sits below the shim: on Windows, asyncio reaching a
+literal IP address (TCP or UDP) goes through its proactor loop, not the socket
+methods the shim wraps - checked by hand, and an audit hook does not see it
+either; a host name is still refused at the lookup. Everything that leaves is logged to
 `~/.onionmind/agent-net.log`.
 
 Ollama's current DSH launcher rejects Onionmind's `--patch`, so the Harness keeps

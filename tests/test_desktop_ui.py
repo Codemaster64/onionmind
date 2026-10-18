@@ -573,6 +573,33 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(terminal.command.isEnabled())
         self._close(terminal)
 
+    def test_output_keeps_a_character_split_across_two_reads(self) -> None:
+        # A read can end inside a UTF-8 character; decoded read by read, both
+        # halves came out as replacement characters.
+        terminal = ui.TerminalPane(desktop_core)
+        reads = iter([b"bl\xc3", b"\xa5b\xc3", b"\xa6r\n"])
+        terminal.process.readAllStandardOutput = lambda: next(reads)
+        for _ in range(3):
+            terminal._read_output()
+        self.assertEqual(terminal.output.toPlainText(), "blåbær\n")
+        self._close(terminal)
+
+        window = self._window()
+        reads = iter([b"bl\xc3", b"\xa5b\xc3", b"\xa6r\n"])
+        errors = iter([b"feil: \xc3", b"\xb8 i linje 2\n"])
+        window.harness_process = mock.Mock(readAllStandardOutput=lambda: next(reads),
+                                           readAllStandardError=lambda: next(errors))
+        window._agent_stream = False
+        for _ in range(3):
+            window._read_harness_output()
+        window._read_harness_errors()
+        window._read_harness_errors()
+        self.assertTrue(window.harness_output.endswith("blåbær\n"))
+        self.assertIn("ø i linje 2", window.terminal.output.toPlainText())
+        self.assertNotIn("�", window.terminal.output.toPlainText())
+        window.harness_process = None
+        self._close(window)
+
     def test_model_manager_add_and_close_controls(self) -> None:
         dialog = ui.ModelManagerDialog(
             ["inferno", "deepseek-r1:8b"],

@@ -269,8 +269,26 @@ class ContainmentTests(unittest.TestCase):
                 "s=socket.socket();"
                 "s.settimeout(0.2);"
                 "s.connect_ex(('127.0.0.1', 9));"     # refused or not, never guarded
+                "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('127.0.0.1', 9));"
+                "socket.gethostbyname('localhost');"
+                "socket.getaddrinfo('0.0.0.0', 8000);"   # a server binding to every interface
                 "print('reached loopback')"])
         self.assertIn("reached loopback", out)
+
+    def test_the_python_shim_refuses_lookups_and_datagrams_too(self):
+        # A name looked up outside getaddrinfo, or a UDP datagram (a DNS query
+        # among them) that never calls connect, used to leave directly.
+        with tempfile.TemporaryDirectory() as root:
+            shim_dir = self.shims(root)
+            for code in ("socket.gethostbyname('onionmind.invalid')",
+                         "socket.gethostbyname_ex('onionmind.invalid')",
+                         "socket.gethostbyaddr('192.0.2.1')",
+                         "socket.getnameinfo(('192.0.2.1', 80), 0)",
+                         "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('192.0.2.1', 53))",
+                         "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', 0, ('192.0.2.1', 53))"):
+                with self.subTest(code=code):
+                    out = self.child(shim_dir, [sys.executable, "-c", "import socket; " + code])
+                    self.assertIn("direct network access is off", out)
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_the_node_shim_refuses_a_direct_socket(self):
@@ -279,6 +297,36 @@ class ContainmentTests(unittest.TestCase):
             out = self.child(shim_dir, ["node", "-e",
                 "require('net').connect(80, '192.0.2.1')"])
         self.assertIn("direct network access is off", out)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_the_node_shim_refuses_lookups_and_datagrams_too(self):
+        # dns.lookup was covered; dns.promises, a Resolver, the other record
+        # types, reverse lookups and UDP were not.
+        report = "e => console.log(e && e.message)"
+        with tempfile.TemporaryDirectory() as root:
+            shim_dir = self.shims(root)
+            for code in (f"require('dns').promises.lookup('onionmind.invalid').catch({report})",
+                         f"require('dns/promises').resolve4('onionmind.invalid').catch({report})",
+                         f"require('dns').resolveTxt('onionmind.invalid', {report})",
+                         f"new (require('dns').Resolver)().resolve4('onionmind.invalid', {report})",
+                         f"new (require('dns').promises.Resolver)().resolveMx('onionmind.invalid').catch({report})",
+                         f"require('dns').lookupService('192.0.2.1', 80, {report})",
+                         f"require('dns').reverse('192.0.2.1', {report})",
+                         "const s = require('dgram').createSocket('udp4'); s.unref(); s.send('x', 53, '192.0.2.1')",
+                         "const s = require('dgram').createSocket('udp4'); s.unref(); s.connect(53, '192.0.2.1')"):
+                with self.subTest(code=code):
+                    out = self.child(shim_dir, ["node", "-e", code])
+                    self.assertIn("direct network access is off", out)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_the_node_shim_leaves_loopback_alone(self):
+        with tempfile.TemporaryDirectory() as root:
+            shim_dir = self.shims(root)
+            out = self.child(shim_dir, ["node", "-e",
+                "const s = require('dgram').createSocket('udp4');"
+                "s.send('x', 9, '127.0.0.1', () => { s.close();"
+                " require('dns').promises.lookup('localhost').then(() => console.log('reached loopback')); });"])
+        self.assertIn("reached loopback", out)
 
     # -- helpers ------------------------------------------------------------
     def shims(self, root):

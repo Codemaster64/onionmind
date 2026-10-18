@@ -143,6 +143,18 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(opened.check_password("correct horse"))
         self.assertFalse(opened.check_password("nope"))
 
+    def test_opening_with_a_password_also_seals_plaintext_left_in_the_folder(self) -> None:
+        # Opening through the key store always swept the folder; opening with
+        # a password did not, so a leftover stayed plaintext for good.
+        vault = core.open_vault(self.root, keystore=self.store)
+        vault.set_password("correct horse")
+        leftover = self.root / "reverts" / "abc" / ".onionmind-hunks.patch"   # a revert cut short
+        leftover.parent.mkdir(parents=True)
+        leftover.write_text(SECRET)
+        opened = core.open_vault(self.root, password="correct horse")
+        self.no_plaintext_anywhere()
+        self.assertEqual(core.read_data_file(leftover, opened), SECRET.encode())
+
     def test_locking_drops_the_key_until_the_password_brings_it_back(self) -> None:
         vault = core.open_vault(self.root, keystore=self.store)
         settings = core.SettingsStore(self.root / "settings.json", vault=vault)
