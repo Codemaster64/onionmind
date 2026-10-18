@@ -110,7 +110,7 @@ def theme_tokens(palette: Optional[dict[str, str]] = None) -> dict[str, str]:
         "accent_line": _mix(accent, bg, 0.5),
         "selection": _mix(accent, bg, 0.30),
         "on_accent": p["a100"] if dark else "#ffffff",
-        "avatar_user": p["a600"] if dark else accent,
+        "avatar_user": p["a800"] if dark else accent,
         "scroll": p["n800"],
         "scroll_hover": p["n700"],
         "good": p["good"], "warn": p["warn"], "bad": p["bad"],
@@ -141,10 +141,11 @@ QWidget#toolbar { background: @pane@; border-bottom: 1px solid @line@; }
 QWidget#leftRail { background: @pane@; border-right: 1px solid @line@; }
 QWidget#inspector { background: @pane@; border-left: 1px solid @line@; }
 QFrame#terminalPane { background: @deep@; border-top: 1px solid @line@; }
-QFrame#composerFrame { background: @composer@; border-top: 1px solid @line@; }
+QFrame#composerFrame { background: @bg@; border-top: 1px solid @line@; }
+QFrame#composerCard { background: @card@; border: 1px solid @line_soft@; border-radius: 12px; }
 QFrame#card { background: @card@; border: 1px solid @line@; border-radius: 12px; }
 QFrame#toolCard { background: @tool@; border: 1px solid @line@; border-radius: 8px; }
-QFrame#modeSwitch { background: @bg@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#modeSwitch { background: transparent; border: 1px solid @line@; border-radius: 8px; }
 QFrame#separator { background: @line@; min-width: 1px; max-width: 1px; }
 QFrame#railDivider { color: @line@; }
 QFrame#statusPill { background: @control@; border: 1px solid @line@; border-radius: 8px; }
@@ -165,7 +166,8 @@ QLabel#brand { color: @strong@; font-size: @BRAND_PT@; font-weight: 500; }
 QLabel#sectionTitle { color: @faint@; font-size: @LABEL_PT@; font-weight: 500; }
 QLabel#muted, QLabel#meta, QLabel#disclosure { color: @muted@; }
 QLabel#title { color: @strong@; font-weight: 500; }
-QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 600; }
+QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 500; }
+QLabel#messageBody { font-size: @BODY_PT@; }
 QLabel#avatarAssistant { background: @card@; color: @accent_text@; border: 1px solid @accent_line@; border-radius: 16px; font-weight: 700; }
 QLabel#attachmentLabel { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 3px 7px; }
 QLabel#success { color: @good@; }
@@ -196,8 +198,9 @@ QPushButton#primaryButton:focus { border: 2px solid @accent@; }
 QPushButton#primaryButton:disabled { background: transparent; border-color: @line@; color: @disabled@; }
 QPushButton#dangerButton { background: transparent; border: 1px solid @bad@; color: @bad@; }
 QPushButton#dangerButton:hover { background: @bad_bg@; }
-QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: @muted@; }
-QPushButton#modeButton:checked { background: @accent_pressed@; color: @strong@; border: 1px solid @accent_line@; }
+QPushButton#modeButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 4px 14px; color: @text@; }
+QPushButton#modeButton:hover { background: @control_hover@; }
+QPushButton#modeButton:checked { background: transparent; color: @accent@; border: 1px solid @accent@; }
 QPushButton#railAction { text-align: left; background: transparent; border-color: transparent; padding: 7px 9px; }
 QPushButton#railAction:hover { background: @control_hover@; border-color: @line@; }
 QPushButton#linkButton { background: transparent; border-color: transparent; color: @accent@; padding: 2px 6px; }
@@ -208,7 +211,8 @@ QPushButton#paletteRow { text-align: left; background: transparent; border-color
 QPushButton#paletteRow:hover, QPushButton#paletteRow[current="true"] { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton { background: transparent; border-color: transparent; padding: 4px; }
 QToolButton#bareButton:hover { background: @control_hover@; border-color: @line@; }
-QToolButton#bareButton:checked { background: @accent_hover@; border-color: @accent_line@; }
+QToolButton#bareButton:checked { background: transparent; border-color: transparent; }
+QToolButton#bareButton:checked:hover { background: @control_hover@; border-color: @line@; }
 QToolButton#bareButton:disabled { background: transparent; border-color: transparent; }
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -241,7 +245,15 @@ QTextEdit, QPlainTextEdit {
     selection-color: @strong@;
     padding: 7px;
 }
-QTextEdit#composer { background: @field@; border: 1px solid @line@; padding: 10px; }
+QTextEdit#composer { background: transparent; border: none; padding: 0; font-size: @BODY_PT@; }
+QTextEdit#composer:focus { border: none; }
+QCheckBox#searchToggle { background: transparent; border: 1px solid @line@; border-radius: 8px; padding: 5px 10px; spacing: 7px; }
+QCheckBox#searchToggle:hover { background: @control_hover@; border-color: @line_strong@; }
+QCheckBox#searchToggle:checked { color: @accent@; border-color: @accent@; }
+QCheckBox#searchToggle:focus { border: 2px solid @accent@; }
+QCheckBox#searchToggle::indicator { width: 0; height: 0; border: none; }
+QComboBox#toolbarModel { background: transparent; }
+QComboBox#toolbarModel:hover { background: @control_hover@; }
 QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView, QPlainTextEdit#runOutput {
     font-family: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: @MONO_PT@;
@@ -276,7 +288,7 @@ QPushButton#updateStatus[attention="true"]:hover { background: @accent_hover@; }
 QPushButton#torStatusAction {
     background: @control@;
     border: 1px solid @line_strong@;
-    border-radius: 12px;
+    border-radius: 8px;
     color: @text@;
     font-weight: 500;
     min-width: 116px;
@@ -302,7 +314,7 @@ QToolTip { background: @card@; color: @strong@; border: 1px solid @line_strong@;
 
 
 def build_style_sheet(scale: float = 1.0) -> str:
-    """The committed stylesheet with its three fixed point sizes scaled.
+    """The committed stylesheet with its four fixed point sizes scaled.
 
     Every other rule inherits the application font, which apply_text_scale
     scales from the captured platform base - so one knob moves all text
@@ -314,6 +326,7 @@ def build_style_sheet(scale: float = 1.0) -> str:
         _STYLE_TEMPLATE.replace("@BRAND_PT@", f"{11 * scale:g}pt")
         .replace("@LABEL_PT@", f"{8.5 * scale:g}pt")
         .replace("@MONO_PT@", f"{9 * scale:g}pt")
+        .replace("@BODY_PT@", f"{11 * scale:g}pt")
     )
     for name, value in sorted(theme_tokens().items(), key=lambda item: -len(item[0])):
         sheet = sheet.replace(f"@{name}@", value)

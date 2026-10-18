@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QProcess, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -32,6 +32,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QTreeWidget,
@@ -578,6 +581,46 @@ class UpdateBridge:
         return self._updater().apply_command(staging_dir)
 
 
+class _TwoLineDelegate(QStyledItemDelegate):
+    """Rail rows as the design draws them: a title, then a smaller muted line
+    (the project path or the session time) instead of two equal lines."""
+
+    def __init__(self, title_weight: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._title_weight = title_weight
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        title, _, meta = opt.text.replace(" ", "\n").partition("\n")
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else None
+        if style is not None:
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        tokens = theme_tokens()
+        rect = opt.rect.adjusted(10, 5, -8, -5)
+        if not opt.icon.isNull():
+            rect.setLeft(rect.left() + opt.decorationSize.width() + 8)
+        painter.save()
+        title_font = QFont(opt.font)
+        title_font.setWeight(QFont.Weight(self._title_weight))
+        meta_font = QFont(opt.font)
+        meta_font.setPointSizeF(max(6.0, opt.font.pointSizeF() * 0.85))
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        painter.setFont(title_font)
+        painter.setPen(QColor(tokens["strong"] if selected else tokens["text"]))
+        top = painter.fontMetrics()
+        painter.drawText(rect.left(), rect.top() + top.ascent(),
+                         top.elidedText(title, Qt.TextElideMode.ElideRight, rect.width()))
+        if meta:
+            painter.setFont(meta_font)
+            painter.setPen(QColor(tokens["faint"]))
+            low = painter.fontMetrics()
+            painter.drawText(rect.left(), rect.top() + top.height() + 2 + low.ascent(),
+                             low.elidedText(meta, Qt.TextElideMode.ElideMiddle, rect.width()))
+        painter.restore()
+
+
 class LeftRail(QWidget):
     newTaskRequested = Signal()
     addSessionRequested = Signal()
@@ -664,6 +707,7 @@ class LeftRail(QWidget):
         self.projects = QListWidget()
         self.projects.setMaximumHeight(240)
         self.projects.setAccessibleName("Projects")
+        self.projects.setItemDelegate(_TwoLineDelegate(500, self.projects))
         self.projects.itemClicked.connect(
             lambda item: self.projectSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -741,6 +785,7 @@ class LeftRail(QWidget):
         layout.addWidget(self.session_filter)
         self.sessions = QListWidget()
         self.sessions.setAccessibleName("Saved sessions")
+        self.sessions.setItemDelegate(_TwoLineDelegate(400, self.sessions))
         self.sessions.itemClicked.connect(
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -989,14 +1034,13 @@ class LeftRail(QWidget):
                 # Saved as UTC; slicing the string showed UTC as if it were local time.
                 try:
                     stamp = datetime.fromisoformat(updated)
-                    if stamp.tzinfo:
-                        updated = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+                    updated = (stamp.astimezone() if stamp.tzinfo else stamp).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     pass
             if isinstance(updated, datetime):
                 meta = updated.astimezone().strftime("%b %d, %H:%M")
             else:
-                meta = _as_text(updated)[:16].replace("T", " ") or "Saved locally"
+                meta = _as_text(updated)[:16] or "Saved locally"
             item = QListWidgetItem(f"{title}\n{meta}")
             item.setData(Qt.ItemDataRole.UserRole, session_id)
             item.setSizeHint(QSize(100, 47))

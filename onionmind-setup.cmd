@@ -5754,7 +5754,7 @@ class OnionmindWindow(QMainWindow):
 
         toolbar = QWidget()
         toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(57)
+        toolbar.setFixedHeight(52)
         self.toolbar_widget = toolbar
         toolbar_layout = QHBoxLayout(toolbar)
         self.toolbar_layout = toolbar_layout
@@ -5817,8 +5817,9 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.boundary_button)
 
         self.model_combo = QComboBox()
+        self.model_combo.setObjectName("toolbarModel")
         self.model_combo.setMinimumWidth(190)
-        self.model_combo.setMaximumWidth(260)
+        self.model_combo.setMaximumWidth(300)
         self.model_combo.setAccessibleName("Onionmind model")
         self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
@@ -6058,11 +6059,17 @@ class OnionmindWindow(QMainWindow):
     def _build_composer(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("composerFrame")
-        frame.setMinimumHeight(148)
-        frame.setMaximumHeight(178)
-        outer = QVBoxLayout(frame)
-        outer.setContentsMargins(12, 9, 12, 9)
-        outer.setSpacing(6)
+        frame.setMinimumHeight(160)
+        frame.setMaximumHeight(196)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(24, 12, 24, 8)
+        frame_layout.setSpacing(6)
+        card = QFrame()
+        card.setObjectName("composerCard")
+        frame_layout.addWidget(card, 1)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(14, 10, 10, 8)
+        outer.setSpacing(8)
         self.composer = ComposerEdit()
         self.composer.setPlaceholderText("Describe what you want Onionmind to do in this project…")
         self.composer.sendRequested.connect(self.submit)
@@ -6169,6 +6176,8 @@ class OnionmindWindow(QMainWindow):
         self.yolo_consent.toggled.connect(self._yolo_toggled)
         controls.addWidget(self.yolo_consent)
         self.search_consent = QCheckBox("Allow Tor search this turn")
+        self.search_consent.setObjectName("searchToggle")
+        _themed_icon(self.search_consent, "globe")
         self.search_consent.setChecked(False)
         self.search_consent.setToolTip(
             "One-turn permission. If needed, Onionmind starts Tor in the background without opening Tor Browser."
@@ -6187,7 +6196,7 @@ class OnionmindWindow(QMainWindow):
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
-        controls.addWidget(self.disclosure, 1)
+        controls.addStretch(1)
         # v2 ladder: the model is loading; v2 contextMeter: the 44x4 bar.
         self.model_loading = QProgressBar()
         self.model_loading.setObjectName("meter")
@@ -6218,6 +6227,7 @@ class OnionmindWindow(QMainWindow):
         self.send_button.clicked.connect(self.submit)
         controls.addWidget(self.send_button)
         outer.addLayout(controls)
+        frame.layout().addWidget(self.disclosure)
         self.set_mode(_as_text(self.settings_data.get("mode", "agent")))
         self._sync_action_states()
         return frame
@@ -11341,7 +11351,7 @@ def theme_tokens(palette: Optional[dict[str, str]] = None) -> dict[str, str]:
         "accent_line": _mix(accent, bg, 0.5),
         "selection": _mix(accent, bg, 0.30),
         "on_accent": p["a100"] if dark else "#ffffff",
-        "avatar_user": p["a600"] if dark else accent,
+        "avatar_user": p["a800"] if dark else accent,
         "scroll": p["n800"],
         "scroll_hover": p["n700"],
         "good": p["good"], "warn": p["warn"], "bad": p["bad"],
@@ -11372,10 +11382,11 @@ QWidget#toolbar { background: @pane@; border-bottom: 1px solid @line@; }
 QWidget#leftRail { background: @pane@; border-right: 1px solid @line@; }
 QWidget#inspector { background: @pane@; border-left: 1px solid @line@; }
 QFrame#terminalPane { background: @deep@; border-top: 1px solid @line@; }
-QFrame#composerFrame { background: @composer@; border-top: 1px solid @line@; }
+QFrame#composerFrame { background: @bg@; border-top: 1px solid @line@; }
+QFrame#composerCard { background: @card@; border: 1px solid @line_soft@; border-radius: 12px; }
 QFrame#card { background: @card@; border: 1px solid @line@; border-radius: 12px; }
 QFrame#toolCard { background: @tool@; border: 1px solid @line@; border-radius: 8px; }
-QFrame#modeSwitch { background: @bg@; border: 1px solid @line@; border-radius: 8px; }
+QFrame#modeSwitch { background: transparent; border: 1px solid @line@; border-radius: 8px; }
 QFrame#separator { background: @line@; min-width: 1px; max-width: 1px; }
 QFrame#railDivider { color: @line@; }
 QFrame#statusPill { background: @control@; border: 1px solid @line@; border-radius: 8px; }
@@ -11396,7 +11407,8 @@ QLabel#brand { color: @strong@; font-size: @BRAND_PT@; font-weight: 500; }
 QLabel#sectionTitle { color: @faint@; font-size: @LABEL_PT@; font-weight: 500; }
 QLabel#muted, QLabel#meta, QLabel#disclosure { color: @muted@; }
 QLabel#title { color: @strong@; font-weight: 500; }
-QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 600; }
+QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius: 16px; font-weight: 500; }
+QLabel#messageBody { font-size: @BODY_PT@; }
 QLabel#avatarAssistant { background: @card@; color: @accent_text@; border: 1px solid @accent_line@; border-radius: 16px; font-weight: 700; }
 QLabel#attachmentLabel { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 3px 7px; }
 QLabel#success { color: @good@; }
@@ -11427,8 +11439,9 @@ QPushButton#primaryButton:focus { border: 2px solid @accent@; }
 QPushButton#primaryButton:disabled { background: transparent; border-color: @line@; color: @disabled@; }
 QPushButton#dangerButton { background: transparent; border: 1px solid @bad@; color: @bad@; }
 QPushButton#dangerButton:hover { background: @bad_bg@; }
-QPushButton#modeButton { background: transparent; border: none; padding: 4px 16px; color: @muted@; }
-QPushButton#modeButton:checked { background: @accent_pressed@; color: @strong@; border: 1px solid @accent_line@; }
+QPushButton#modeButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 4px 14px; color: @text@; }
+QPushButton#modeButton:hover { background: @control_hover@; }
+QPushButton#modeButton:checked { background: transparent; color: @accent@; border: 1px solid @accent@; }
 QPushButton#railAction { text-align: left; background: transparent; border-color: transparent; padding: 7px 9px; }
 QPushButton#railAction:hover { background: @control_hover@; border-color: @line@; }
 QPushButton#linkButton { background: transparent; border-color: transparent; color: @accent@; padding: 2px 6px; }
@@ -11439,7 +11452,8 @@ QPushButton#paletteRow { text-align: left; background: transparent; border-color
 QPushButton#paletteRow:hover, QPushButton#paletteRow[current="true"] { background: @accent_hover@; border-color: @accent_line@; }
 QToolButton#bareButton { background: transparent; border-color: transparent; padding: 4px; }
 QToolButton#bareButton:hover { background: @control_hover@; border-color: @line@; }
-QToolButton#bareButton:checked { background: @accent_hover@; border-color: @accent_line@; }
+QToolButton#bareButton:checked { background: transparent; border-color: transparent; }
+QToolButton#bareButton:checked:hover { background: @control_hover@; border-color: @line@; }
 QToolButton#bareButton:disabled { background: transparent; border-color: transparent; }
 QComboBox { padding-right: 25px; }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -11472,7 +11486,15 @@ QTextEdit, QPlainTextEdit {
     selection-color: @strong@;
     padding: 7px;
 }
-QTextEdit#composer { background: @field@; border: 1px solid @line@; padding: 10px; }
+QTextEdit#composer { background: transparent; border: none; padding: 0; font-size: @BODY_PT@; }
+QTextEdit#composer:focus { border: none; }
+QCheckBox#searchToggle { background: transparent; border: 1px solid @line@; border-radius: 8px; padding: 5px 10px; spacing: 7px; }
+QCheckBox#searchToggle:hover { background: @control_hover@; border-color: @line_strong@; }
+QCheckBox#searchToggle:checked { color: @accent@; border-color: @accent@; }
+QCheckBox#searchToggle:focus { border: 2px solid @accent@; }
+QCheckBox#searchToggle::indicator { width: 0; height: 0; border: none; }
+QComboBox#toolbarModel { background: transparent; }
+QComboBox#toolbarModel:hover { background: @control_hover@; }
 QPlainTextEdit#terminalOutput, QPlainTextEdit#diffView, QPlainTextEdit#runOutput {
     font-family: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: @MONO_PT@;
@@ -11507,7 +11529,7 @@ QPushButton#updateStatus[attention="true"]:hover { background: @accent_hover@; }
 QPushButton#torStatusAction {
     background: @control@;
     border: 1px solid @line_strong@;
-    border-radius: 12px;
+    border-radius: 8px;
     color: @text@;
     font-weight: 500;
     min-width: 116px;
@@ -11533,7 +11555,7 @@ QToolTip { background: @card@; color: @strong@; border: 1px solid @line_strong@;
 
 
 def build_style_sheet(scale: float = 1.0) -> str:
-    """The committed stylesheet with its three fixed point sizes scaled.
+    """The committed stylesheet with its four fixed point sizes scaled.
 
     Every other rule inherits the application font, which apply_text_scale
     scales from the captured platform base - so one knob moves all text
@@ -11545,6 +11567,7 @@ def build_style_sheet(scale: float = 1.0) -> str:
         _STYLE_TEMPLATE.replace("@BRAND_PT@", f"{11 * scale:g}pt")
         .replace("@LABEL_PT@", f"{8.5 * scale:g}pt")
         .replace("@MONO_PT@", f"{9 * scale:g}pt")
+        .replace("@BODY_PT@", f"{11 * scale:g}pt")
     )
     for name, value in sorted(theme_tokens().items(), key=lambda item: -len(item[0])):
         sheet = sheet.replace(f"@{name}@", value)
@@ -12723,6 +12746,7 @@ class MessageBlock(QWidget):
         column.addLayout(header)
         self.body = QLabel(text)
         self.body.setTextFormat(Qt.TextFormat.PlainText)
+        self.body.setObjectName("messageBody")
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
@@ -14196,7 +14220,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QProcess, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -14208,6 +14232,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QTreeWidget,
@@ -14754,6 +14781,46 @@ class UpdateBridge:
         return self._updater().apply_command(staging_dir)
 
 
+class _TwoLineDelegate(QStyledItemDelegate):
+    """Rail rows as the design draws them: a title, then a smaller muted line
+    (the project path or the session time) instead of two equal lines."""
+
+    def __init__(self, title_weight: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._title_weight = title_weight
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        title, _, meta = opt.text.replace(" ", "\n").partition("\n")
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else None
+        if style is not None:
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        tokens = theme_tokens()
+        rect = opt.rect.adjusted(10, 5, -8, -5)
+        if not opt.icon.isNull():
+            rect.setLeft(rect.left() + opt.decorationSize.width() + 8)
+        painter.save()
+        title_font = QFont(opt.font)
+        title_font.setWeight(QFont.Weight(self._title_weight))
+        meta_font = QFont(opt.font)
+        meta_font.setPointSizeF(max(6.0, opt.font.pointSizeF() * 0.85))
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        painter.setFont(title_font)
+        painter.setPen(QColor(tokens["strong"] if selected else tokens["text"]))
+        top = painter.fontMetrics()
+        painter.drawText(rect.left(), rect.top() + top.ascent(),
+                         top.elidedText(title, Qt.TextElideMode.ElideRight, rect.width()))
+        if meta:
+            painter.setFont(meta_font)
+            painter.setPen(QColor(tokens["faint"]))
+            low = painter.fontMetrics()
+            painter.drawText(rect.left(), rect.top() + top.height() + 2 + low.ascent(),
+                             low.elidedText(meta, Qt.TextElideMode.ElideMiddle, rect.width()))
+        painter.restore()
+
+
 class LeftRail(QWidget):
     newTaskRequested = Signal()
     addSessionRequested = Signal()
@@ -14840,6 +14907,7 @@ class LeftRail(QWidget):
         self.projects = QListWidget()
         self.projects.setMaximumHeight(240)
         self.projects.setAccessibleName("Projects")
+        self.projects.setItemDelegate(_TwoLineDelegate(500, self.projects))
         self.projects.itemClicked.connect(
             lambda item: self.projectSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -14917,6 +14985,7 @@ class LeftRail(QWidget):
         layout.addWidget(self.session_filter)
         self.sessions = QListWidget()
         self.sessions.setAccessibleName("Saved sessions")
+        self.sessions.setItemDelegate(_TwoLineDelegate(400, self.sessions))
         self.sessions.itemClicked.connect(
             lambda item: self.sessionSelected.emit(_as_text(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -15165,14 +15234,13 @@ class LeftRail(QWidget):
                 # Saved as UTC; slicing the string showed UTC as if it were local time.
                 try:
                     stamp = datetime.fromisoformat(updated)
-                    if stamp.tzinfo:
-                        updated = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+                    updated = (stamp.astimezone() if stamp.tzinfo else stamp).strftime("%Y-%m-%d %H:%M")
                 except ValueError:
                     pass
             if isinstance(updated, datetime):
                 meta = updated.astimezone().strftime("%b %d, %H:%M")
             else:
-                meta = _as_text(updated)[:16].replace("T", " ") or "Saved locally"
+                meta = _as_text(updated)[:16] or "Saved locally"
             item = QListWidgetItem(f"{title}\n{meta}")
             item.setData(Qt.ItemDataRole.UserRole, session_id)
             item.setSizeHint(QSize(100, 47))

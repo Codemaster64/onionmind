@@ -453,7 +453,7 @@ class OnionmindWindow(QMainWindow):
 
         toolbar = QWidget()
         toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(57)
+        toolbar.setFixedHeight(52)
         self.toolbar_widget = toolbar
         toolbar_layout = QHBoxLayout(toolbar)
         self.toolbar_layout = toolbar_layout
@@ -516,8 +516,9 @@ class OnionmindWindow(QMainWindow):
         toolbar_layout.addWidget(self.boundary_button)
 
         self.model_combo = QComboBox()
+        self.model_combo.setObjectName("toolbarModel")
         self.model_combo.setMinimumWidth(190)
-        self.model_combo.setMaximumWidth(260)
+        self.model_combo.setMaximumWidth(300)
         self.model_combo.setAccessibleName("Onionmind model")
         self.model_combo.setToolTip("Choose the Onionmind model for the next run")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
@@ -757,11 +758,17 @@ class OnionmindWindow(QMainWindow):
     def _build_composer(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("composerFrame")
-        frame.setMinimumHeight(148)
-        frame.setMaximumHeight(178)
-        outer = QVBoxLayout(frame)
-        outer.setContentsMargins(12, 9, 12, 9)
-        outer.setSpacing(6)
+        frame.setMinimumHeight(160)
+        frame.setMaximumHeight(196)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(24, 12, 24, 8)
+        frame_layout.setSpacing(6)
+        card = QFrame()
+        card.setObjectName("composerCard")
+        frame_layout.addWidget(card, 1)
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(14, 10, 10, 8)
+        outer.setSpacing(8)
         self.composer = ComposerEdit()
         self.composer.setPlaceholderText("Describe what you want Onionmind to do in this project…")
         self.composer.sendRequested.connect(self.submit)
@@ -868,6 +875,8 @@ class OnionmindWindow(QMainWindow):
         self.yolo_consent.toggled.connect(self._yolo_toggled)
         controls.addWidget(self.yolo_consent)
         self.search_consent = QCheckBox("Allow Tor search this turn")
+        self.search_consent.setObjectName("searchToggle")
+        _themed_icon(self.search_consent, "globe")
         self.search_consent.setChecked(False)
         self.search_consent.setToolTip(
             "One-turn permission. If needed, Onionmind starts Tor in the background without opening Tor Browser."
@@ -886,7 +895,7 @@ class OnionmindWindow(QMainWindow):
         self.disclosure = QLabel()
         self.disclosure.setObjectName("disclosure")
         self.disclosure.setWordWrap(True)
-        controls.addWidget(self.disclosure, 1)
+        controls.addStretch(1)
         # v2 ladder: the model is loading; v2 contextMeter: the 44x4 bar.
         self.model_loading = QProgressBar()
         self.model_loading.setObjectName("meter")
@@ -917,6 +926,7 @@ class OnionmindWindow(QMainWindow):
         self.send_button.clicked.connect(self.submit)
         controls.addWidget(self.send_button)
         outer.addLayout(controls)
+        frame.layout().addWidget(self.disclosure)
         self.set_mode(_as_text(self.settings_data.get("mode", "agent")))
         self._sync_action_states()
         return frame
