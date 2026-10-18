@@ -302,6 +302,26 @@ def model_fit(size_bytes: Optional[int], vram_mb: Optional[int], ram_mb: Optiona
     return "Too big"
 
 
+def recommended_code_ctx(size_bytes: Optional[int], vram_mb: Optional[int],
+                         steps: tuple[int, ...]) -> Optional[int]:
+    """The biggest agent context stop whose KV cache still fits beside the model in VRAM.
+
+    None when there is nothing honest to say (no GPU or size reading). steps[0]
+    when even the weights do not fit: no context fixes that, a smaller model does.
+
+    ponytail: KV per 1k tokens is guessed from file size (~0.1 GB + 2% of the
+    weights; within ~25% of real Qwen3 4B..32B). Exact needs block_count and
+    head_count_kv from ollama's /api/show.
+    """
+    if not size_bytes or not vram_mb:
+        return None
+    model_gb = size_bytes / 1024 ** 3
+    free_gb = vram_mb / 1024 * 0.95 - model_gb * 1.05   # driver + compute buffers
+    per_1k = 0.1 + model_gb * 0.02
+    fitting = [s for s in steps if s / 1024 * per_1k <= free_gb]
+    return fitting[-1] if fitting else steps[0]
+
+
 def format_gb(mb: Optional[float]) -> str:
     if mb is None:
         return "?"

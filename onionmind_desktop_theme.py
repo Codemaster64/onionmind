@@ -169,6 +169,7 @@ QLabel#avatarUser { background: @avatar_user@; color: @on_accent@; border-radius
 QLabel#avatarAssistant { background: @card@; color: @accent_text@; border: 1px solid @accent_line@; border-radius: 16px; font-weight: 700; }
 QLabel#attachmentLabel { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 3px 7px; }
 QLabel#success { color: @good@; }
+QLabel#contextHint { color: @accent_text@; background: @accent_hover@; border: 1px solid @accent_line@; border-radius: 8px; padding: 1px 6px; }
 QLabel#danger { color: @bad@; }
 QLabel#warning { color: @warn@; }
 QLabel#accent { color: @accent_text@; }

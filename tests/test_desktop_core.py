@@ -1427,6 +1427,16 @@ class WorkbenchV2CoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 core.diff_hunks(root, "../escape.txt")
 
+    def test_recommended_code_ctx(self) -> None:
+        gib, steps = 1024 ** 3, (8192, 16384, 32768, 65536, 131072)
+        # A 4B model on a 12 GB card leaves room for 32k of KV cache, not 64k.
+        self.assertEqual(core.recommended_code_ctx(int(2.5 * gib), 12_288, steps), 32768)
+        # A 12 GB model on a 12 GB card has no room at all: smallest stop.
+        self.assertEqual(core.recommended_code_ctx(12 * gib, 12_288, steps), 8192)
+        self.assertEqual(core.recommended_code_ctx(int(2.5 * gib), 49_152, steps), 131072)
+        self.assertIsNone(core.recommended_code_ctx(None, 12_288, steps))
+        self.assertIsNone(core.recommended_code_ctx(5 * gib, None, steps))
+
     def test_model_fit_and_node_version_gate(self) -> None:
         gib = 1024 ** 3
         self.assertEqual(core.model_fit(5 * gib, 12_288, None), "Fits")
