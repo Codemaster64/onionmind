@@ -691,7 +691,6 @@ class OnionmindWindow(QMainWindow):
         self.context_steps = steps
 
         box = QWidget()
-        box.setFixedWidth(150)
         layout = QHBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(7)
@@ -701,6 +700,7 @@ class OnionmindWindow(QMainWindow):
         slider.setMaximum(len(steps) - 1)
         slider.setPageStep(1)
         slider.setAccessibleName("Agent context budget")
+        slider.setFixedWidth(105)
         self.context_slider = slider
 
         label = QLabel()
@@ -708,6 +708,13 @@ class OnionmindWindow(QMainWindow):
         label.setFixedWidth(38)
         label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.context_label = label
+
+        # What this GPU can hold beside the chosen model; filled in once the
+        # power probe has real numbers, hidden until then.
+        hint = QLabel()
+        hint.setObjectName("contextHint")
+        hint.setVisible(False)
+        self.context_hint = hint
 
         reader = getattr(self.core, "code_ctx", None)
         current = reader() if callable(reader) else steps[len(steps) // 2]
@@ -722,7 +729,35 @@ class OnionmindWindow(QMainWindow):
 
         layout.addWidget(slider)
         layout.addWidget(label)
+        layout.addWidget(hint)
+        if not self.demo and not self._model_power:
+            QTimer.singleShot(0, self._probe_model_power)
         return box
+
+    def _recommended_context(self) -> Optional[int]:
+        recommend = getattr(self.desktop_core, "recommended_code_ctx", None)
+        if not callable(recommend):
+            return None
+        sizes = self._model_power.get("sizes") or {}
+        model = self.current_model_id()
+        size = sizes.get(model) or sizes.get(f"{model}:latest")
+        return recommend(size, self._model_power.get("vram_total"), tuple(self.context_steps))
+
+    def _sync_context_hint(self) -> None:
+        hint = getattr(self, "context_hint", None)
+        if hint is None:
+            return
+        best = self._recommended_context()
+        if best is None:
+            hint.setVisible(False)
+            return
+        current = self.context_steps[self.context_slider.value()]
+        hint.setText("✓ recommended" if current == best else f"{best // 1024}k recommended")
+        tip = f"Recommended by your system specs: {best:,} tokens leaves room for the model in graphics memory."
+        if best == self.context_steps[0]:
+            tip += " This model barely fits this GPU at any budget - a smaller one will be much faster."
+        hint.setToolTip(tip)
+        hint.setVisible(True)
 
     def _sync_context_label(self, index: int) -> None:
         value = self.context_steps[index]
@@ -736,6 +771,7 @@ class OnionmindWindow(QMainWindow):
                 f"Context budget is pinned to {locked} by ONIONMIND_CODE_CTX"
             )
             return
+        self._sync_context_hint()
         self.context_slider.setToolTip(
             f"Agent context budget: {value:,} tokens. Bigger fits more of the job "
             "in one session; too big and the model spills out of VRAM onto the CPU. "
@@ -1500,6 +1536,7 @@ class OnionmindWindow(QMainWindow):
         self.set_status(f"Model set to {self._describe_model(model)}")
         self._refresh_model_headers()
         self._update_context_meter()
+        self._sync_context_hint()
 
     def _approval_text(self, yolo: bool) -> str:
         if yolo:
@@ -4137,6 +4174,7 @@ class OnionmindWindow(QMainWindow):
 
         def done(power: dict[str, Any]) -> None:
             self._model_power = power
+            self._sync_context_hint()
             if self.feature("ladder") or self.feature("modelPlus"):
                 self.set_model_options(self.installed_model_ids, self.current_model_id())
             self._update_live_status()
