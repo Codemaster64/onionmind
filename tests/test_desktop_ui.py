@@ -1329,7 +1329,9 @@ class WorkbenchPreferencesTests(unittest.TestCase):
             readable = [
                 family for family in ("Verdana", "DejaVu Sans") if family in installed
             ]
-            if readable:
+            if (Path(ui.__file__).resolve().parent / "fonts" / "Inter-Regular.ttf").is_file():
+                self.assertEqual(chosen.family(), "Inter")   # the design's face ships with the app
+            elif readable:
                 self.assertIn(chosen.family(), readable)
             self.assertFalse(QFontDatabase.isFixedPitch(chosen.family()))
         finally:

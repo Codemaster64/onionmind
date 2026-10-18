@@ -410,6 +410,7 @@ class MessageBlock(QWidget):
         column.addLayout(header)
         self.body = QLabel(text)
         self.body.setTextFormat(Qt.TextFormat.PlainText)
+        self.body.setObjectName("messageBody")
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
