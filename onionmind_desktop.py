@@ -5269,11 +5269,15 @@ class OnionmindWindow(QMainWindow):
         if self.remote_phase == "connecting":
             return
         self.disconnect_remote(reprobe=False)
-        tunnel = dc.SshTunnel(target)
+        # A .onion server is reached through our Tor; start_tor_hidden blocks
+        # until Tor has bootstrapped, so autoconnect at launch waits for it.
+        tor_port = getattr(self.core, "start_tor_hidden", None) if _tor_is_enabled(self.core) else None
+        tunnel = dc.SshTunnel(target, tor_port=tor_port)
         self._remote_pending = tunnel
         self._set_remote_phase("connecting", f"Connecting to {target.label} over SSH…")
         self.model_status.set_status("Connecting", "busy")
-        self.inspector.append_activity(f"Remote compute: opening SSH tunnel to {target.label} (direct, not Tor)")
+        self.inspector.append_activity(
+            f"Remote compute: opening SSH tunnel to {target.label} (direct, or over Tor for a .onion server)")
 
         def open_tunnel(signals: WorkerSignals) -> Any:
             del signals
@@ -5291,7 +5295,7 @@ class OnionmindWindow(QMainWindow):
             return
         self.remote_tunnel = tunnel
         self.core.use_ollama_port(tunnel.local_port)
-        label = tunnel.target.label
+        label = tunnel.target.label + (" over Tor" if getattr(tunnel, "onion", False) else "")
         self._set_remote_phase("on", f"Connected to {label} · Ollama {tunnel.version}")
         self.set_status(f"Models now run on {label}")
         self.inspector.append_activity(f"Remote compute on: models run on {label}")

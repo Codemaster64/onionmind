@@ -140,10 +140,13 @@ from onionmind_desktop_remote import (  # noqa: F401
     SshTarget,
     parse_ssh_target,
     ssh_tunnel_argv,
+    resolve_ssh_host,
     describe_ssh_failure,
     load_remote_settings,
     _free_loopback_port,
     _ollama_version,
+    _tor_dial,
+    _OnionForward,
     SshTunnel,
 )
 
@@ -257,6 +260,7 @@ __all__ = [
     "SshTarget",
     "parse_ssh_target",
     "ssh_tunnel_argv",
+    "resolve_ssh_host",
     "describe_ssh_failure",
     "load_remote_settings",
     "SshTunnel",

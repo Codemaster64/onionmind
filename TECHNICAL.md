@@ -383,6 +383,16 @@ download on the server.
   carries prompts and replies, encrypted by SSH. It opens only when the user
   presses Connect, or at launch if they ticked *Connect automatically* (off by
   default) — with that box ticked, opening Onionmind is no longer contact-free.
+- **Except for a `.onion` server.** When the host is `x.onion`, or an
+  `~/.ssh/config` alias whose `HostName` is one (read with `ssh -G`), Onionmind
+  waits for its Tor (`start_tor_hidden`), opens a loopback forward that dials
+  the onion through Tor's SOCKS port (random credentials: a circuit of its own,
+  and Tor Browser's USERPASS-only 9150 is satisfied), and runs ssh against it
+  with `ProxyCommand=none`, `HostName=127.0.0.1` and the alias's
+  `HostKeyAlias`, so no ProxyCommand script is needed. One retry covers a
+  cold circuit. With Tor turned off it refuses instead of connecting. On the
+  server: `HiddenServiceDir …` + `HiddenServicePort 22 127.0.0.1:22` in its
+  torrc.
 - **Key login only.** `BatchMode` means ssh never waits on a password or
   host-key prompt nobody can see; it fails with a message naming the fix
   (`ssh-copy-id`, accept the host key once in a terminal).
@@ -524,8 +534,8 @@ manifest and bundle through Tor.
 
 **Remote compute is the one exception, and only when you turn it on.** With
 Settings → Compute connected, prompts and replies travel to your own server over
-a direct SSH tunnel instead of staying on this machine; search and agent egress
-still use Tor. See [Remote compute over SSH](#remote-compute-over-ssh).
+a direct SSH tunnel (over Tor if the server is a `.onion`) instead of staying
+on this machine; search and agent egress still use Tor. See [Remote compute over SSH](#remote-compute-over-ssh).
 
 **Agent mode's supported web path leaves over Tor or does not leave.** Every
 agent launcher—the workbench, `onionmind-code`, and launchers installed by the

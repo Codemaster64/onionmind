@@ -2761,10 +2761,13 @@ from onionmind_desktop_remote import (  # noqa: F401
     SshTarget,
     parse_ssh_target,
     ssh_tunnel_argv,
+    resolve_ssh_host,
     describe_ssh_failure,
     load_remote_settings,
     _free_loopback_port,
     _ollama_version,
+    _tor_dial,
+    _OnionForward,
     SshTunnel,
 )
 
@@ -2878,6 +2881,7 @@ __all__ = [
     "SshTarget",
     "parse_ssh_target",
     "ssh_tunnel_argv",
+    "resolve_ssh_host",
     "describe_ssh_failure",
     "load_remote_settings",
     "SshTunnel",
@@ -10570,11 +10574,15 @@ class OnionmindWindow(QMainWindow):
         if self.remote_phase == "connecting":
             return
         self.disconnect_remote(reprobe=False)
-        tunnel = dc.SshTunnel(target)
+        # A .onion server is reached through our Tor; start_tor_hidden blocks
+        # until Tor has bootstrapped, so autoconnect at launch waits for it.
+        tor_port = getattr(self.core, "start_tor_hidden", None) if _tor_is_enabled(self.core) else None
+        tunnel = dc.SshTunnel(target, tor_port=tor_port)
         self._remote_pending = tunnel
         self._set_remote_phase("connecting", f"Connecting to {target.label} over SSH…")
         self.model_status.set_status("Connecting", "busy")
-        self.inspector.append_activity(f"Remote compute: opening SSH tunnel to {target.label} (direct, not Tor)")
+        self.inspector.append_activity(
+            f"Remote compute: opening SSH tunnel to {target.label} (direct, or over Tor for a .onion server)")
 
         def open_tunnel(signals: WorkerSignals) -> Any:
             del signals
@@ -10592,7 +10600,7 @@ class OnionmindWindow(QMainWindow):
             return
         self.remote_tunnel = tunnel
         self.core.use_ollama_port(tunnel.local_port)
-        label = tunnel.target.label
+        label = tunnel.target.label + (" over Tor" if getattr(tunnel, "onion", False) else "")
         self._set_remote_phase("on", f"Connected to {label} · Ollama {tunnel.version}")
         self.set_status(f"Models now run on {label}")
         self.inspector.append_activity(f"Remote compute on: models run on {label}")
@@ -19859,6 +19867,9 @@ from onionmind_desktop_vault import (
 # to 127.0.0.1 and the agent's loopback-only socket shims need no exception.
 # The SSH connection itself is direct, not Tor: it is the user's own server,
 # opened only when they press Connect (or opted into connecting at launch).
+# The exception is a server that is a Tor onion service (`x.onion`, or an
+# ssh-config alias whose HostName is one): that can only be reached over Tor,
+# so ssh dials a loopback forward that leaves through Onionmind's Tor.
 
 REMOTE_OLLAMA_PORT = 11434
 
@@ -19899,22 +19910,119 @@ def parse_ssh_target(value: Any) -> Optional[SshTarget]:
 
 def ssh_tunnel_argv(target: SshTarget, local_port: int,
                     remote_port: int = REMOTE_OLLAMA_PORT,
-                    executable: str = "ssh") -> list[str]:
-    """The exact `ssh` command: a forward only, no shell, no prompts."""
+                    executable: str = "ssh",
+                    via: Optional[tuple[int, str]] = None) -> list[str]:
+    """The exact `ssh` command: a forward only, no shell, no prompts.
+
+    `via` is (loopback port, host-key alias) for an onion server: ssh dials
+    the Tor forward on that port but checks the host key under the alias.
+    """
     argv = [
         executable, "-N", "-T",
         # A GUI has nowhere to type a password or accept a host key, so ssh
         # must fail fast instead of waiting on a prompt nobody sees.
         "-o", "BatchMode=yes",
         "-o", "ExitOnForwardFailure=yes",
-        "-o", "ConnectTimeout=15",
+        # A cold onion circuit plus descriptor fetch can take most of a minute.
+        "-o", f"ConnectTimeout={60 if via else 15}",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=3",
         "-L", f"127.0.0.1:{int(local_port)}:127.0.0.1:{int(remote_port)}",
     ]
-    if target.port is not None:
+    if via is not None:
+        # Command-line -o beats ~/.ssh/config, so an alias still supplies its
+        # User and IdentityFile but not its HostName or ProxyCommand.
+        argv += ["-o", "ProxyCommand=none", "-o", "HostName=127.0.0.1",
+                 "-o", f"HostKeyAlias={via[1]}", "-o", "CheckHostIP=no",
+                 "-p", str(int(via[0]))]
+    elif target.port is not None:
         argv += ["-p", str(target.port)]
     return argv + ["--", target.destination]
+
+
+def resolve_ssh_host(target: SshTarget, executable: str = "ssh",
+                     run: Callable[..., Any] = subprocess.run) -> dict[str, str]:
+    """ssh's own view of the target (`ssh -G`: hostname, port, ...), or {}.
+
+    Reads config only, never the network. A failure means "not an onion".
+    """
+    host = target.destination.rpartition("@")[2]
+    if host.lower().endswith(".onion"):
+        return {"hostname": host.lower(), "port": str(target.port or 22)}
+    argv = [executable, "-G"] + (["-p", str(target.port)] if target.port else [])
+    try:
+        out = run(argv + ["--", target.destination], capture_output=True,
+                  timeout=10, creationflags=_NO_WINDOW).stdout
+    except Exception:
+        return {}
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", errors="replace")
+    fields: dict[str, str] = {}
+    for line in _as_text_core(out).splitlines():
+        key, _, value = line.strip().partition(" ")
+        fields.setdefault(key.lower(), value.strip())
+    return fields
+
+
+def _tor_dial(host: str, port: int, tor_port: int) -> Any:
+    import secrets
+    import socks                                 # PySocks; requests already needs it
+    sock = socks.socksocket()
+    # Credentials both satisfy a Tor that insists on USERPASS (Tor Browser's
+    # 9150) and, with IsolateSOCKSAuth, put this on a circuit of its own.
+    sock.set_proxy(socks.SOCKS5, "127.0.0.1", int(tor_port), rdns=True,
+                   username=secrets.token_hex(8), password="x")
+    sock.settimeout(120)
+    sock.connect((host, int(port)))              # rdns: Tor resolves the onion
+    sock.settimeout(None)
+    return sock
+
+
+def _pipe(src: Any, dst: Any) -> None:
+    try:
+        while chunk := src.recv(65536):
+            dst.sendall(chunk)
+    except OSError:
+        pass
+    try:
+        dst.shutdown(2)                          # SHUT_RDWR: wake the other pump
+    except OSError:
+        pass
+
+
+class _OnionForward:
+    """A loopback listener whose every connection leaves through Tor to one onion."""
+
+    def __init__(self, host: str, port: int, tor_port: int,
+                 dial: Callable[[str, int, int], Any] = _tor_dial) -> None:
+        import socketserver
+        import threading
+        forward = self
+        self.error = ""
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                try:
+                    up = dial(host, port, tor_port)
+                except Exception as exc:
+                    forward.error = f"Tor could not reach {host}:{port} ({exc})."
+                    return
+                threading.Thread(target=_pipe, args=(up, self.request), daemon=True).start()
+                _pipe(self.request, up)
+                up.close()
+
+        self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = int(self.server.server_address[1])
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class _SshExited(RuntimeError):
+    """ssh itself quit while connecting - worth one retry over a fresh circuit."""
 
 
 def describe_ssh_failure(stderr: str, target_label: str = "the server") -> str:
@@ -19983,13 +20091,20 @@ class SshTunnel:
     def __init__(self, target: SshTarget, *, remote_port: int = REMOTE_OLLAMA_PORT,
                  executable: str = "ssh", ready_timeout: float = 25.0,
                  popen: Callable[..., Any] = subprocess.Popen,
-                 which: Callable[[str], Optional[str]] = shutil.which) -> None:
+                 which: Callable[[str], Optional[str]] = shutil.which,
+                 tor_port: Optional[Callable[[], int]] = None,
+                 run: Callable[..., Any] = subprocess.run) -> None:
         self.target = target
         self.remote_port = remote_port
         self.executable = executable
         self.ready_timeout = ready_timeout
         self._popen = popen
         self._which = which
+        # Blocks until Tor is up and returns its SOCKS port; None = Tor is off.
+        self.tor_port = tor_port
+        self._run = run
+        self._forward: Optional[_OnionForward] = None
+        self.onion = False
         self.process: Any = None
         self.local_port: Optional[int] = None
         self.version: Optional[str] = None
@@ -20009,12 +20124,11 @@ class SshTunnel:
                 self._stderr_tail = (self._stderr_tail + [line])[-20:]
 
     def last_error(self) -> str:
+        if self._forward is not None and self._forward.error:
+            return self._forward.error
         return describe_ssh_failure("\n".join(self._stderr_tail), self.target.label)
 
     def start(self) -> int:
-        import threading
-        import time
-
         executable = self._which(self.executable)
         if executable is None:
             raise RuntimeError(
@@ -20022,9 +20136,36 @@ class SshTunnel:
                 "(Windows: Settings > Optional features > OpenSSH Client)."
             )
         self.stop()
+        fields = resolve_ssh_host(self.target, executable, self._run)
+        onion = fields.get("hostname", "").lower()
+        self.onion = onion.endswith(".onion")
+        if not self.onion:
+            return self._attempt(executable, None, self.ready_timeout)
+        if self.tor_port is None:
+            raise RuntimeError(f"{self.target.label} is a .onion server. "
+                               "Turn on Tor in Onionmind to reach it.")
+        tor = int(self.tor_port())                # waits for Tor to bootstrap
+        alias = fields.get("hostkeyalias") or onion
+        for attempt in (1, 2):
+            if self.cancelled:
+                raise RuntimeError("Cancelled.")
+            self._forward = _OnionForward(onion, int(fields.get("port") or 22), tor)
+            try:
+                return self._attempt(executable, (self._forward.port, alias),
+                                     max(self.ready_timeout, 90.0))
+            except _SshExited:
+                if attempt == 2 or self.cancelled:
+                    raise
+        raise AssertionError("unreachable")
+
+    def _attempt(self, executable: str, via: Optional[tuple[int, str]],
+                 ready_timeout: float) -> int:
+        import threading
+        import time
+
         port = _free_loopback_port()
         process = self._popen(
-            ssh_tunnel_argv(self.target, port, self.remote_port, executable),
+            ssh_tunnel_argv(self.target, port, self.remote_port, executable, via),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             creationflags=_NO_WINDOW,
         )
@@ -20032,7 +20173,7 @@ class SshTunnel:
         self._stderr_tail = []
         if getattr(process, "stderr", None) is not None:
             threading.Thread(target=self._drain, args=(process.stderr,), daemon=True).start()
-        deadline = time.monotonic() + self.ready_timeout
+        deadline = time.monotonic() + ready_timeout
         while time.monotonic() < deadline:
             if self.cancelled:
                 self.process = process
@@ -20040,8 +20181,9 @@ class SshTunnel:
                 raise RuntimeError("Cancelled.")
             if process.poll() is not None:
                 time.sleep(0.1)          # let the drain thread catch ssh's last line
-                self.process = None
-                raise RuntimeError(self.last_error())
+                message = self.last_error()
+                self.stop()
+                raise _SshExited(message)
             version = _ollama_version(port, timeout=2.0)
             if version:
                 self.local_port, self.version = port, version
@@ -20053,13 +20195,14 @@ class SshTunnel:
                 break
             time.sleep(0.4)
         connected = self.alive
+        message = self.last_error()
         self.stop()
         if connected:
             raise RuntimeError(
                 f"Connected to {self.target.label}, but no Ollama answered on its "
                 f"127.0.0.1:{self.remote_port}. Start it there (`systemctl status ollama`)."
             )
-        raise RuntimeError(self.last_error())
+        raise RuntimeError(message)
 
     def cancel(self) -> None:
         """Stop from another thread, including mid-`start()` - nothing is left running."""
@@ -20068,7 +20211,10 @@ class SshTunnel:
 
     def stop(self) -> None:
         process, self.process = self.process, None
+        forward, self._forward = self._forward, None
         self.local_port = self.version = None
+        if forward is not None:
+            forward.close()
         if process is None or process.poll() is not None:
             return
         process.terminate()

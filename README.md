@@ -281,7 +281,9 @@ Ollama, so the model runs there while your files, edits, agent, terminal and Tor
 stay on this computer. It needs key-based SSH login (`ssh-copy-id user@server`)
 and Ollama running on the server, bound to `127.0.0.1` as it is by default. The SSH
 connection is direct, not Tor, and opens only when you press Connect (or at
-launch, if you tick that box). *Checked against a fake ssh in the test suite; not
+launch, if you tick that box). A server published as a Tor onion service
+(`user@x.onion`, or an ssh-config alias pointing at one) is reached through
+Onionmind's Tor instead, from anywhere, with no ProxyCommand to set up. *Checked against a fake ssh in the test suite; not
 yet run end to end against a live server.*
 
 Stop requests terminate the managed shell or agent launcher process. A command

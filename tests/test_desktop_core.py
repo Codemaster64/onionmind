@@ -1461,6 +1461,99 @@ class RemoteComputeTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-p") + 1], "2222")
         self.assertEqual(argv[-2:], ["--", "me@gpu"])
 
+    def test_onion_tunnel_dials_the_tor_forward_but_checks_the_real_host_key(self) -> None:
+        argv = core.ssh_tunnel_argv(core.SshTarget("bever-onion", 2222), 40001, via=(40002, "10.0.0.5"))
+        joined = " ".join(argv)
+        for option in ("ProxyCommand=none", "HostName=127.0.0.1", "HostKeyAlias=10.0.0.5",
+                       "CheckHostIP=no", "ConnectTimeout=60"):
+            self.assertIn(option, joined)
+        self.assertEqual(argv[argv.index("-p") + 1], "40002")    # the forward, not :2222
+        self.assertEqual(argv[-2:], ["--", "bever-onion"])
+
+    def test_resolve_reads_ssh_config_and_skips_it_for_a_bare_onion(self) -> None:
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout=(
+                b"user radagast\nhostname abc.onion\nport 22\nhostkeyalias 10.0.0.5\n"))
+
+        fields = core.resolve_ssh_host(core.SshTarget("bever-onion"), "ssh", run)
+        self.assertEqual((fields["hostname"], fields["hostkeyalias"]), ("abc.onion", "10.0.0.5"))
+        self.assertEqual(calls[0], ["ssh", "-G", "--", "bever-onion"])
+        self.assertEqual(core.resolve_ssh_host(core.SshTarget("me@XYZ.onion", 2222), "ssh", run),
+                         {"hostname": "xyz.onion", "port": "2222"})
+        self.assertEqual(len(calls), 1)
+
+        def broken(argv, **kwargs):
+            raise OSError("no ssh")
+        self.assertEqual(core.resolve_ssh_host(core.SshTarget("gpu"), "ssh", broken), {})
+
+    def test_onion_server_needs_tor_and_plain_servers_never_ask_for_it(self) -> None:
+        tunnel = core.SshTunnel(core.SshTarget("me@abc.onion"), which=lambda name: "ssh",
+                                popen=lambda *a, **k: self.fail("ssh must not start"))
+        with self.assertRaises(RuntimeError) as caught:
+            tunnel.start()
+        self.assertIn("Turn on Tor", str(caught.exception))
+
+        proc, _ = self._fake_ssh(serve=True)
+        plain = core.SshTunnel(core.SshTarget("me@gpu"), popen=proc, which=lambda name: "ssh",
+                               tor_port=lambda: self.fail("Tor is not needed"),
+                               run=lambda argv, **k: subprocess.CompletedProcess(argv, 0, stdout=b"hostname gpu\n"))
+        plain.start()
+        self.assertFalse(plain.onion)
+        plain.stop()
+
+    def test_onion_forward_pipes_bytes_through_the_dialled_socket(self) -> None:
+        import socket
+        dialled = []
+
+        def dial(host, port, tor_port):
+            dialled.append((host, port, tor_port))
+            near, far = socket.socketpair()
+            def echo():
+                while data := far.recv(1024):
+                    far.sendall(data.upper())
+                far.close()
+            import threading
+            threading.Thread(target=echo, daemon=True).start()
+            return near
+
+        forward = core._OnionForward("abc.onion", 22, 9150, dial=dial)
+        try:
+            with socket.create_connection(("127.0.0.1", forward.port), timeout=5) as client:
+                client.sendall(b"ssh-2.0")
+                self.assertEqual(client.recv(1024), b"SSH-2.0")
+            self.assertEqual(dialled, [("abc.onion", 22, 9150)])
+        finally:
+            forward.close()
+
+    def test_tor_dial_authenticates_and_sends_the_onion_name_unresolved(self) -> None:
+        import socket, threading
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        seen = {}
+
+        def fake_tor():
+            conn, _ = server.accept()
+            seen["greeting"] = conn.recv(16)
+            conn.sendall(b"\x05\x02")                       # insist on USERPASS
+            auth = conn.recv(256)
+            seen["user"] = auth[2:2 + auth[1]]
+            conn.sendall(b"\x01\x00")
+            seen["request"] = conn.recv(256)
+            conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            conn.close()
+
+        threading.Thread(target=fake_tor, daemon=True).start()
+        sock = core._tor_dial("abc.onion", 22, server.getsockname()[1])
+        sock.close()
+        server.close()
+        self.assertIn(b"\x02", seen["greeting"][2:])        # offers USERPASS
+        self.assertEqual(len(seen["user"]), 16)              # a fresh random user
+        self.assertEqual(seen["request"], b"\x05\x01\x00\x03\x09abc.onion\x00\x16")
+
     def test_failures_name_the_fix(self) -> None:
         self.assertIn("ssh-copy-id", core.describe_ssh_failure("me@gpu: Permission denied (publickey).", "me@gpu"))
         self.assertIn("accept", core.describe_ssh_failure("Host key verification failed.", "gpu"))
