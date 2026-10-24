@@ -298,7 +298,7 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
-$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '1071aab6089a4730ebe3a3e51f6411df107c007b7da3a0adcc1aa8ea22a3e798'
+$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '475a4c379a1844325fdff471467538a64302ae4ad3a276a4a9f0f25dea70abc8'
 $desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '101ce2e5f970b4802e813b7386d9d20552217662926c6a8bd13c52ff135542dc'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
@@ -308,7 +308,7 @@ $desktopVault = Get-OnionmindSource 'onionmind_desktop_vault.py' '2d719d97cb555b
 $desktopNetlog = Get-OnionmindSource 'onionmind_desktop_netlog.py' '2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398'
 $desktopUpdate = Get-OnionmindSource 'onionmind_desktop_update.py' '1e85beb725e1ef1e2e4f0ce244b2c0c5e39521beadb57215bb7a3d9564ae962a'
 $desktopHardware = Get-OnionmindSource 'onionmind_desktop_hardware.py' 'bce1eef7004b2943860fd86405e6811ee4fa03774e7c023fba63cc71bbc9168b'
-$desktopRemote = Get-OnionmindSource 'onionmind_desktop_remote.py' 'dfd9f4579ca2ecc01a9abd7069bacb6786d12fc4c9e3d28bb890c12e19d5a70a'
+$desktopRemote = Get-OnionmindSource 'onionmind_desktop_remote.py' '7851041dabc4a0f765ba42504c24ae4393d1554a9e3a180c7afcb8f8cf1fa9f9'
 $desktopCorePath = Join-Path $Dir 'onionmind_desktop_core.py'
 $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText($desktopCorePath, $desktopCore, $Utf8NoBom)

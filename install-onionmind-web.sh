@@ -575,7 +575,7 @@ sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
 chmod 755 "$DIR/onionmind.py"
 
 # build.py injects the two focused native-desktop modules into these payloads.
-fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py 1071aab6089a4730ebe3a3e51f6411df107c007b7da3a0adcc1aa8ea22a3e798
+fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py 475a4c379a1844325fdff471467538a64302ae4ad3a276a4a9f0f25dea70abc8
 fetch_source "$DIR/onionmind_desktop.py" onionmind_desktop.py 101ce2e5f970b4802e813b7386d9d20552217662926c6a8bd13c52ff135542dc
 fetch_source "$DIR/onionmind_desktop_theme.py" onionmind_desktop_theme.py 42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed
 fetch_source "$DIR/onionmind_desktop_widgets.py" onionmind_desktop_widgets.py c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b
@@ -585,7 +585,7 @@ fetch_source "$DIR/onionmind_desktop_vault.py" onionmind_desktop_vault.py 2d719d
 fetch_source "$DIR/onionmind_desktop_netlog.py" onionmind_desktop_netlog.py 2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398
 fetch_source "$DIR/onionmind_desktop_update.py" onionmind_desktop_update.py 1e85beb725e1ef1e2e4f0ce244b2c0c5e39521beadb57215bb7a3d9564ae962a
 fetch_source "$DIR/onionmind_desktop_hardware.py" onionmind_desktop_hardware.py bce1eef7004b2943860fd86405e6811ee4fa03774e7c023fba63cc71bbc9168b
-fetch_source "$DIR/onionmind_desktop_remote.py" onionmind_desktop_remote.py dfd9f4579ca2ecc01a9abd7069bacb6786d12fc4c9e3d28bb890c12e19d5a70a
+fetch_source "$DIR/onionmind_desktop_remote.py" onionmind_desktop_remote.py 7851041dabc4a0f765ba42504c24ae4393d1554a9e3a180c7afcb8f8cf1fa9f9
 chmod 644 "$DIR/onionmind_desktop_core.py" "$DIR/onionmind_desktop.py" \
   "$DIR/onionmind_desktop_theme.py" "$DIR/onionmind_desktop_widgets.py" "$DIR/onionmind_desktop_panes.py" "$DIR/onionmind_desktop_dialogs.py" \
   "$DIR/onionmind_desktop_vault.py" "$DIR/onionmind_desktop_netlog.py" "$DIR/onionmind_desktop_update.py" "$DIR/onionmind_desktop_hardware.py" "$DIR/onionmind_desktop_remote.py"
