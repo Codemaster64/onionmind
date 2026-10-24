@@ -18351,13 +18351,20 @@ class Vault:
             return False
         return self._key is None or key == self._key
 
+    def _prove(self, current: str, message: str) -> bytes:
+        """The data key, once `current` proves the password. Raises WrongPassword or VaultLocked."""
+        if not self.check_password(current):
+            raise WrongPassword(message)
+        return self._require_key()[0]
+
     def set_password(self, password: str, current: Optional[str] = None) -> None:
         """Set or change the password. Changing needs the current one."""
         if not password:
             raise VaultError("The password cannot be empty.")
-        if self.has_password and not self.check_password(current or ""):
-            raise WrongPassword("The current password is not right.")
-        key, _ = self._require_key()
+        if self.has_password:
+            key = self._prove(current or "", "The current password is not right.")
+        else:
+            key = self._require_key()[0]
         header = {**self.header, "mode": "password", "password": _wrap_key(key, password)}
         header.pop("keystore", None)
         _write_header(self.root, header)            # the wrapped key first...
@@ -18372,12 +18379,10 @@ class Vault:
 
     def remove_password(self, current: str) -> None:
         """Back to the key store: the data stays encrypted, no login needed."""
-        if not self.check_password(current):
-            raise WrongPassword("That password is not right.")
-        key, _ = self._require_key()
+        key = self._prove(current, "That password is not right.")
         store = keystore_for(self.root)
         store.put(key)                        # the key store first...
-        header = {key: value for key, value in self.header.items() if key != "password"}
+        header = {name: value for name, value in self.header.items() if name != "password"}
         header.update(mode="device", keystore=store.name)
         _write_header(self.root, header)            # ...then the header stops asking
         self.header, self.keystore = header, store
