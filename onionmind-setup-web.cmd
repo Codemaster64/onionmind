@@ -298,8 +298,8 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
-$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '950eaa31a2e4c60930cab8e56db80ff7bc6f2e28a90325bdad02ff43a9d1dc0b'
-$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '538c6fb028d40c7aa93e00bbbe3b4120b993544a15b9d056a3acab75ca96d7e9'
+$desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '1071aab6089a4730ebe3a3e51f6411df107c007b7da3a0adcc1aa8ea22a3e798'
+$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '101ce2e5f970b4802e813b7386d9d20552217662926c6a8bd13c52ff135542dc'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
 $desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' '23b0f683db63b3bf5edfeb409de9db81c26dc8c2f52720982c5a4c6fce9e4539'
@@ -308,7 +308,7 @@ $desktopVault = Get-OnionmindSource 'onionmind_desktop_vault.py' '2d719d97cb555b
 $desktopNetlog = Get-OnionmindSource 'onionmind_desktop_netlog.py' '2c4dc08159be5f41731ccce1aa4c00fb59058ee0b87d0b2a4012697c84158398'
 $desktopUpdate = Get-OnionmindSource 'onionmind_desktop_update.py' '1e85beb725e1ef1e2e4f0ce244b2c0c5e39521beadb57215bb7a3d9564ae962a'
 $desktopHardware = Get-OnionmindSource 'onionmind_desktop_hardware.py' 'bce1eef7004b2943860fd86405e6811ee4fa03774e7c023fba63cc71bbc9168b'
-$desktopRemote = Get-OnionmindSource 'onionmind_desktop_remote.py' '8bb754e965c2f32526594e637477cbce10cd9efe6a9b3f290b6c11a74c1e4f4b'
+$desktopRemote = Get-OnionmindSource 'onionmind_desktop_remote.py' 'dfd9f4579ca2ecc01a9abd7069bacb6786d12fc4c9e3d28bb890c12e19d5a70a'
 $desktopCorePath = Join-Path $Dir 'onionmind_desktop_core.py'
 $desktopUiPath = Join-Path $Dir 'onionmind_desktop.py'
 [System.IO.File]::WriteAllText($desktopCorePath, $desktopCore, $Utf8NoBom)
