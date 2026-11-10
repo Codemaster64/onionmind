@@ -779,10 +779,17 @@ def _ask_ollama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDI
 
 def detect_backend():
     """Prefer ollama; fall back to llama.cpp's llama-server. Ollama has no
-    Android build, so phones run llama-server with the same GGUFs."""
+    Android build, so phones run llama-server with the same GGUFs.
+
+    "llama-server" means anything OpenAI-shaped on 8080: llama-server itself,
+    llama-swap in front of several, or a Strata server. ONIONMIND_BACKEND
+    pins one of the two, so a running Ollama cannot shadow the big models."""
     global BACKEND
+    pinned = os.environ.get("ONIONMIND_BACKEND", "").strip().lower()
     for url, name in ((f"http://127.0.0.1:{OLLAMA_PORT}/api/version", "ollama"),
                       ("http://127.0.0.1:8080/health", "llama-server")):
+        if pinned in ("ollama", "llama-server") and name != pinned:
+            continue
         try:
             if requests.get(url, proxies=NOPROXY, timeout=3).ok:
                 BACKEND = name
@@ -809,7 +816,17 @@ def resolve_model():
     """
     global MODEL
     if BACKEND != "ollama":
-        return MODEL                             # llama-server serves whatever it loaded
+        # llama-swap rejects a request that names no model it knows, and naming
+        # a different one evicts whatever is loaded - maybe another program's.
+        # So: the asked-for model if listed, else the one already loaded, else
+        # the first listed. A plain llama-server lists just its own.
+        names = installed_models()
+        if not names or MODEL in names:
+            return MODEL
+        running = [n for n in _llama_running() or [] if n in names]
+        missing, MODEL = MODEL, (running or names)[0]
+        print(f"[model] {missing} is not served here - using {MODEL}", file=sys.stderr)
+        return MODEL
     names = [strip_tag(n) for n in installed_models()]
     # The desktop passes "inferno:latest"; comparing it raw to stripped names
     # announced "inferno:latest is not installed - using inferno" every run.
@@ -823,8 +840,27 @@ def resolve_model():
     return MODEL
 
 
+def _llama_url(path):
+    """An address on the same server as LLAMA: "/v1/models", "/running"."""
+    return LLAMA.split("/v1/", 1)[0] + path
+
+
+def _llama_running():
+    """Models llama-swap holds in memory right now; None from a plain
+    llama-server or Strata, which have no /running and serve one model."""
+    try:
+        r = requests.get(_llama_url("/running"), proxies=NOPROXY, timeout=3)
+        if not r.ok:
+            return None
+        return [m["model"] for m in r.json()["running"] if m.get("model")]
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def installed_models():
-    """Return locally installed Ollama model names for the model picker."""
+    """Return locally installed model names for the model picker."""
+    if BACKEND == "llama-server":
+        return [m["name"] for m in installed_model_details()]
     try:
         r = requests.get(OLLAMA_TAGS, proxies=NOPROXY, timeout=3)
         if not r.ok:
@@ -838,7 +874,16 @@ def installed_model_details():
     """Installed models with their real on-disk size: [{"name", "size"}].
 
     The size is what Ollama loads, so it is the honest number to compare with
-    this machine's memory. Empty when the model service does not answer."""
+    this machine's memory. Empty when the model service does not answer.
+    An OpenAI-shaped server does not say how big a model is: size 0."""
+    if BACKEND == "llama-server":
+        try:
+            r = requests.get(_llama_url("/v1/models"), proxies=NOPROXY, timeout=3)
+            if not r.ok:
+                return []
+            return [{"name": m["id"], "size": 0} for m in r.json().get("data", []) if m.get("id")]
+        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+            return []
     try:
         r = requests.get(OLLAMA_TAGS, proxies=NOPROXY, timeout=3)
         if not r.ok:
@@ -950,21 +995,43 @@ def _to_openai(messages):
     return out
 
 
-def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_search=False):
-    body = {"messages": _to_openai(messages), "stream": False,
+def _llama_body(messages, num_predict, think, allow_search, stream):
+    # The raw model name: llama-swap routes on it, a lone llama-server ignores it.
+    body = {"model": MODEL, "messages": _to_openai(messages), "stream": stream,
             "max_tokens": num_predict}
+    if stream:
+        body["stream_options"] = {"include_usage": True}
     if allow_search:
         body["tools"] = _tools()
     if think is False:
         body["chat_template_kwargs"] = {"enable_thinking": False}
         body["reasoning_effort"] = "none"
+    return body
+
+
+def _post_llama(body, stream=False):
+    # 1800 s covers a cold start: llama-swap holds the request while it loads,
+    # and Strata's Flash took 871 s to come up on this hardware.
     try:
-        r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800,
-                          json=body)
+        r = requests.post(LLAMA, proxies=NOPROXY, timeout=1800, stream=stream, json=body)
     except requests.exceptions.ConnectionError:
         sys.exit("llama-server is not running on 127.0.0.1:8080. Start it, then retry.")
     if not r.ok:
         sys.exit(f"llama-server returned {r.status_code}: {r.text[:200]}")
+    return r
+
+
+def _tool_args(args):
+    if isinstance(args, str):                    # OpenAI ships arguments as a JSON string
+        try:
+            return json.loads(args) if args.strip() else {}
+        except ValueError:
+            return {"query": args}
+    return args or {}
+
+
+def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_search=False):
+    r = _post_llama(_llama_body(messages, num_predict, think, allow_search, stream=False))
     choice = r.json()["choices"][0]
     m = choice["message"]
     msg = {"role": "assistant", "content": m.get("content") or ""}
@@ -972,18 +1039,86 @@ def _ask_llama(messages, num_predict=NUM_PREDICT, think=None, allow_search=False
         msg["reasoning_content"] = m["reasoning_content"]
     if choice.get("finish_reason"):
         msg["_done_reason"] = choice["finish_reason"]
-    calls = []
-    for c in m.get("tool_calls") or []:
-        args = c["function"].get("arguments")
-        if isinstance(args, str):                    # OpenAI ships arguments as a JSON string
-            try:
-                args = json.loads(args)
-            except ValueError:
-                args = {"query": args}
-        calls.append({"function": {"name": c["function"]["name"], "arguments": args or {}}})
+    calls = [{"function": {"name": c["function"]["name"],
+                           "arguments": _tool_args(c["function"].get("arguments"))}}
+             for c in m.get("tool_calls") or []]
     if calls:
         msg["tool_calls"] = calls
     return msg
+
+
+def _ask_llama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDICT,
+                      think=None, allow_search=False, on_progress=None):
+    """_ask_ollama_stream for an OpenAI-shaped server (SSE "data:" lines).
+
+    Same message shape back: reasoning_content kept apart from the content
+    and never sent to on_text, tool calls reassembled from their fragments,
+    "_stats" from the server's own usage and llama.cpp timings.
+    ponytail: Stop is checked per streamed line, so it cannot cut a cold load
+    or a long prefill short - the same as the Ollama path. Abandoning the
+    request on a thread (as Android does) is the upgrade if that bites.
+    """
+    r = _post_llama(_llama_body(messages, num_predict, think, allow_search, stream=True),
+                    stream=True)
+    message = {"role": "assistant", "content": ""}
+    calls, stats = {}, {}
+    started = time.monotonic()
+    think_span, chunks, reported = [None, None], 0, started
+    try:
+        for raw in r.iter_lines(decode_unicode=True):
+            if stop_event is not None and stop_event.is_set():
+                return {"role": "assistant", "content": "", "stopped": True}
+            if not raw or not raw.startswith("data:"):
+                continue
+            data = raw[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except ValueError:
+                continue          # a partial or non-JSON line must not kill the stream
+            now = time.monotonic()
+            usage = event.get("usage") or {}
+            if usage.get("prompt_tokens") is not None:
+                stats["prompt_eval_count"] = usage["prompt_tokens"]
+            if usage.get("completion_tokens") is not None:
+                stats["eval_count"] = usage["completion_tokens"]
+            speed = (event.get("timings") or {}).get("predicted_per_second")
+            if isinstance(speed, (int, float)) and speed > 0:
+                stats["tokens_per_second"] = speed
+            for choice in event.get("choices") or []:
+                delta = choice.get("delta") or {}
+                content = delta.get("content") or ""
+                reasoning = delta.get("reasoning_content") or ""
+                if content:
+                    message["content"] += content
+                    on_text(content)
+                if reasoning:
+                    message["reasoning_content"] = message.get("reasoning_content", "") + reasoning
+                    think_span[0] = think_span[0] if think_span[0] is not None else now
+                    think_span[1] = now
+                if content or reasoning:
+                    chunks += 1
+                    if on_progress is not None and now - reported >= 0.5:
+                        reported = now
+                        on_progress(chunks, now - started, bool(reasoning))
+                for part in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(part.get("index", len(calls)), {"name": "", "arguments": ""})
+                    fn = part.get("function") or {}
+                    slot["name"] += fn.get("name") or ""
+                    slot["arguments"] += fn.get("arguments") or ""
+                if choice.get("finish_reason"):
+                    message["_done_reason"] = choice["finish_reason"]
+    finally:
+        r.close()
+    if calls:
+        message["tool_calls"] = [{"function": {"name": c["name"], "arguments": _tool_args(c["arguments"])}}
+                                 for _, c in sorted(calls.items())]
+    if think_span[0] is not None:
+        stats["reasoning_seconds"] = max(0.0, think_span[1] - think_span[0])
+    if stats:
+        message["_stats"] = stats
+    return message
 
 
 def _limited(msg):
@@ -1014,13 +1149,14 @@ def _recover_answer(messages, first_answer, stop_event=None, on_text=None):
     if stop_event is not None and stop_event.is_set():
         return "(stopped)"
     recovery_history = [*messages, {"role": "user", "content": FINALIZE_PROMPT}]
-    if BACKEND == "llama-server":
-        recovered = _ask_llama(recovery_history, num_predict=FINAL_NUM_PREDICT,
-                               think=False, allow_search=False)
-    elif on_text is not None:
-        recovered = _ask_ollama_stream(
+    if on_text is not None:
+        stream = _ask_llama_stream if BACKEND == "llama-server" else _ask_ollama_stream
+        recovered = stream(
             recovery_history, on_text, stop_event, num_predict=FINAL_NUM_PREDICT,
             think=False, allow_search=False)
+    elif BACKEND == "llama-server":
+        recovered = _ask_llama(recovery_history, num_predict=FINAL_NUM_PREDICT,
+                               think=False, allow_search=False)
     else:
         recovered = _ask_ollama(recovery_history, num_predict=FINAL_NUM_PREDICT,
                                 think=False, allow_search=False)
@@ -1090,8 +1226,13 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
     Android callers keep the same interface.  Native desktop clients can use it
     to render real tool state without scraping transcript text.
     """
-    if BACKEND != "ollama":
-        return turn(messages, stop_event, allow_search=allow_search)
+    ask = _ask_llama_stream if BACKEND == "llama-server" else _ask_ollama_stream
+    if on_event and BACKEND == "llama-server":
+        running = _llama_running()
+        if running is not None and MODEL not in running:
+            # llama-swap is about to load (and maybe swap out) a model:
+            # minutes of silence otherwise.
+            on_event({"kind": "loading", "model": MODEL, "unloading": running})
     progress = None
     if on_event:
         def report(chunks, seconds, reasoning=False):
@@ -1104,7 +1245,7 @@ def turn_stream(messages, on_text, stop_event=None, on_event=None, allow_search=
         kwargs = {"allow_search": allow_search}
         if progress is not None:
             kwargs["on_progress"] = progress
-        msg = _ask_ollama_stream(messages, on_text, stop_event, **kwargs)
+        msg = ask(messages, on_text, stop_event, **kwargs)
         if msg.get("stopped"):
             return "(stopped)"
         stats = msg.pop("_stats", None)

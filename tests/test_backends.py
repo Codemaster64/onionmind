@@ -474,8 +474,154 @@ def test_remote_compute_moves_only_the_loopback_port():
     assert onionmind.OLLAMA_PORT == 11434
 
 
+def _sse(*events):
+    return "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+
+
+class _Swap(http.server.BaseHTTPRequestHandler):
+    """llama-swap in front of two models: lists both, holds one, and - like the
+    real thing - 404s a chat request that names no model it knows."""
+    running = ["small"]
+    replies = []
+    seen = []
+
+    def _send(self, code, data, kind="application/json"):
+        data = data.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._send(200, "OK", "text/plain")
+        elif self.path == "/v1/models":
+            self._send(200, json.dumps({"data": [{"id": "small"}, {"id": "big"}]}))
+        elif self.path == "/running" and self.running is not None:
+            self._send(200, json.dumps({"running": [{"model": m, "state": "ready"} for m in self.running]}))
+        else:
+            self._send(404, "{}")
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).seen.append(body)
+        if body.get("model") not in ("small", "big"):
+            self._send(404, json.dumps({"error": {"message": "no model id could be identified"}}))
+            return
+        self._send(200, type(self).replies.pop(0), "text/event-stream")
+
+    def log_message(self, *a):
+        pass
+
+
+def _with_swap(fn):
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Swap)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    saved = onionmind.LLAMA, onionmind.BACKEND, onionmind.MODEL
+    _Swap.seen, _Swap.running = [], ["small"]
+    try:
+        onionmind.LLAMA = f"http://127.0.0.1:{srv.server_port}/v1/chat/completions"
+        onionmind.BACKEND = "llama-server"
+        return fn()
+    finally:
+        onionmind.LLAMA, onionmind.BACKEND, onionmind.MODEL = saved
+        srv.shutdown()
+
+
+def test_llama_swap_model_is_named_listed_and_never_evicted_by_default():
+    def body():
+        assert onionmind.installed_models() == ["small", "big"]
+        assert onionmind.installed_model_details()[1] == {"name": "big", "size": 0}
+        onionmind.MODEL = "inferno"                  # the Ollama default, unknown here
+        onionmind.resolve_model()
+        assert onionmind.MODEL == "small", onionmind.MODEL   # the loaded one, not the first
+        onionmind.MODEL = "big"
+        onionmind.resolve_model()
+        assert onionmind.MODEL == "big"              # an explicit, listed choice stands
+        _Swap.running = None                         # a lone llama-server: no /running
+        onionmind.MODEL = "inferno"
+        onionmind.resolve_model()
+        assert onionmind.MODEL == "small"
+        _Swap.replies = [json.dumps({"choices": [{"message": {"role": "assistant", "content": "hi"},
+                                                  "finish_reason": "stop"}]})]
+        assert onionmind.turn([{"role": "user", "content": "q"}]) == "hi"
+        assert _Swap.seen[-1]["model"] == "small", _Swap.seen[-1]
+    _with_swap(body)
+
+
+def test_llama_stream_reasoning_tools_stats_and_loading():
+    def body():
+        onionmind.MODEL = "big"                      # not loaded: expect a loading event
+        _Swap.replies = [
+            _sse({"choices": [{"delta": {"reasoning_content": "private plan"}}]},
+                 {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {
+                     "name": "web_search", "arguments": '{"que'}}]}}]},
+                 {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {
+                     "arguments": 'ry": "onions"}'}}]}, "finish_reason": "tool_calls"}]}),
+            _sse({"choices": [{"delta": {"content": "Found "}}]},
+                 {"choices": [{"delta": {"content": "it."}, "finish_reason": "stop"}]},
+                 {"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 3},
+                  "timings": {"predicted_per_second": 42.5}}),
+        ]
+        shown, events = [], []
+        with mock.patch.object(onionmind, "web_search", return_value="- a result"), \
+             mock.patch.object(onionmind, "tor_check"):
+            answer = onionmind.turn_stream([{"role": "user", "content": "search"}], shown.append,
+                                           on_event=events.append, allow_search=True)
+        assert answer == "Found it.", answer
+        assert "".join(shown) == "Found it.", shown          # reasoning never reaches the screen
+        kinds = [e["kind"] for e in events]
+        assert kinds[0] == "loading" and events[0]["unloading"] == ["small"], events
+        started = next(e for e in events if e["kind"] == "tool_started")
+        assert started["arguments"] == {"query": "onions"}, started   # fragments reassembled
+        stats = [e for e in events if e["kind"] == "stats"][-1]
+        assert stats["prompt_eval_count"] == 120 and stats["tokens_per_second"] == 42.5, stats
+        assert all(b["stream"] and b["model"] == "big" for b in _Swap.seen), _Swap.seen
+        assert "tools" in _Swap.seen[0]
+    _with_swap(body)
+
+
+def test_llama_stream_stops_between_lines():
+    import threading as _t
+    stop = _t.Event()
+    response = mock.Mock(status_code=200, ok=True)
+    response.iter_lines.return_value = iter([
+        'data: {"choices": [{"delta": {"content": "one"}}]}',
+        'data: {"choices": [{"delta": {"content": "two"}}]}',
+    ])
+    shown = []
+
+    def on_text(chunk):
+        shown.append(chunk)
+        stop.set()
+    with mock.patch.object(onionmind.requests, "post", return_value=response):
+        msg = onionmind._ask_llama_stream([{"role": "user", "content": "q"}], on_text, stop)
+    assert msg.get("stopped") and shown == ["one"], (msg, shown)
+    response.close.assert_called_once_with()
+
+
+def test_backend_pin_skips_ollama():
+    probed = []
+
+    def get(url, **_kw):
+        probed.append(url)
+        return mock.Mock(ok=True)
+    with mock.patch.dict(onionmind.os.environ, {"ONIONMIND_BACKEND": "llama-server"}), \
+         mock.patch.object(onionmind.requests, "get", side_effect=get), \
+         mock.patch.object(onionmind, "resolve_model"), \
+         mock.patch.object(onionmind, "BACKEND", None):
+        onionmind.detect_backend()
+        assert onionmind.BACKEND == "llama-server"
+    assert probed == ["http://127.0.0.1:8080/health"], probed
+
+
 if __name__ == "__main__":
     test_llama_backend()
+    test_llama_swap_model_is_named_listed_and_never_evicted_by_default()
+    test_llama_stream_reasoning_tools_stats_and_loading()
+    test_llama_stream_stops_between_lines()
+    test_backend_pin_skips_ollama()
     test_ollama_reasoning_budget_exceeds_old_ceiling()
     test_ollama_exhaustion_is_compressed_and_preserved()
     test_llama_exhaustion_continues_from_reasoning_content()
