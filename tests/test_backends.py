@@ -601,6 +601,28 @@ def test_llama_stream_stops_between_lines():
     response.close.assert_called_once_with()
 
 
+def test_llama_stream_times_generation_when_the_server_sends_no_timings():
+    """Ollama's and Strata's /v1 report token counts but no timings: the
+    average comes from first to last streamed token. llama.cpp's own
+    predicted_ms wins when present."""
+    def run(lines, clock):
+        response = mock.Mock(status_code=200, ok=True)
+        response.iter_lines.return_value = lines
+        with mock.patch.object(onionmind.requests, "post", return_value=response), \
+             mock.patch.object(onionmind.time, "monotonic", side_effect=lambda: next(clock)):
+            return onionmind._ask_llama_stream([{"role": "user", "content": "q"}], lambda _c: None)["_stats"]
+    usage = 'data: {"choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": 40}}'
+    stats = run(['data: {"choices": [{"delta": {"content": "a"}}]}',
+                 'data: {"choices": [{"delta": {"content": "b"}}]}', usage, "data: [DONE]"],
+                iter([0.0, 1.0, 3.0, 9.0]))
+    assert stats["eval_duration"] == 2_000_000_000 and stats["tokens_per_second"] == 20.0, stats
+    stats = run(['data: {"choices": [{"delta": {"content": "a"}}]}',
+                 'data: {"choices": [], "usage": {"completion_tokens": 40},'
+                 ' "timings": {"predicted_ms": 1000, "predicted_per_second": 40.0}}', "data: [DONE]"],
+                iter([0.0, 1.0, 5.0]))
+    assert stats["eval_duration"] == 1_000_000_000 and stats["tokens_per_second"] == 40.0, stats
+
+
 def test_backend_pin_skips_ollama():
     probed = []
 
@@ -622,6 +644,7 @@ if __name__ == "__main__":
     test_llama_stream_reasoning_tools_stats_and_loading()
     test_llama_stream_stops_between_lines()
     test_backend_pin_skips_ollama()
+    test_llama_stream_times_generation_when_the_server_sends_no_timings()
     test_ollama_reasoning_budget_exceeds_old_ceiling()
     test_ollama_exhaustion_is_compressed_and_preserved()
     test_llama_exhaustion_continues_from_reasoning_content()
