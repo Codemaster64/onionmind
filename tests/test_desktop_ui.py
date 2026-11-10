@@ -917,6 +917,44 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(button.text() or button.accessibleName())
         self._close(window)
 
+    def test_model_server_on_8080_picker_loading_pull_and_backend_choice(self) -> None:
+        window = self._window()
+        try:
+            core = window.core
+            core.BACKEND, core.MODEL = "llama-server", "qwen-big"
+            # A model saved under Ollama is swapped for the one the core resolved.
+            window._model_probe_complete(("llama-server", ["qwen-small", "qwen-big"]))
+            self.assertEqual(window.current_model_id(), "qwen-big")
+            window._chat_event({"kind": "loading", "model": "qwen-big", "unloading": ["qwen-small"]})
+            self.assertIn("unloads qwen-small first", window.status_label.text())
+            # Pulling is the server's business: refused before anything is logged as leaving.
+            dialog, core.pull_model = mock.Mock(), mock.Mock()
+            with mock.patch.object(window, "_egress") as egress:
+                window.pull_model("hf.co/some/model", dialog)
+            egress.assert_not_called()
+            core.pull_model.assert_not_called()
+            dialog.set_error.assert_called_once()
+            # The Settings choice reaches the core as ONIONMIND_BACKEND and re-probes.
+            with mock.patch.dict(os.environ), mock.patch.object(ui, "_USER_BACKEND", None), \
+                 mock.patch.object(window, "_probe_models") as probe:
+                os.environ.pop("ONIONMIND_BACKEND", None)
+                window.set_model_backend("llama-server")
+                self.assertEqual(os.environ.get("ONIONMIND_BACKEND"), "llama-server")
+                self.assertIsNone(core.BACKEND)
+                window.set_model_backend("bogus")
+                self.assertNotIn("ONIONMIND_BACKEND", os.environ)
+                self.assertEqual(window.model_backend(), "")
+            self.assertEqual(probe.call_count, 2)
+            # The Settings control drives the same call.
+            dialog = ui.SettingsDialog(window.data_root, "limitation", None, window)
+            self.addCleanup(dialog.close)
+            self.assertEqual(dialog.backend_combo.currentData(), "")
+            with mock.patch.object(window, "set_model_backend") as choose:
+                dialog.backend_combo.setCurrentIndex(dialog.backend_combo.findData("llama-server"))
+            choose.assert_called_once_with("llama-server")
+        finally:
+            self._close(window)
+
 
 @unittest.skipUnless(QT_AVAILABLE, "PySide6 desktop runtime is not installed")
 class UpdatePermissionTests(unittest.TestCase):
