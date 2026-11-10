@@ -1264,6 +1264,21 @@ class SettingsDialog(QDialog):
         )
         self.remote_autoconnect_box.setChecked(bool(settings["autoconnect"]))
         form.addRow("", self.remote_autoconnect_box)
+        self.backend_combo = QComboBox()
+        self.backend_combo.setAccessibleName("Local model server")
+        for label, value in (("Automatic - Ollama if it is running, else port 8080", ""),
+                             ("Ollama", "ollama"),
+                             ("llama-server, llama-swap or Strata on port 8080", "llama-server")):
+            self.backend_combo.addItem(label, value)
+        backend = window.model_backend() if window is not None else ""
+        self.backend_combo.setCurrentIndex(max(0, self.backend_combo.findData(backend)))
+        self.backend_combo.setToolTip(
+            "Which server on this machine answers. Port 8080 is where llama-server, "
+            "llama-swap and Strata serve big models; Onionmind only talks to it over "
+            "loopback and never starts, updates or downloads anything for it. Remote "
+            "compute reaches an Ollama, so it needs Automatic or Ollama."
+        )
+        form.addRow("Model server", self.backend_combo)
         outer.addLayout(form)
         self.remote_feedback = QLabel()
         self.remote_feedback.setWordWrap(True)
@@ -1285,9 +1300,12 @@ class SettingsDialog(QDialog):
             self.remote_host_field.returnPressed.connect(self._remote_connect_clicked)
             self.remote_host_field.editingFinished.connect(self._remote_host_edited)
             self.remote_autoconnect_box.toggled.connect(self._remote_autoconnect_toggled)
+            self.backend_combo.currentIndexChanged.connect(
+                lambda _index: window.set_model_backend(_as_text(self.backend_combo.currentData())))
             window.remoteChanged.connect(self._sync_remote)
         else:
             self.remote_connect_button.setEnabled(False)
+            self.backend_combo.setEnabled(False)
         self._sync_remote()
         return page
 

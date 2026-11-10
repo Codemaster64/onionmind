@@ -97,6 +97,31 @@ The desktop rewrite keeps three deliberately narrow seams:
 - `onionmind.py` owns Ollama/llama.cpp inference, streaming, image messages,
   tool calls, and fail-closed Tor search. Existing CLI, Android, and Matchstick
   paths continue to use this core.
+
+### Big models on port 8080 (llama-server, llama-swap, Strata)
+
+Anything that speaks the OpenAI API on `127.0.0.1:8080` is the `llama-server`
+backend: llama.cpp's `llama-server`, llama-swap in front of several of them, or a
+Strata server. That is how models bigger than the GPU are reached - the server
+does the offloading; Onionmind does no inference of its own.
+
+- Onionmind names the raw model in every request and lists what the server
+  offers from `/v1/models`. If the chosen model is not listed it takes the one
+  llama-swap already holds (`/running`), so it does not evict a model another
+  program is using; only then the first listed.
+- Chat streams. The model's `reasoning_content` is kept apart and never shown,
+  like Ollama's thinking. When llama-swap is about to load a model the desktop
+  says so, and names any model it will unload.
+- **Settings → Compute → Model server** chooses Automatic (Ollama if it
+  answers, else 8080), Ollama, or 8080. The choice reaches the core and the
+  agent as `ONIONMIND_BACKEND`, which can also be set by hand.
+- Boundary: this is loopback only, the same as Ollama. Onionmind never starts,
+  updates or downloads anything for that server, and *Add model* is refused while
+  it is selected. A server's own downloads (Strata's `launch` and `update`, say)
+  happen outside Onionmind and are not covered by its Tor rule.
+- Verified: mock-server tests in `tests/test_backends.py` and
+  `tests/test_desktop_ui.py`, and one live streamed chat turn against llama-swap
+  serving Strata's Qwen3.8-Flash on the developer's machine. No speed claims.
 - `onionmind_desktop_core.py` has no Qt dependency. It owns atomic JSON settings
   and sessions, Onionmind tier/display names, bounded workspace and Git snapshots,
   terminal parsing, and the exact DeepSeek Harness command. This layer is covered

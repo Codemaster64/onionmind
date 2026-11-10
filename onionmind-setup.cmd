@@ -5709,6 +5709,10 @@ def _set_tor_enabled(core: Any, enabled: bool) -> bool:
     return True
 
 
+# What the environment said before Settings touched it: "auto" restores this.
+_USER_BACKEND = os.environ.get("ONIONMIND_BACKEND")
+
+
 def _set_tor_action(
     host: Any,
     text: str,
@@ -5870,6 +5874,7 @@ class OnionmindWindow(QMainWindow):
             # Connecting at launch is an opt-in the user ticked in Settings;
             # without it, opening Onionmind still contacts nothing.
             autoconnect = self.remote_settings()["autoconnect"]
+            self._apply_model_backend()
             self._probe_services(models=not autoconnect)
             if autoconnect:
                 self.connect_remote()
@@ -6494,12 +6499,17 @@ class OnionmindWindow(QMainWindow):
         return worker
 
     def _model_probe_complete(self, payload: tuple[str, list[str]]) -> None:
-        _backend, models = payload
+        backend, models = payload
         self._no_models = not models
         self._sync_no_model_banner()
         if self._fault == "server":
             self._clear_fault()
         current = self.current_model_id()
+        if backend == "llama-server" and models and current not in models:
+            # A model saved under Ollama means nothing to this server, which
+            # would refuse it; the core has already picked one it serves.
+            resolved = _as_text(getattr(self.core, "MODEL", ""))
+            current = resolved if resolved in models else models[0]
         self.set_model_options(models or [current], current)
         self.model_status.set_status("Ready", "good")
         where = self.inference_location()
@@ -8376,6 +8386,17 @@ class OnionmindWindow(QMainWindow):
         if kind in ("generating", "stats"):
             self._generation_event(kind, event)
             return
+        if kind == "loading":
+            # The model server (llama-swap) is about to load this model, and
+            # possibly unload one another program is using.
+            model = _as_text(event.get("model"))
+            others = ", ".join(_as_text(n) for n in event.get("unloading") or [])
+            text = (f"Loading {model} - the model server unloads {others} first. "
+                    if others else f"Loading {model} into memory. ")
+            text += "A big model can take minutes."
+            self.set_status(text)
+            self.inspector.append_activity(text)
+            return
         name = _as_text(event.get("name", "local tool"))
         display_name = name.replace("_", " ").strip().title()
         if kind == "tor_ready":
@@ -8934,6 +8955,12 @@ class OnionmindWindow(QMainWindow):
         pull = getattr(self.core, "pull_model", None)
         if not callable(pull):
             dialog.set_error("This Onionmind installation cannot add models yet")
+            return
+        if getattr(self.core, "BACKEND", None) == "llama-server":
+            # Checked before the egress entry: nothing is downloaded, so
+            # nothing may be logged as leaving.
+            dialog.set_error("The model server on port 8080 (llama-server, llama-swap or Strata) "
+                             "manages its own models. Add the model there; Onionmind lists what it serves.")
             return
         stop_event = threading.Event()
         registry = "huggingface.co" if name.lower().startswith(("hf.co/", "huggingface.co/")) else "registry.ollama.ai"
@@ -10687,6 +10714,35 @@ class OnionmindWindow(QMainWindow):
         self.settings_data["remote_compute"] = settings
         if not self.demo:
             self.settings_bridge.save(self.settings_data)
+
+    MODEL_BACKENDS = ("ollama", "llama-server")
+
+    def model_backend(self) -> str:
+        """The saved model-server choice: "ollama", "llama-server", or "" (auto)."""
+        value = _as_text(self.settings_data.get("model_backend"))
+        return value if value in self.MODEL_BACKENDS else ""
+
+    def _apply_model_backend(self) -> None:
+        """Hand the choice to the core (and every child it starts) as
+        ONIONMIND_BACKEND; auto restores whatever the environment had."""
+        value = self.model_backend()
+        if value:
+            os.environ["ONIONMIND_BACKEND"] = value
+        elif _USER_BACKEND is None:
+            os.environ.pop("ONIONMIND_BACKEND", None)
+        else:
+            os.environ["ONIONMIND_BACKEND"] = _USER_BACKEND
+
+    def set_model_backend(self, value: str) -> None:
+        self.settings_data["model_backend"] = value if value in self.MODEL_BACKENDS else ""
+        if not self.demo:
+            self.settings_bridge.save(self.settings_data)
+        self._apply_model_backend()
+        try:
+            setattr(self.core, "BACKEND", None)
+        except Exception:
+            pass
+        self._probe_models()
 
     def inference_location(self) -> str:
         tunnel = self.remote_tunnel
@@ -17083,6 +17139,21 @@ class SettingsDialog(QDialog):
         )
         self.remote_autoconnect_box.setChecked(bool(settings["autoconnect"]))
         form.addRow("", self.remote_autoconnect_box)
+        self.backend_combo = QComboBox()
+        self.backend_combo.setAccessibleName("Local model server")
+        for label, value in (("Automatic - Ollama if it is running, else port 8080", ""),
+                             ("Ollama", "ollama"),
+                             ("llama-server, llama-swap or Strata on port 8080", "llama-server")):
+            self.backend_combo.addItem(label, value)
+        backend = window.model_backend() if window is not None else ""
+        self.backend_combo.setCurrentIndex(max(0, self.backend_combo.findData(backend)))
+        self.backend_combo.setToolTip(
+            "Which server on this machine answers. Port 8080 is where llama-server, "
+            "llama-swap and Strata serve big models; Onionmind only talks to it over "
+            "loopback and never starts, updates or downloads anything for it. Remote "
+            "compute reaches an Ollama, so it needs Automatic or Ollama."
+        )
+        form.addRow("Model server", self.backend_combo)
         outer.addLayout(form)
         self.remote_feedback = QLabel()
         self.remote_feedback.setWordWrap(True)
@@ -17104,9 +17175,12 @@ class SettingsDialog(QDialog):
             self.remote_host_field.returnPressed.connect(self._remote_connect_clicked)
             self.remote_host_field.editingFinished.connect(self._remote_host_edited)
             self.remote_autoconnect_box.toggled.connect(self._remote_autoconnect_toggled)
+            self.backend_combo.currentIndexChanged.connect(
+                lambda _index: window.set_model_backend(_as_text(self.backend_combo.currentData())))
             window.remoteChanged.connect(self._sync_remote)
         else:
             self.remote_connect_button.setEnabled(False)
+            self.backend_combo.setEnabled(False)
         self._sync_remote()
         return page
 
