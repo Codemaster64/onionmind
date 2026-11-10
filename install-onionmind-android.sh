@@ -378,7 +378,11 @@ def start_tor_hidden(timeout=180, stop_event=None):
         browser = os.path.join(root, "Browser")
         tor_exe = os.path.join(browser, "TorBrowser", "Tor", "tor.exe")
         data = os.path.join(browser, "TorBrowser", "Data", "Tor")
-        defaults = os.path.join(data, "torrc-defaults")
+        # Newer Tor Browser ships torrc-defaults beside tor.exe; older ones kept
+        # it in the data folder. The user's torrc stays in the data folder.
+        defaults = next((p for p in (os.path.join(data, "torrc-defaults"),
+                                     os.path.join(os.path.dirname(tor_exe), "torrc-defaults"))
+                         if os.path.isfile(p)), "")
         torrc = os.path.join(data, "torrc")
         if not all(os.path.isfile(path) for path in (tor_exe, defaults, torrc)):
             continue
