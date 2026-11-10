@@ -285,7 +285,7 @@ Say "Installing Python deps (requests, PySocks)"
 & $py -m pip install --quiet --disable-pip-version-check requests PySocks
 if ($LASTEXITCODE -ne 0) { throw "Python dependencies could not be installed." }
 
-$search = Get-OnionmindSource 'onionmind.py' '641e6f56f0fa74b5409455bb75c4b64378fb084d1388b38d4658c749e5f0764b'
+$search = Get-OnionmindSource 'onionmind.py' '9cb4682bcd0d8d1b1b589f4d6b3158b5d05a3c6ae62e713e8a52b2b97fbf6bc9'
 # Point the tool at whichever model was installed - on the fast tier the model is NOT
 # named inferno, and the embedded default would reference a model that does
 # not exist. Plain .Replace(), not a regex: this file has CRLF endings and a $
@@ -299,7 +299,7 @@ $searchPath = Join-Path $Dir 'onionmind.py'
 # The native desktop workbench is kept in focused modules, then embedded here by
 # build.py so the one-click installer remains complete and reproducible.
 $desktopCore = Get-OnionmindSource 'onionmind_desktop_core.py' '950eaa31a2e4c60930cab8e56db80ff7bc6f2e28a90325bdad02ff43a9d1dc0b'
-$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '84d99cc2d277a664339bad2e85a42a5a8f2511809e7f6d7261e68143d7ef7408'
+$desktopUi = Get-OnionmindSource 'onionmind_desktop.py' '40b3d547af6c4a7b588a59d330ef12d63b252ab82b4514adb3c44c0e1cbd3f56'
 $desktopTheme = Get-OnionmindSource 'onionmind_desktop_theme.py' '42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed'
 $desktopWidgets = Get-OnionmindSource 'onionmind_desktop_widgets.py' 'c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b'
 $desktopPanes = Get-OnionmindSource 'onionmind_desktop_panes.py' '23b0f683db63b3bf5edfeb409de9db81c26dc8c2f52720982c5a4c6fce9e4539'

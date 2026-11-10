@@ -917,6 +917,28 @@ class DesktopUiTests(unittest.TestCase):
             self.assertTrue(button.text() or button.accessibleName())
         self._close(window)
 
+    def test_reply_gets_a_token_and_average_speed_line(self) -> None:
+        window = self._window()
+        try:
+            window._turn_tokens = window._turn_prompt_tokens = window._turn_gen_ns = 0
+            # Two rounds in one turn (a search, then the answer) add up.
+            window._generation_event("stats", {"eval_count": 300, "eval_duration": 10_000_000_000,
+                                               "prompt_eval_count": 1200})
+            window._generation_event("stats", {"eval_count": 120, "eval_duration": 2_000_000_000,
+                                               "prompt_eval_count": 1500})
+            self.assertEqual(window._turn_usage_text(), "420 tokens · 35.0 tok/s avg · 1,500 prompt")
+            window.stream_block = object()
+            added = []
+            with mock.patch.object(window.transcript, "add_widget", side_effect=added.append):
+                window._after_reply(False)
+            self.assertIn("420 tokens · 35.0 tok/s avg · 1,500 prompt",
+                          [w.text() for w in added if isinstance(w, ui.QLabel)])
+            window._turn_tokens = 0
+            self.assertEqual(window._turn_usage_text(), "")   # nothing counted, no line
+        finally:
+            window.stream_block = None
+            self._close(window)
+
     def test_model_server_on_8080_picker_loading_pull_and_backend_choice(self) -> None:
         window = self._window()
         try:

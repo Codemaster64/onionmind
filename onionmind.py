@@ -1016,6 +1016,8 @@ def _ask_llama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDIC
     calls, stats = {}, {}
     started = time.monotonic()
     think_span, chunks, reported = [None, None], 0, started
+    first_token = last_token = None
+    server_ms = None
     try:
         for raw in r.iter_lines(decode_unicode=True):
             if stop_event is not None and stop_event.is_set():
@@ -1035,9 +1037,12 @@ def _ask_llama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDIC
                 stats["prompt_eval_count"] = usage["prompt_tokens"]
             if usage.get("completion_tokens") is not None:
                 stats["eval_count"] = usage["completion_tokens"]
-            speed = (event.get("timings") or {}).get("predicted_per_second")
+            timings = event.get("timings") or {}
+            speed = timings.get("predicted_per_second")
             if isinstance(speed, (int, float)) and speed > 0:
                 stats["tokens_per_second"] = speed
+            if isinstance(timings.get("predicted_ms"), (int, float)) and timings["predicted_ms"] > 0:
+                server_ms = timings["predicted_ms"]
             for choice in event.get("choices") or []:
                 delta = choice.get("delta") or {}
                 content = delta.get("content") or ""
@@ -1051,6 +1056,8 @@ def _ask_llama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDIC
                     think_span[1] = now
                 if content or reasoning:
                     chunks += 1
+                    first_token = first_token if first_token is not None else now
+                    last_token = now
                     if on_progress is not None and now - reported >= 0.5:
                         reported = now
                         on_progress(chunks, now - started, bool(reasoning))
@@ -1068,6 +1075,15 @@ def _ask_llama_stream(messages, on_text, stop_event=None, num_predict=NUM_PREDIC
                                  for _, c in sorted(calls.items())]
     if think_span[0] is not None:
         stats["reasoning_seconds"] = max(0.0, think_span[1] - think_span[0])
+    # Generation time, Ollama-style in ns: the server's own figure (llama.cpp
+    # timings) when it gives one, else first-to-last streamed token on this
+    # side - Ollama's and Strata's /v1 send token counts but no timings.
+    if server_ms is not None:
+        stats["eval_duration"] = int(server_ms * 1e6)
+    elif first_token is not None and last_token > first_token:
+        stats["eval_duration"] = int((last_token - first_token) * 1e9)
+    if stats.get("eval_count") and stats.get("eval_duration") and "tokens_per_second" not in stats:
+        stats["tokens_per_second"] = stats["eval_count"] / (stats["eval_duration"] / 1e9)
     if stats:
         message["_stats"] = stats
     return message
@@ -1276,8 +1292,11 @@ def _save(history, path):
 CODE_CTX = 32768
 
 # The stops the slider offers. Powers of two because the KV cache is sized from
-# this, so the odd values in between buy nothing and just make the control fiddly.
-CODE_STEPS = (8192, 16384, 32768, 65536, 131072)
+# this, so the odd values in between buy nothing and just make the control fiddly -
+# plus 98304, the most a 27B split across 12 + 16 GB holds with its server started
+# at -c 98304 (llama-swap's qwen27b-heretic). Above a server's own -c the agent
+# would overrun the window instead of compacting.
+CODE_STEPS = (8192, 16384, 32768, 65536, 98304, 131072)
 
 # One file, so the CLI, the Tk window and the workbench cannot disagree about
 # what the budget currently is. Lives beside the net log for the same reason: it

@@ -569,14 +569,14 @@ fi
 say "Step: Onionmind program files -> $DIR"
 
 # --- 8. Tor search tool -----------------------------------------------------
-fetch_source "$DIR/onionmind.py" onionmind.py 641e6f56f0fa74b5409455bb75c4b64378fb084d1388b38d4658c749e5f0764b
+fetch_source "$DIR/onionmind.py" onionmind.py 9cb4682bcd0d8d1b1b589f4d6b3158b5d05a3c6ae62e713e8a52b2b97fbf6bc9
 # point the tool at whichever model was installed
 sed -i "s|^MODEL  = .*|MODEL  = \"$MODEL_NAME\"|" "$DIR/onionmind.py"
 chmod 755 "$DIR/onionmind.py"
 
 # build.py injects the two focused native-desktop modules into these payloads.
 fetch_source "$DIR/onionmind_desktop_core.py" onionmind_desktop_core.py 950eaa31a2e4c60930cab8e56db80ff7bc6f2e28a90325bdad02ff43a9d1dc0b
-fetch_source "$DIR/onionmind_desktop.py" onionmind_desktop.py 84d99cc2d277a664339bad2e85a42a5a8f2511809e7f6d7261e68143d7ef7408
+fetch_source "$DIR/onionmind_desktop.py" onionmind_desktop.py 40b3d547af6c4a7b588a59d330ef12d63b252ab82b4514adb3c44c0e1cbd3f56
 fetch_source "$DIR/onionmind_desktop_theme.py" onionmind_desktop_theme.py 42ef535811c74e9485d5f30c2e48be9e3e2d74da7dfd9e232029581f637f37ed
 fetch_source "$DIR/onionmind_desktop_widgets.py" onionmind_desktop_widgets.py c8ca50408c1f71bc77b2caf5ee7aaa05bf6c2f741547d56e036784c943ba277b
 fetch_source "$DIR/onionmind_desktop_panes.py" onionmind_desktop_panes.py 23b0f683db63b3bf5edfeb409de9db81c26dc8c2f52720982c5a4c6fce9e4539

@@ -385,6 +385,7 @@ class OnionmindWindow(QMainWindow):
         self._model_loading: Optional[str] = None
         self._live_tps: Optional[float] = None
         self._turn_reasoning = 0.0
+        self._turn_tokens = self._turn_prompt_tokens = self._turn_gen_ns = 0
         self._last_stats: dict[str, Any] = {}
         self._context_used_real: Optional[int] = None
         self.egress_path = self.data_root / "network-log.jsonl"
@@ -2828,6 +2829,9 @@ class OnionmindWindow(QMainWindow):
         self.tor_in_use = allow_search
         self._turn_reasoning = 0.0
         self._live_tps = None
+        self._turn_tokens = 0
+        self._turn_prompt_tokens = 0
+        self._turn_gen_ns = 0
         self._turn_searches = []
         self.stop_event = threading.Event()
         stop_event = self.stop_event
@@ -4258,6 +4262,12 @@ class OnionmindWindow(QMainWindow):
             if event.get("tokens_per_second"):
                 self._live_tps = float(event["tokens_per_second"])
             self._turn_reasoning += float(event.get("reasoning_seconds") or 0)
+            # One turn can be several model rounds (a search, a recovery pass):
+            # the counter under the reply sums them.
+            self._turn_tokens += int(event.get("eval_count") or 0)
+            self._turn_gen_ns += int(event.get("eval_duration") or 0)
+            self._turn_prompt_tokens = max(self._turn_prompt_tokens,
+                                           int(event.get("prompt_eval_count") or 0))
             prompt = event.get("prompt_eval_count")
             if isinstance(prompt, (int, float)):
                 self._context_used_real = int(prompt) + int(event.get("eval_count") or 0)
@@ -4298,6 +4308,12 @@ class OnionmindWindow(QMainWindow):
             self.transcript.add_widget(ProvenanceChips(chips))
         if self.feature("thinking") and self._turn_reasoning > 0 and self.stream_block is not None:
             self.transcript.add_widget(ThoughtLine(self._turn_reasoning))
+        usage = self._turn_usage_text()
+        if usage and self.stream_block is not None:
+            line = QLabel(usage)
+            line.setObjectName("meta")
+            line.setAccessibleName(f"Reply usage: {usage}")
+            self.transcript.add_widget(line)
         self._live_tps = self._live_tps if not stopped else None
         if self.feature("modelPlus"):
             self._probe_model_power()
@@ -4305,6 +4321,21 @@ class OnionmindWindow(QMainWindow):
         if not stopped:
             self._notify("Onionmind replied",
                          f"{self._session_title()} · {Path(self.workspace).name if self.workspace else 'no project'}")
+
+    def _turn_usage_text(self) -> str:
+        """'1,234 tokens · 41.7 tok/s avg · 5,678 prompt' for the turn just
+        finished, from the model server's own counts; '' when it sent none."""
+        tokens = int(getattr(self, "_turn_tokens", 0) or 0)
+        if not tokens:
+            return ""
+        parts = [f"{tokens:,} tokens"]
+        seconds = int(getattr(self, "_turn_gen_ns", 0) or 0) / 1e9
+        if seconds > 0:
+            parts.append(f"{tokens / seconds:.1f} tok/s avg")
+        prompt = int(getattr(self, "_turn_prompt_tokens", 0) or 0)
+        if prompt:
+            parts.append(f"{prompt:,} prompt")
+        return " · ".join(parts)
 
     # --- v2: context meter -------------------------------------------------
 
