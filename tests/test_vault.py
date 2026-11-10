@@ -190,6 +190,70 @@ class VaultTests(unittest.TestCase):
         reopened = core.open_vault(self.root)
         self.assertEqual(reopened.mode, "device")
 
+    def test_password_edge_cases_refuse_without_touching_the_header(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        self.assertFalse(vault.check_password("anything"))       # no password set yet
+        with self.assertRaises(core.WrongPassword):
+            vault.remove_password("anything")                    # nothing to remove
+        with self.assertRaises(core.VaultError):
+            vault.set_password("")
+        self.assertFalse(core.vault_needs_password(self.root))
+        vault.set_password("pw")
+        vault.lock()
+        before = (self.root / core.VAULT_FILE).read_bytes()
+        with self.assertRaises(core.VaultLocked):
+            vault.remove_password("pw")                          # right password, but no key in memory
+        with self.assertRaises(core.WrongPassword):
+            vault.remove_password("wrong")
+        self.assertEqual((self.root / core.VAULT_FILE).read_bytes(), before)
+        vault.unlock("pw")
+        vault.remove_password("pw")
+        self.assertEqual(vault.mode, "device")
+        self.assertNotIn("password", vault.header)
+
+    def test_a_damaged_password_record_is_an_error_not_a_wrong_password(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        vault.set_password("pw")
+        record = dict(vault.header["password"])
+        for broken in ({**record, "salt": "not hex"}, {k: v for k, v in record.items() if k != "nonce"},
+                       {**record, "n": None}):
+            with self.assertRaises(core.VaultError) as caught:
+                vault_part._unwrap_key(broken, "pw")
+            self.assertNotIsInstance(caught.exception, core.WrongPassword)
+        with self.assertRaisesRegex(core.VaultError, "unknown key derivation"):
+            vault_part._unwrap_key({**record, "kdf": "md5"}, "pw")
+        vault.header["password"] = {**record, "salt": "zz"}
+        self.assertFalse(vault.check_password("pw"))            # damaged reads as "not proven"
+
+    def test_each_wrap_gets_fresh_salt_and_a_stale_record_does_not_prove_this_key(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        first = vault_part._wrap_key(b"k" * 32, "pw")
+        second = vault_part._wrap_key(b"k" * 32, "pw")
+        self.assertNotEqual((first["salt"], first["nonce"]), (second["salt"], second["nonce"]))
+        self.assertEqual(vault_part._unwrap_key(second, "pw"), b"k" * 32)
+        vault.set_password("pw")
+        vault.header["password"] = first                        # right password, someone else's key
+        self.assertFalse(vault.check_password("pw"))
+        with self.assertRaises(core.WrongPassword):
+            vault.remove_password("pw")
+
+    def test_setting_a_password_moves_the_key_out_of_the_store_and_unlock_is_idempotent(self) -> None:
+        vault = core.open_vault(self.root, keystore=self.store)
+        self.assertEqual(vault.mode, "device")
+        self.assertIn("key store", vault.describe())
+        vault.set_password("pw")
+        self.assertNotIn("keystore", vault.header)
+        self.assertIsNone(vault.keystore)
+        self.assertIn("password", vault.describe())
+        vault.unlock("wrong")                                   # already unlocked: nothing to check
+        self.assertFalse(vault.locked)
+        vault.lock()
+        with self.assertRaises(core.WrongPassword):
+            vault.unlock("")
+        self.assertTrue(vault.locked)
+        vault.unlock("pw")
+        self.assertEqual(vault.decrypt(vault.encrypt(b"x")), b"x")
+
     def test_a_lost_key_is_reported_not_replaced(self) -> None:
         core.open_vault(self.root, keystore=self.store)
         self.store.key = None
