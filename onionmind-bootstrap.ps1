@@ -270,10 +270,15 @@ foreach ($CandidateRoot in $TorRoots) {
     if ([string]::IsNullOrWhiteSpace($CandidateRoot)) { continue }
     $RequiredTorAssets = @(
         (Join-Path $CandidateRoot "Browser\TorBrowser\Tor\tor.exe"),
-        (Join-Path $CandidateRoot "Browser\TorBrowser\Data\Tor\torrc-defaults"),
         (Join-Path $CandidateRoot "Browser\TorBrowser\Data\Tor\torrc")
     )
-    if (@($RequiredTorAssets | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0) {
+    # Newer Tor Browser keeps torrc-defaults beside tor.exe; older ones in Data\Tor.
+    $TorDefaults = @(
+        (Join-Path $CandidateRoot "Browser\TorBrowser\Data\Tor\torrc-defaults"),
+        (Join-Path $CandidateRoot "Browser\TorBrowser\Tor\torrc-defaults")
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    if (@($TorDefaults).Count -gt 0 -and
+        @($RequiredTorAssets | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0) {
         $TorRoot = $CandidateRoot
         break
     }

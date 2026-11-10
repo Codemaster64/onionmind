@@ -102,6 +102,28 @@ class BackgroundTorTests(unittest.TestCase):
         local_probe.assert_not_called()
         network_probe.assert_not_called()
 
+    def test_hidden_start_finds_torrc_defaults_beside_tor_exe(self) -> None:
+        """Tor Browser 15 moved torrc-defaults next to tor.exe; the user torrc stayed."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Tor Browser"
+            tor_dir = root / "Browser" / "TorBrowser" / "Tor"
+            data = root / "Browser" / "TorBrowser" / "Data" / "Tor"
+            tor_dir.mkdir(parents=True)
+            data.mkdir(parents=True)
+            for path in (tor_dir / "tor.exe", tor_dir / "torrc-defaults", data / "torrc"):
+                path.touch()
+            process = mock.Mock(pid=1234)
+            process.poll.return_value = None
+            with mock.patch.object(onionmind.os, "name", "nt"), \
+                 mock.patch.object(onionmind, "_tor_browser_roots", return_value=[str(root)]), \
+                 mock.patch.object(onionmind, "tor_proxy_port", side_effect=[None, 9150]), \
+                 mock.patch.object(onionmind.subprocess, "Popen", return_value=process) as popen:
+                self.assertEqual(onionmind.start_tor_hidden(timeout=1), 9150)
+            argv = popen.call_args.args[0]
+            self.assertEqual(Path(argv[argv.index("--defaults-torrc") + 1]), tor_dir / "torrc-defaults")
+            self.assertEqual(Path(argv[argv.index("-f") + 1]), data / "torrc")
+            onionmind._managed_tor_process = None
+
     def test_hidden_start_runs_tor_exe_without_a_window(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "Tor Browser"
